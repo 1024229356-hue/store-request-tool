@@ -119,25 +119,46 @@ def load_env_file() -> None:
         os.environ[key] = value.strip().strip("\"'")
 
 
-def get_admin_credentials() -> Tuple[str, str]:
+def parse_admin_users(raw_users: str) -> List[Tuple[str, str]]:
+    users: List[Tuple[str, str]] = []
+    for raw_item in raw_users.split(","):
+        username, separator, password = raw_item.partition(":")
+        if not separator:
+            continue
+        username = username.strip()
+        password = password.strip()
+        if username and password:
+            users.append((username, password))
+    return users
+
+
+def get_admin_credentials() -> List[Tuple[str, str]]:
+    admin_users = os.environ.get("ADMIN_USERS")
+    if admin_users is not None:
+        users = parse_admin_users(admin_users)
+        if users:
+            return users
+        raise HTTPException(status_code=503, detail="Admin credentials are not configured.")
+
     username = os.environ.get("ADMIN_USERNAME", "").strip()
     password = os.environ.get("ADMIN_PASSWORD", "")
     if not username or not password:
         raise HTTPException(status_code=503, detail="Admin credentials are not configured.")
-    return username, password
+    return [(username, password)]
 
 
 def require_admin(credentials: HTTPBasicCredentials = Depends(admin_security)) -> str:
-    expected_username, expected_password = get_admin_credentials()
-    username_ok = secrets.compare_digest(credentials.username, expected_username)
-    password_ok = secrets.compare_digest(credentials.password, expected_password)
-    if not (username_ok and password_ok):
-        raise HTTPException(
-            status_code=http_status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid admin credentials.",
-            headers={"WWW-Authenticate": "Basic"},
-        )
-    return credentials.username
+    input_username = credentials.username.strip()
+    for expected_username, expected_password in get_admin_credentials():
+        username_ok = secrets.compare_digest(input_username, expected_username)
+        password_ok = secrets.compare_digest(credentials.password, expected_password)
+        if username_ok and password_ok:
+            return expected_username
+    raise HTTPException(
+        status_code=http_status.HTTP_401_UNAUTHORIZED,
+        detail="Invalid admin credentials.",
+        headers={"WWW-Authenticate": "Basic"},
+    )
 
 
 def get_db_path() -> Path:

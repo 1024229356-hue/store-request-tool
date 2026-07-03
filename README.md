@@ -28,6 +28,12 @@ ADMIN_USERNAME
 ADMIN_PASSWORD
 ```
 
+也可以使用多账号配置：
+
+```text
+ADMIN_USERS=admin:123456,caigou:123456,yunying:123456
+```
+
 上传图片通过后台登录保护访问，工单详情页中的图片地址为 `/admin/uploads/{filename}`。不要把 `uploads/` 配置成公开静态目录。
 
 ## 访问地址
@@ -106,6 +112,12 @@ nano .env
 ```text
 ADMIN_USERNAME=admin
 ADMIN_PASSWORD=change-me
+```
+
+正式使用建议改为多账号：
+
+```text
+ADMIN_USERS=admin:123456,caigou:123456,yunying:123456
 ```
 
 3. 运行部署脚本：
@@ -242,6 +254,27 @@ config/system.json
 ```
 
 如果配置为空，系统仍可使用，详情页的处理人可以不指定。
+
+### 后台多账号配置
+
+后台账号配置在 `.env` 中维护，`.env` 不要上传 GitHub。正式试运行建议使用 `ADMIN_USERS`：
+
+```text
+ADMIN_USERS=admin:123456,caigou:123456,yunying:123456
+```
+
+- 多账号之间用英文逗号分隔。
+- 用户名和密码之间用英文冒号分隔。
+- 用户名和密码前后空格会自动去掉。
+- 修改 `.env` 后需要重启 `run.bat` 或 systemd 服务。
+- 本版本多个账号权限相同，不区分角色。
+
+旧的单账号配置仍然兼容：
+
+```text
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=change-me
+```
 
 ### 如何修改系统配置
 

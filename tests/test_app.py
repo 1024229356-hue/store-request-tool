@@ -71,18 +71,32 @@ def write_config(config_dir, overrides=None):
         (config_dir / filename).write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def build_client(tmp_path, monkeypatch, config_overrides=None, write_configs=True):
+def build_client(
+    tmp_path,
+    monkeypatch,
+    config_overrides=None,
+    write_configs=True,
+    admin_auth=ADMIN_AUTH,
+    admin_users=None,
+):
     config_dir = tmp_path / "config"
     if write_configs:
         write_config(config_dir, config_overrides)
     monkeypatch.setenv("STORE_REQUEST_DB_PATH", str(tmp_path / "tickets.db"))
     monkeypatch.setenv("STORE_REQUEST_UPLOAD_DIR", str(tmp_path / "uploads"))
     monkeypatch.setenv("STORE_REQUEST_CONFIG_DIR", str(config_dir))
-    monkeypatch.setenv("ADMIN_USERNAME", ADMIN_AUTH[0])
-    monkeypatch.setenv("ADMIN_PASSWORD", ADMIN_AUTH[1])
+    block_dotenv_admin_users = admin_users is None
+    if admin_users is None:
+        monkeypatch.setenv("ADMIN_USERS", "")
+    else:
+        monkeypatch.setenv("ADMIN_USERS", admin_users)
+    monkeypatch.setenv("ADMIN_USERNAME", admin_auth[0])
+    monkeypatch.setenv("ADMIN_PASSWORD", admin_auth[1])
     monkeypatch.syspath_prepend(str(PROJECT_DIR))
     sys.modules.pop("main", None)
     main = importlib.import_module("main")
+    if block_dotenv_admin_users:
+        monkeypatch.delenv("ADMIN_USERS", raising=False)
     return TestClient(main.app), main
 
 
@@ -125,6 +139,42 @@ def rows_for(tmp_path, table_name):
     with sqlite3.connect(tmp_path / "tickets.db") as connection:
         connection.row_factory = sqlite3.Row
         return [dict(row) for row in connection.execute(f"SELECT * FROM {table_name} ORDER BY id")]
+
+
+def test_admin_users_allows_multiple_accounts_and_logs_actual_operator(tmp_path, monkeypatch):
+    client, _ = build_client(
+        tmp_path,
+        monkeypatch,
+        admin_auth=("legacy-admin", "legacy-secret"),
+        admin_users=" admin : 123456 , caigou : 123456 , baduser: , :badpass ",
+    )
+
+    assert client.get("/admin", auth=("admin", "123456")).status_code == 200
+    assert client.get("/admin", auth=("caigou", "123456")).status_code == 200
+    assert client.get("/admin", auth=("caigou", "wrong-password")).status_code == 401
+    assert client.get("/admin", auth=("legacy-admin", "legacy-secret")).status_code == 401
+
+    response = submit_ticket(client)
+    assert response.status_code == 200
+
+    update_response = client.post(
+        "/admin/ticket/1",
+        data={"status": "处理中", "assigned_to": "采购", "handler_note": "采购账号处理"},
+        auth=("caigou", "123456"),
+        follow_redirects=False,
+    )
+    assert update_response.status_code == 303
+
+    logs = rows_for(tmp_path, "ticket_logs")
+    assert len(logs) == 1
+    assert logs[0]["operator"] == "caigou"
+
+
+def test_legacy_admin_credentials_still_work_when_admin_users_missing(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch, admin_auth=("legacy-admin", "legacy-secret"))
+
+    assert client.get("/admin", auth=("legacy-admin", "legacy-secret")).status_code == 200
+    assert client.get("/admin", auth=("legacy-admin", "wrong-password")).status_code == 401
 
 
 def test_submit_admin_security_lifecycle_export_and_persistence(tmp_path, monkeypatch):
@@ -219,7 +269,9 @@ def test_submit_admin_security_lifecycle_export_and_persistence(tmp_path, monkey
     assert isinstance(sheet["S2"].value, (int, float))
     assert sheet["T2"].value in ("是", "否")
 
+    monkeypatch.setenv("ADMIN_USERS", "")
     restarted_client = TestClient(main.create_app())
+    monkeypatch.delenv("ADMIN_USERS", raising=False)
     restarted_admin_page = restarted_client.get("/admin", auth=ADMIN_AUTH)
     assert restarted_admin_page.status_code == 200
     assert ticket_no in restarted_admin_page.text
@@ -394,11 +446,13 @@ def test_legacy_database_is_migrated_without_losing_existing_rows(tmp_path, monk
     monkeypatch.setenv("STORE_REQUEST_DB_PATH", str(db_path))
     monkeypatch.setenv("STORE_REQUEST_UPLOAD_DIR", str(tmp_path / "uploads"))
     monkeypatch.setenv("STORE_REQUEST_CONFIG_DIR", str(config_dir))
+    monkeypatch.setenv("ADMIN_USERS", "")
     monkeypatch.setenv("ADMIN_USERNAME", ADMIN_AUTH[0])
     monkeypatch.setenv("ADMIN_PASSWORD", ADMIN_AUTH[1])
     monkeypatch.syspath_prepend(str(PROJECT_DIR))
     sys.modules.pop("main", None)
     main = importlib.import_module("main")
+    monkeypatch.delenv("ADMIN_USERS", raising=False)
     client = TestClient(main.app)
 
     with sqlite3.connect(db_path) as connection:
