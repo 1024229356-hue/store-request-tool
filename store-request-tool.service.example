@@ -1,0 +1,16 @@
+[Unit]
+Description=Store Request Tool
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/store-request-tool
+EnvironmentFile=/opt/store-request-tool/.env
+ExecStart=/opt/store-request-tool/.venv/bin/python -m uvicorn main:app --host 0.0.0.0 --port 8701
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,5 +1,6 @@
 import json
 import os
+import secrets
 import sqlite3
 import uuid
 from datetime import datetime
@@ -8,8 +9,9 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 from urllib.parse import quote
 
-from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile, status as http_status
 from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from openpyxl import Workbook
@@ -30,6 +32,8 @@ URGENCY_LEVELS = ["普通", "加急", "当天必须处理"]
 STATUSES = ["待处理", "处理中", "待门店补充", "已完成", "已驳回"]
 ALLOWED_IMAGE_EXTENSIONS = {"jpg", "jpeg", "png", "webp"}
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
+ENV_FILE = BASE_DIR / ".env"
+admin_security = HTTPBasic()
 
 EXCEL_HEADERS = [
     "工单号",
@@ -48,6 +52,41 @@ EXCEL_HEADERS = [
     "处理备注",
     "最后更新时间",
 ]
+
+
+def load_env_file() -> None:
+    if not ENV_FILE.exists():
+        return
+    for raw_line in ENV_FILE.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if not key or key in os.environ:
+            continue
+        os.environ[key] = value.strip().strip("\"'")
+
+
+def get_admin_credentials() -> Tuple[str, str]:
+    username = os.environ.get("ADMIN_USERNAME", "").strip()
+    password = os.environ.get("ADMIN_PASSWORD", "")
+    if not username or not password:
+        raise HTTPException(status_code=503, detail="Admin credentials are not configured.")
+    return username, password
+
+
+def require_admin(credentials: HTTPBasicCredentials = Depends(admin_security)) -> str:
+    expected_username, expected_password = get_admin_credentials()
+    username_ok = secrets.compare_digest(credentials.username, expected_username)
+    password_ok = secrets.compare_digest(credentials.password, expected_password)
+    if not (username_ok and password_ok):
+        raise HTTPException(
+            status_code=http_status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid admin credentials.",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+    return credentials.username
 
 
 def get_db_path() -> Path:
@@ -376,6 +415,7 @@ def build_excel(tickets: List[Dict[str, object]]) -> BytesIO:
 
 
 def create_app() -> FastAPI:
+    load_env_file()
     ensure_directories()
     init_db()
 
@@ -497,6 +537,7 @@ def create_app() -> FastAPI:
     @app.get("/admin", response_class=HTMLResponse)
     def admin_page(
         request: Request,
+        _admin: str = Depends(require_admin),
         store_name: str = Query(""),
         request_type: str = Query(""),
         urgency: str = Query(""),
@@ -536,7 +577,12 @@ def create_app() -> FastAPI:
         )
 
     @app.get("/admin/ticket/{ticket_id}", response_class=HTMLResponse)
-    def ticket_detail(request: Request, ticket_id: int, saved: str = Query("")) -> HTMLResponse:
+    def ticket_detail(
+        request: Request,
+        ticket_id: int,
+        saved: str = Query(""),
+        _admin: str = Depends(require_admin),
+    ) -> HTMLResponse:
         ticket = fetch_ticket(ticket_id)
         if not ticket:
             raise HTTPException(status_code=404, detail="工单不存在")
@@ -556,6 +602,7 @@ def create_app() -> FastAPI:
     @app.post("/admin/ticket/{ticket_id}")
     def update_ticket(
         ticket_id: int,
+        _admin: str = Depends(require_admin),
         status: str = Form(""),
         handler_note: str = Form(""),
     ) -> RedirectResponse:
@@ -572,6 +619,7 @@ def create_app() -> FastAPI:
 
     @app.get("/admin/export")
     def export_tickets(
+        _admin: str = Depends(require_admin),
         store_name: str = Query(""),
         request_type: str = Query(""),
         urgency: str = Query(""),

@@ -14,6 +14,19 @@ python -m uvicorn main:app --host 127.0.0.1 --port 8701
 
 首次启动会自动初始化 `data/tickets.db`，并自动创建 `uploads` 目录。
 
+生产环境启动方式：
+
+```bash
+python -m uvicorn main:app --host 0.0.0.0 --port 8701
+```
+
+后台访问需要登录，账号密码从环境变量读取：
+
+```text
+ADMIN_USERNAME
+ADMIN_PASSWORD
+```
+
 ## 访问地址
 
 - 门店提报页：http://127.0.0.1:8701/submit
@@ -61,6 +74,85 @@ http://127.0.0.1:8701/admin/export
 ```
 
 如果当前没有工单，也会导出只有表头的 Excel 文件。
+
+## 阿里云 Ubuntu 部署
+
+以下示例以 Ubuntu 24.04 和项目目录 `/opt/store-request-tool` 为例。若使用其他目录，请同步修改 systemd 服务文件中的 `WorkingDirectory`、`EnvironmentFile` 和 `ExecStart`。
+
+1. 安装基础环境并拉取代码：
+
+```bash
+sudo apt update
+sudo apt install -y git python3 python3-venv
+cd /opt
+sudo git clone https://github.com/1024229356-hue/store-request-tool.git
+sudo chown -R $USER:$USER /opt/store-request-tool
+cd /opt/store-request-tool
+```
+
+2. 创建 `.env`：
+
+```bash
+cp .env.example .env
+nano .env
+```
+
+将示例密码改成自己的后台密码：
+
+```text
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=change-me
+```
+
+3. 运行部署脚本：
+
+```bash
+chmod +x deploy.sh backup.sh
+./deploy.sh
+sudo chown -R www-data:www-data /opt/store-request-tool
+```
+
+4. 配置 systemd：
+
+```bash
+sudo cp store-request-tool.service.example /etc/systemd/system/store-request-tool.service
+sudo nano /etc/systemd/system/store-request-tool.service
+sudo systemctl daemon-reload
+sudo systemctl enable store-request-tool
+```
+
+确认服务文件中的项目目录和运行用户正确后启动：
+
+```bash
+sudo systemctl start store-request-tool
+```
+
+5. 常用运维命令：
+
+```bash
+sudo systemctl stop store-request-tool
+sudo systemctl restart store-request-tool
+sudo systemctl status store-request-tool
+sudo journalctl -u store-request-tool -f
+```
+
+6. 阿里云防火墙放行 `8701`：
+
+- 在阿里云 ECS 安全组入方向放行 TCP `8701`。
+- 如果服务器启用了 UFW，也执行：
+
+```bash
+sudo ufw allow 8701/tcp
+```
+
+完成后访问：
+
+```text
+http://服务器公网IP:8701/submit
+http://服务器公网IP:8701/admin
+```
+
+访问后台和 Excel 导出时，浏览器会要求输入 `.env` 中配置的账号密码。
 
 ## 如何新增门店
 

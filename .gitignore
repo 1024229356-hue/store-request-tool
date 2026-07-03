@@ -3,6 +3,7 @@
 data/*.db
 data/*.sqlite
 uploads/
+backups/
 *.log
 .venv/
 venv/

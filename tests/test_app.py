@@ -9,11 +9,14 @@ from openpyxl import load_workbook
 
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
+ADMIN_AUTH = ("regional-admin", "very-secret-value")
 
 
 def build_client(tmp_path, monkeypatch):
     monkeypatch.setenv("STORE_REQUEST_DB_PATH", str(tmp_path / "tickets.db"))
     monkeypatch.setenv("STORE_REQUEST_UPLOAD_DIR", str(tmp_path / "uploads"))
+    monkeypatch.setenv("ADMIN_USERNAME", ADMIN_AUTH[0])
+    monkeypatch.setenv("ADMIN_PASSWORD", ADMIN_AUTH[1])
     monkeypatch.syspath_prepend(str(PROJECT_DIR))
     sys.modules.pop("main", None)
     main = importlib.import_module("main")
@@ -51,25 +54,31 @@ def test_submit_ticket_with_image_admin_update_export_and_persistence(tmp_path, 
     uploaded_files = list((tmp_path / "uploads").glob("*.png"))
     assert len(uploaded_files) == 1
 
-    admin_page = client.get("/admin")
+    assert client.get("/admin").status_code == 401
+    assert client.get("/admin", auth=("admin", "change-me")).status_code == 401
+    admin_page = client.get("/admin", auth=ADMIN_AUTH)
     assert admin_page.status_code == 200
     assert ticket_no in admin_page.text
     assert "测试商品" in admin_page.text
 
+    assert client.get("/admin/ticket/1").status_code == 401
+    assert client.post("/admin/ticket/1", data={"status": main.STATUSES[1]}).status_code == 401
     update_response = client.post(
         "/admin/ticket/1",
         data={"status": "处理中", "handler_note": "已安排总部同事处理"},
+        auth=ADMIN_AUTH,
         follow_redirects=False,
     )
     assert update_response.status_code == 303
 
-    detail_page = client.get("/admin/ticket/1")
+    detail_page = client.get("/admin/ticket/1", auth=ADMIN_AUTH)
     assert detail_page.status_code == 200
     assert "处理中" in detail_page.text
     assert "已安排总部同事处理" in detail_page.text
     assert "/uploads/" in detail_page.text
 
-    export_response = client.get("/admin/export")
+    assert client.get("/admin/export").status_code == 401
+    export_response = client.get("/admin/export", auth=ADMIN_AUTH)
     assert export_response.status_code == 200
     assert export_response.headers["content-type"].startswith(
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -83,7 +92,7 @@ def test_submit_ticket_with_image_admin_update_export_and_persistence(tmp_path, 
     assert sheet["N2"].value == "已安排总部同事处理"
 
     restarted_client = TestClient(main.create_app())
-    restarted_admin_page = restarted_client.get("/admin")
+    restarted_admin_page = restarted_client.get("/admin", auth=ADMIN_AUTH)
     assert restarted_admin_page.status_code == 200
     assert ticket_no in restarted_admin_page.text
 
@@ -104,7 +113,7 @@ def test_submit_rejects_bad_quantity_and_bad_image_type(tmp_path, monkeypatch):
     )
     assert bad_quantity.status_code == 400
     assert "数量只能填写数字" in bad_quantity.text
-    assert "REQ-" not in client.get("/admin").text
+    assert "REQ-" not in client.get("/admin", auth=ADMIN_AUTH).text
 
     bad_image = client.post(
         "/submit",
@@ -119,13 +128,15 @@ def test_submit_rejects_bad_quantity_and_bad_image_type(tmp_path, monkeypatch):
     )
     assert bad_image.status_code == 400
     assert "图片仅支持" in bad_image.text
-    assert "REQ-" not in client.get("/admin").text
+    assert "REQ-" not in client.get("/admin", auth=ADMIN_AUTH).text
 
 
 def test_export_without_data_still_contains_headers(tmp_path, monkeypatch):
     client, _ = build_client(tmp_path, monkeypatch)
 
-    response = client.get("/admin/export")
+    assert client.get("/admin/export").status_code == 401
+
+    response = client.get("/admin/export", auth=ADMIN_AUTH)
     assert response.status_code == 200
     workbook = load_workbook(BytesIO(response.content))
     sheet = workbook.active
