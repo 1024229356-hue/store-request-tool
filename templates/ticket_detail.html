@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>工单详情</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="page-admin">
+  <header class="admin-topbar">
+    <div>
+      <p class="eyebrow">工单详情</p>
+      <h1>{{ ticket.ticket_no }}</h1>
+    </div>
+    <a class="ghost-button" href="/admin">返回列表</a>
+  </header>
+
+  <main class="detail-shell">
+    {% if saved %}
+    <div class="alert alert-success">处理信息已保存。</div>
+    {% endif %}
+
+    <section class="detail-layout">
+      <div class="detail-main">
+        <section class="detail-section">
+          <h2>提交信息</h2>
+          <dl class="detail-grid">
+            <div><dt>提交时间</dt><dd>{{ ticket.created_at }}</dd></div>
+            <div><dt>最后更新时间</dt><dd>{{ ticket.updated_at }}</dd></div>
+            <div><dt>门店</dt><dd>{{ ticket.store_name }}</dd></div>
+            <div><dt>提报人</dt><dd>{{ ticket.submitter }}</dd></div>
+            <div><dt>需求类型</dt><dd>{{ ticket.request_type }}</dd></div>
+            <div><dt>紧急程度</dt><dd><span class="badge urgency-{{ ticket.urgency }}">{{ ticket.urgency }}</span></dd></div>
+            <div><dt>品牌</dt><dd>{{ ticket.brand or '-' }}</dd></div>
+            <div><dt>商品名称</dt><dd>{{ ticket.product_name or '-' }}</dd></div>
+            <div><dt>规格条码</dt><dd>{{ ticket.sku_barcode or '-' }}</dd></div>
+            <div><dt>数量</dt><dd>{{ ticket.quantity if ticket.quantity is not none else '-' }}</dd></div>
+            <div><dt>期望完成时间</dt><dd>{{ ticket.expected_finish_date or '-' }}</dd></div>
+            <div><dt>当前状态</dt><dd><span class="badge status-{{ ticket.status }}">{{ ticket.status }}</span></dd></div>
+          </dl>
+        </section>
+
+        <section class="detail-section">
+          <h2>问题说明</h2>
+          <p class="description-box">{{ ticket.description }}</p>
+        </section>
+
+        <section class="detail-section">
+          <h2>图片</h2>
+          <div class="uploaded-images">
+            {% for image in images %}
+            <a class="image-card" href="/{{ image.image_path }}" target="_blank">
+              <img src="/{{ image.image_path }}" alt="工单图片" onerror="this.parentElement.classList.add('missing'); this.remove();">
+              <span>{{ image.image_path }}</span>
+            </a>
+            {% else %}
+            <p class="subtle">未上传图片。</p>
+            {% endfor %}
+          </div>
+        </section>
+      </div>
+
+      <aside class="handler-panel">
+        <h2>总部处理</h2>
+        <form method="post" action="/admin/ticket/{{ ticket.id }}">
+          <label>
+            <span>状态</span>
+            <select name="status">
+              {% for item in statuses %}
+              <option value="{{ item }}" {% if ticket.status == item %}selected{% endif %}>{{ item }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>
+            <span>处理备注</span>
+            <textarea name="handler_note" rows="8">{{ ticket.handler_note or '' }}</textarea>
+          </label>
+          <button class="primary-button" type="submit">保存处理结果</button>
+        </form>
+      </aside>
+    </section>
+  </main>
+</body>
+</html>

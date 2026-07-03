@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>总部后台</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="page-admin">
+  <header class="admin-topbar">
+    <div>
+      <p class="eyebrow">总部后台</p>
+      <h1>门店需求工单</h1>
+    </div>
+    <a class="secondary-button" href="{{ export_url }}">导出 Excel</a>
+  </header>
+
+  <main class="admin-shell">
+    <form class="filter-bar" method="get" action="/admin">
+      <label>
+        <span>门店</span>
+        <select name="store_name">
+          <option value="">全部</option>
+          {% for store in stores %}
+          <option value="{{ store }}" {% if filters.get('store_name') == store %}selected{% endif %}>{{ store }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>
+        <span>需求类型</span>
+        <select name="request_type">
+          <option value="">全部</option>
+          {% for item in request_types %}
+          <option value="{{ item }}" {% if filters.get('request_type') == item %}selected{% endif %}>{{ item }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>
+        <span>紧急程度</span>
+        <select name="urgency">
+          <option value="">全部</option>
+          {% for item in urgency_levels %}
+          <option value="{{ item }}" {% if filters.get('urgency') == item %}selected{% endif %}>{{ item }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>
+        <span>状态</span>
+        <select name="status">
+          <option value="">全部</option>
+          {% for item in statuses %}
+          <option value="{{ item }}" {% if filters.get('status') == item %}selected{% endif %}>{{ item }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>
+        <span>开始日期</span>
+        <input type="date" name="date_start" value="{{ filters.get('date_start', '') }}">
+      </label>
+      <label>
+        <span>结束日期</span>
+        <input type="date" name="date_end" value="{{ filters.get('date_end', '') }}">
+      </label>
+      <label class="filter-keyword">
+        <span>关键词</span>
+        <input type="search" name="keyword" value="{{ filters.get('keyword', '') }}" placeholder="工单号、商品、说明">
+      </label>
+      <label>
+        <span>排序</span>
+        <select name="sort">
+          <option value="newest" {% if sort == 'newest' %}selected{% endif %}>提交时间倒序</option>
+          <option value="urgency" {% if sort == 'urgency' %}selected{% endif %}>紧急程度优先</option>
+          <option value="status" {% if sort == 'status' %}selected{% endif %}>状态优先</option>
+        </select>
+      </label>
+      <button class="primary-button compact" type="submit">筛选</button>
+      <a class="ghost-button compact" href="/admin">重置</a>
+    </form>
+
+    <section class="table-wrap">
+      <table class="ticket-table">
+        <thead>
+          <tr>
+            <th>工单号</th>
+            <th>提交时间</th>
+            <th>门店</th>
+            <th>提报人</th>
+            <th>需求类型</th>
+            <th>紧急程度</th>
+            <th>品牌</th>
+            <th>商品名称</th>
+            <th>规格条码</th>
+            <th>数量</th>
+            <th>问题说明摘要</th>
+            <th>当前状态</th>
+            <th>最后更新时间</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for ticket in tickets %}
+          <tr>
+            <td><a class="table-link" href="/admin/ticket/{{ ticket.id }}">{{ ticket.ticket_no }}</a></td>
+            <td>{{ ticket.created_at }}</td>
+            <td>{{ ticket.store_name }}</td>
+            <td>{{ ticket.submitter }}</td>
+            <td>{{ ticket.request_type }}</td>
+            <td><span class="badge urgency-{{ ticket.urgency }}">{{ ticket.urgency }}</span></td>
+            <td>{{ ticket.brand or '' }}</td>
+            <td>{{ ticket.product_name or '' }}</td>
+            <td>{{ ticket.sku_barcode or '' }}</td>
+            <td>{{ ticket.quantity if ticket.quantity is not none else '' }}</td>
+            <td class="summary-cell" title="{{ ticket.description }}">{{ ticket.description_summary }}</td>
+            <td><span class="badge status-{{ ticket.status }}">{{ ticket.status }}</span></td>
+            <td>{{ ticket.updated_at }}</td>
+          </tr>
+          {% else %}
+          <tr>
+            <td class="empty-cell" colspan="13">暂无工单</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </section>
+  </main>
+</body>
+</html>

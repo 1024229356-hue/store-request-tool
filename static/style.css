@@ -1,0 +1,518 @@
+:root {
+  color-scheme: light;
+  --bg: #f5f7fb;
+  --panel: #ffffff;
+  --text: #1d2733;
+  --muted: #697586;
+  --line: #d9e1ec;
+  --primary: #1b6fd2;
+  --primary-strong: #155db3;
+  --danger: #b42318;
+  --danger-bg: #fee4e2;
+  --success: #087443;
+  --success-bg: #dcfae6;
+  --warn: #b54708;
+  --warn-bg: #fff4d6;
+  --radius: 8px;
+  font-family: "Microsoft YaHei", "PingFang SC", Arial, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+}
+
+a {
+  color: inherit;
+}
+
+.page-submit {
+  min-height: 100vh;
+  background: #eef3f9;
+}
+
+.mobile-shell {
+  width: min(100%, 720px);
+  margin: 0 auto;
+  padding: 20px 14px 40px;
+}
+
+.page-header,
+.success-panel,
+.form-panel,
+.handler-panel,
+.detail-section,
+.filter-bar,
+.table-wrap {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.page-header {
+  padding: 18px 18px 16px;
+  margin-bottom: 12px;
+}
+
+.eyebrow {
+  margin: 0 0 4px;
+  color: var(--primary);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+h1,
+h2 {
+  margin: 0;
+  line-height: 1.25;
+}
+
+h1 {
+  font-size: 26px;
+}
+
+h2 {
+  font-size: 18px;
+  margin-bottom: 14px;
+}
+
+.subtle {
+  color: var(--muted);
+  margin: 8px 0 0;
+  line-height: 1.5;
+}
+
+.form-panel {
+  padding: 16px;
+}
+
+label {
+  display: block;
+  margin-bottom: 14px;
+}
+
+label span {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+strong {
+  color: var(--danger);
+}
+
+input,
+select,
+textarea {
+  width: 100%;
+  min-height: 42px;
+  border: 1px solid #c9d4e2;
+  border-radius: 6px;
+  padding: 9px 10px;
+  color: var(--text);
+  background: #fff;
+  font: inherit;
+}
+
+textarea {
+  resize: vertical;
+  line-height: 1.55;
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(27, 111, 210, 0.14);
+  outline: none;
+}
+
+.grid-two {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.primary-button,
+.secondary-button,
+.ghost-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 42px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  padding: 0 16px;
+  font-weight: 700;
+  text-decoration: none;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.primary-button {
+  width: 100%;
+  background: var(--primary);
+  color: #fff;
+}
+
+.primary-button:hover {
+  background: var(--primary-strong);
+}
+
+.secondary-button {
+  background: #163b65;
+  color: #fff;
+}
+
+.ghost-button {
+  background: #fff;
+  border-color: var(--line);
+  color: var(--text);
+}
+
+.compact {
+  width: auto;
+  min-height: 38px;
+}
+
+.alert {
+  border-radius: var(--radius);
+  margin: 12px 0;
+  padding: 12px 14px;
+  font-weight: 700;
+}
+
+.alert-error {
+  background: var(--danger-bg);
+  color: var(--danger);
+  border: 1px solid #fecdca;
+}
+
+.alert-success {
+  background: var(--success-bg);
+  color: var(--success);
+  border: 1px solid #abefc6;
+}
+
+.success-panel {
+  margin-top: 40px;
+  padding: 28px 18px;
+  text-align: center;
+}
+
+.success-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 52px;
+  height: 52px;
+  margin-bottom: 12px;
+  border-radius: 50%;
+  background: var(--success-bg);
+  color: var(--success);
+  font-weight: 800;
+}
+
+.success-panel .primary-button {
+  margin-top: 14px;
+}
+
+.image-preview {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+  gap: 8px;
+  margin: -4px 0 14px;
+}
+
+.preview-item {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fafcff;
+  padding: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.preview-item img {
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  object-fit: cover;
+  border-radius: 4px;
+  margin-bottom: 6px;
+}
+
+.preview-item span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.admin-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 24px;
+  background: #fff;
+  border-bottom: 1px solid var(--line);
+}
+
+.admin-shell,
+.detail-shell {
+  padding: 18px 24px 36px;
+}
+
+.filter-bar {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(150px, 1fr));
+  gap: 12px;
+  align-items: end;
+  padding: 14px;
+  margin-bottom: 14px;
+}
+
+.filter-keyword {
+  grid-column: span 2;
+}
+
+.table-wrap {
+  overflow-x: auto;
+}
+
+.ticket-table {
+  width: 100%;
+  min-width: 1320px;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+
+.ticket-table th,
+.ticket-table td {
+  border-bottom: 1px solid var(--line);
+  padding: 10px 9px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.ticket-table th {
+  position: sticky;
+  top: 0;
+  background: #eef3f9;
+  color: #344054;
+  font-size: 13px;
+}
+
+.ticket-table tr:hover td {
+  background: #f8fbff;
+}
+
+.table-link {
+  color: var(--primary);
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.summary-cell {
+  max-width: 260px;
+  line-height: 1.45;
+}
+
+.empty-cell {
+  text-align: center !important;
+  color: var(--muted);
+  padding: 28px !important;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  border-radius: 999px;
+  padding: 3px 9px;
+  font-size: 12px;
+  font-weight: 800;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+
+.urgency-普通 {
+  background: #eef4ff;
+  color: #1849a9;
+  border-color: #c7d7fe;
+}
+
+.urgency-加急 {
+  background: var(--warn-bg);
+  color: var(--warn);
+  border-color: #fedf89;
+}
+
+.urgency-当天必须处理 {
+  background: var(--danger-bg);
+  color: var(--danger);
+  border-color: #fecdca;
+}
+
+.status-待处理 {
+  background: #f2f4f7;
+  color: #344054;
+  border-color: #d0d5dd;
+}
+
+.status-处理中 {
+  background: #e0f2fe;
+  color: #075985;
+  border-color: #bae6fd;
+}
+
+.status-待门店补充 {
+  background: var(--warn-bg);
+  color: var(--warn);
+  border-color: #fedf89;
+}
+
+.status-已完成 {
+  background: var(--success-bg);
+  color: var(--success);
+  border-color: #abefc6;
+}
+
+.status-已驳回 {
+  background: var(--danger-bg);
+  color: var(--danger);
+  border-color: #fecdca;
+}
+
+.detail-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 340px;
+  gap: 16px;
+  align-items: start;
+}
+
+.detail-main {
+  display: grid;
+  gap: 14px;
+}
+
+.detail-section,
+.handler-panel {
+  padding: 16px;
+}
+
+.detail-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(160px, 1fr));
+  gap: 12px;
+  margin: 0;
+}
+
+.detail-grid div {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fafcff;
+}
+
+dt {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+dd {
+  margin: 5px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.description-box {
+  margin: 0;
+  line-height: 1.7;
+  white-space: pre-wrap;
+}
+
+.uploaded-images {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 12px;
+}
+
+.image-card {
+  display: block;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px;
+  text-decoration: none;
+  background: #fafcff;
+}
+
+.image-card img {
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  object-fit: cover;
+  border-radius: 4px;
+  display: block;
+  margin-bottom: 7px;
+}
+
+.image-card span {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.image-card.missing::before {
+  content: "图片文件缺失";
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 96px;
+  margin-bottom: 7px;
+  border-radius: 4px;
+  background: #f2f4f7;
+  color: var(--muted);
+}
+
+.handler-panel {
+  position: sticky;
+  top: 16px;
+}
+
+@media (max-width: 900px) {
+  .grid-two,
+  .filter-bar,
+  .detail-layout,
+  .detail-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .filter-keyword {
+    grid-column: span 1;
+  }
+
+  .admin-topbar {
+    align-items: flex-start;
+    flex-direction: column;
+    padding: 16px;
+  }
+
+  .admin-shell,
+  .detail-shell {
+    padding: 14px;
+  }
+
+  .handler-panel {
+    position: static;
+  }
+}
