@@ -34,7 +34,7 @@ ADMIN_PASSWORD
 ADMIN_USERS=admin:123456,caigou:123456,yunying:123456
 ```
 
-上传图片通过后台登录保护访问，工单详情页中的图片地址为 `/admin/uploads/{filename}`。不要把 `uploads/` 配置成公开静态目录。
+上传图片和普通文件都通过后台登录保护访问。图片地址为 `/admin/uploads/{filename}`，普通文件下载地址为 `/admin/files/{file_id}`。不要把 `uploads/` 配置成公开静态目录。
 
 ## 访问地址
 
@@ -50,7 +50,21 @@ ADMIN_USERS=admin:123456,caigou:123456,yunying:123456
 4. 按需填写品牌、商品名称、规格条码、数量、期望完成时间。
 5. 在问题说明中写清楚需求或异常情况。
 6. 可上传多张图片，支持 `jpg`、`jpeg`、`png`、`webp`，单张不超过 10MB，默认最多 5 张、总大小不超过 30MB。
-7. 提交后页面会显示工单号，格式为 `REQ-YYYYMMDD-四位流水号`。
+7. 可按需上传普通文件，例如 PDF、Word、Excel、CSV、TXT、ZIP、RAR。图片和文件在提交前都可以从待上传列表中删除。
+8. 提交后页面会显示工单号，格式为 `REQ-YYYYMMDD-四位流水号`。
+
+## 附件上传说明
+
+图片上传和文件上传是两个入口：
+
+- 图片用于问题截图、现场照片等，仍走 `images` 字段。
+- 普通文件用于表格、文档、压缩包等，走 `files` 字段。
+- 图片和文件在提交前都可以从待上传列表中删除。
+- 提交成功后，门店不能自行删除附件。如发现提交内容或附件错误，需要联系总部在后台删除，不要重复提交多次。
+- 后台查看图片、下载文件、删除附件都需要登录。
+- 普通文件允许格式和大小限制来自 `config/system.json`：`allowed_file_extensions`、`max_file_mb`、`max_file_count`、`max_total_file_upload_mb`。
+- `uploads/` 不要上传 GitHub。
+- `backup.sh` 会备份 `uploads/`，因此普通文件附件也会被一起备份。
 
 ## 总部如何处理
 
@@ -60,6 +74,8 @@ ADMIN_USERS=admin:123456,caigou:123456,yunying:123456
 4. 在详情页选择处理人、修改状态和处理备注。
 5. 点击保存后，系统会记录最后更新时间；状态改为“已完成”时会自动写入完成时间，重新打开时会清空完成时间。
 6. 每次状态、处理人或备注发生变化，详情页底部会保留处理日志。
+7. 详情页可查看图片和文件附件，普通文件通过 `/admin/files/{file_id}` 下载。
+8. 如门店提交错附件，总部可在详情页删除图片或文件，删除操作会写入处理日志。
 
 状态包括：
 
@@ -286,7 +302,11 @@ ADMIN_PASSWORD=change-me
   "max_image_count": 5,
   "max_total_upload_mb": 30,
   "page_size": 50,
-  "allowed_image_extensions": ["jpg", "jpeg", "png", "webp"]
+  "allowed_image_extensions": ["jpg", "jpeg", "png", "webp"],
+  "allowed_file_extensions": ["pdf", "doc", "docx", "xls", "xlsx", "csv", "txt", "zip", "rar"],
+  "max_file_mb": 20,
+  "max_file_count": 5,
+  "max_total_file_upload_mb": 50
 }
 ```
 
@@ -295,6 +315,12 @@ ADMIN_PASSWORD=change-me
 - `max_total_upload_mb`：每张工单图片总大小限制，默认 30MB。
 - `page_size`：后台列表每页工单数，默认 50。
 - `allowed_image_extensions`：允许上传的图片后缀，默认 `jpg`、`jpeg`、`png`、`webp`。
+- `allowed_file_extensions`：允许上传的普通文件后缀，默认 `pdf`、`doc`、`docx`、`xls`、`xlsx`、`csv`、`txt`、`zip`、`rar`。
+- `max_file_mb`：单个普通文件大小限制，默认 20MB。
+- `max_file_count`：每张工单最多上传普通文件数量，默认 5。
+- `max_total_file_upload_mb`：每张工单普通文件总大小限制，默认 50MB。
+
+普通文件格式必须走白名单。即使误配到白名单里，系统也会拒绝 `exe`、`bat`、`cmd`、`js`、`py`、`sh`、`php`、`jar`、`msi` 等可执行或脚本类后缀。
 
 服务端会使用 Pillow 校验图片是否真实可打开，并检查后缀与图片格式是否匹配。
 
@@ -316,15 +342,15 @@ ADMIN_PASSWORD=change-me
 
 ### 哪些配置改完需要重启服务
 
-- 通常不需要重启：`stores.json`、`request_types.json`、`urgency_levels.json`、`statuses.json`、`brands.json`、`handlers.json`、`system.json` 中的图片限制、分页大小、默认状态、导出文件名前缀。
+- 通常不需要重启：`stores.json`、`request_types.json`、`urgency_levels.json`、`statuses.json`、`brands.json`、`handlers.json`、`system.json` 中的图片/文件上传限制、分页大小、默认状态、导出文件名前缀。
 - 建议重启后生效：`system.json` 中的 `app_name`，以及 systemd 服务文件、`.env` 后台账号密码、端口监听方式等启动级配置。
 
-## 数据和图片位置
+## 数据和附件位置
 
 - 数据库：`data/tickets.db`
-- 上传图片：`uploads/`
+- 上传图片和普通文件：`uploads/`
 
-不要随意删除数据库文件或上传图片目录。删除数据库会清空所有工单记录，删除 `uploads/` 会导致历史工单图片无法查看。
+不要随意删除数据库文件或上传附件目录。删除数据库会清空所有工单记录，删除 `uploads/` 会导致历史工单图片无法查看、普通文件无法下载。
 
 ## 数据库升级说明
 
@@ -333,9 +359,10 @@ ADMIN_PASSWORD=change-me
 - `tickets.assigned_to`
 - `tickets.closed_at`
 - `ticket_logs`
+- `ticket_files`
 
-升级过程是兼容式迁移，不会清空 `tickets`、`ticket_images`，也不会删除 `uploads/`。上线前仍建议先备份数据库和图片。
+升级过程是兼容式迁移，不会清空 `tickets`、`ticket_images`，也不会删除 `uploads/`。上线前仍建议先备份数据库和附件。
 
 ## 备份说明
 
-项目提供 `backup.sh`，用于备份 `data/tickets.db` 和 `uploads/`。正式使用后建议每天定时执行一次，例如通过 crontab 调度。
+项目提供 `backup.sh`，用于备份 `data/tickets.db` 和 `uploads/`。正式使用后建议每天定时执行一次，例如通过 crontab 调度。图片和普通文件都保存在 `uploads/`，因此都会进入备份。

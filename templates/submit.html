@@ -11,7 +11,7 @@
     <section class="page-header">
       <p class="eyebrow">门店需求工单</p>
       <h1>需求提报</h1>
-      <p class="subtle">请把问题描述清楚，最多上传 {{ max_image_count }} 张图片，总大小不超过 {{ max_total_upload_mb }}MB。</p>
+      <p class="subtle">请把问题描述清楚，图片和文件可按需上传，提交前都可以从待上传列表中删除。</p>
     </section>
 
     {% if error %}
@@ -91,7 +91,20 @@
         <input name="images" type="file" accept="{{ image_accept }}" multiple data-image-input>
       </label>
       <p class="field-hint">支持 {{ image_accept }}，单张不超过 {{ max_image_mb }}MB。</p>
-      <div class="image-preview" data-image-preview></div>
+      <div class="upload-tools">
+        <button class="ghost-button compact upload-clear" type="button" data-image-clear>清空图片</button>
+      </div>
+      <div class="upload-preview image-preview" data-image-preview></div>
+
+      <label>
+        <span>文件上传</span>
+        <input name="files" type="file" accept="{{ file_accept }}" multiple data-file-input>
+      </label>
+      <p class="field-hint">支持 PDF、Word、Excel、CSV、TXT、ZIP、RAR 等文件，具体格式来自 config/system.json。最多 {{ max_file_count }} 个文件，单个不超过 {{ max_file_mb }}MB，总大小不超过 {{ max_total_file_upload_mb }}MB。</p>
+      <div class="upload-tools">
+        <button class="ghost-button compact upload-clear" type="button" data-file-clear>清空文件</button>
+      </div>
+      <div class="upload-preview file-preview" data-file-preview></div>
 
       <label>
         <span>期望完成时间</span>

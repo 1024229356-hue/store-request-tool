@@ -52,12 +52,39 @@
           <h2>图片</h2>
           <div class="uploaded-images">
             {% for image in images %}
-            <a class="image-card" href="{{ image.protected_url }}" target="_blank">
-              <img src="{{ image.protected_url }}" alt="工单图片" onerror="this.parentElement.classList.add('missing'); this.remove();">
+            <div class="image-card">
+              <a href="{{ image.protected_url }}" target="_blank">
+                <img src="{{ image.protected_url }}" alt="工单图片" onerror="this.closest('.image-card').classList.add('missing'); this.remove();">
+              </a>
               <span>{{ image.image_path }}</span>
-            </a>
+              <form method="post" action="/admin/ticket/{{ ticket.id }}/image/{{ image.id }}/delete">
+                <button class="danger-button compact" type="submit">删除附件</button>
+              </form>
+            </div>
             {% else %}
             <p class="subtle">未上传图片。</p>
+            {% endfor %}
+          </div>
+        </section>
+
+        <section class="detail-section">
+          <h2>文件附件</h2>
+          <div class="file-list">
+            {% for file in files %}
+            <div class="file-row">
+              <div class="file-info">
+                <strong>{{ file.original_filename }}</strong>
+                <span>{{ file.size_label }} · {{ file.uploaded_at }}</span>
+              </div>
+              <div class="file-actions">
+                <a class="ghost-button compact" href="{{ file.download_url }}">下载</a>
+                <form method="post" action="/admin/ticket/{{ ticket.id }}/file/{{ file.id }}/delete">
+                  <button class="danger-button compact" type="submit">删除文件</button>
+                </form>
+              </div>
+            </div>
+            {% else %}
+            <p class="subtle">未上传文件附件。</p>
             {% endfor %}
           </div>
         </section>
@@ -98,6 +125,7 @@
         <thead>
           <tr>
             <th>时间</th>
+            <th>操作</th>
             <th>操作人</th>
             <th>原状态</th>
             <th>新状态</th>
@@ -110,6 +138,7 @@
           {% for log in logs %}
           <tr>
             <td>{{ log.created_at }}</td>
+            <td>{{ log.action or '-' }}</td>
             <td>{{ log.operator or '-' }}</td>
             <td>{{ log.old_status or '-' }}</td>
             <td>{{ log.new_status or '-' }}</td>
@@ -119,7 +148,7 @@
           </tr>
           {% else %}
           <tr>
-            <td class="empty-cell" colspan="7">暂无处理日志</td>
+            <td class="empty-cell" colspan="8">暂无处理日志</td>
           </tr>
           {% endfor %}
         </tbody>

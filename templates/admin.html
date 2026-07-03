@@ -101,7 +101,7 @@
             <th>规格条码</th>
             <th>数量</th>
             <th>问题说明摘要</th>
-            <th>图片数</th>
+            <th>图片数 / 文件数</th>
             <th>当前状态</th>
             <th>处理人</th>
             <th>完成时间</th>
@@ -122,7 +122,7 @@
             <td>{{ ticket.sku_barcode or '' }}</td>
             <td>{{ ticket.quantity if ticket.quantity is not none else '' }}</td>
             <td class="summary-cell" title="{{ ticket.description }}">{{ ticket.description_summary }}</td>
-            <td>{{ ticket.image_count or 0 }}</td>
+            <td>图片 {{ ticket.image_count or 0 }} / 文件 {{ ticket.file_count or 0 }}</td>
             <td><span class="badge status-{{ ticket.status }}">{{ ticket.status }}</span></td>
             <td>{{ ticket.assigned_to or '' }}</td>
             <td>{{ ticket.closed_at or '' }}</td>

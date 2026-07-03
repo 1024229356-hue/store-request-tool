@@ -36,6 +36,10 @@ DEFAULT_TEST_CONFIG = {
         "page_size": 50,
         "max_image_count": 5,
         "max_total_upload_mb": 30,
+        "allowed_file_extensions": ["pdf", "doc", "docx", "xls", "xlsx", "csv", "txt", "zip", "rar"],
+        "max_file_mb": 20,
+        "max_file_count": 5,
+        "max_total_file_upload_mb": 50,
     },
 }
 
@@ -52,6 +56,8 @@ EXPECTED_EXPORT_HEADERS = [
     "数量",
     "问题说明",
     "图片路径",
+    "文件名称",
+    "文件路径",
     "期望完成时间",
     "当前状态",
     "处理人",
@@ -135,10 +141,74 @@ def submit_ticket_with_image(client, filename="issue.png", content=VALID_PNG, **
     return client.post("/submit", data=data, files=[("images", (filename, content, media_type))])
 
 
+def submit_ticket_with_file(client, filename="need-list.xlsx", content=b"sku,qty\nA001,1\n", **overrides):
+    data = {
+        "store_name": "南京门东店",
+        "submitter": "测试提报人",
+        "request_type": "建单需求",
+        "urgency": "加急",
+        "brand": "测试品牌",
+        "product_name": "测试商品",
+        "sku_barcode": "690000000001",
+        "quantity": "12",
+        "description": "这是一条带普通附件的自动化测试工单",
+        "expected_finish_date": "2026-07-04",
+    }
+    data.update(overrides)
+    return client.post(
+        "/submit",
+        data=data,
+        files=[("files", (filename, content, "application/octet-stream"))],
+    )
+
+
+def submit_ticket_with_image_and_file(
+    client,
+    image_filename="issue.png",
+    file_filename="need-list.xlsx",
+    file_content=b"sku,qty\nA001,1\n",
+    **overrides,
+):
+    data = {
+        "store_name": "南京门东店",
+        "submitter": "测试提报人",
+        "request_type": "建单需求",
+        "urgency": "加急",
+        "brand": "测试品牌",
+        "product_name": "测试商品",
+        "sku_barcode": "690000000001",
+        "quantity": "12",
+        "description": "这是一条同时带图片和普通附件的自动化测试工单",
+        "expected_finish_date": "2026-07-04",
+    }
+    data.update(overrides)
+    return client.post(
+        "/submit",
+        data=data,
+        files=[
+            ("images", (image_filename, VALID_PNG, "image/png")),
+            ("files", (file_filename, file_content, "application/octet-stream")),
+        ],
+    )
+
+
 def rows_for(tmp_path, table_name):
     with sqlite3.connect(tmp_path / "tickets.db") as connection:
         connection.row_factory = sqlite3.Row
         return [dict(row) for row in connection.execute(f"SELECT * FROM {table_name} ORDER BY id")]
+
+
+def test_submit_page_exposes_image_and_file_upload_inputs(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch)
+
+    submit_page = client.get("/submit")
+
+    assert submit_page.status_code == 200
+    assert 'name="images"' in submit_page.text
+    assert "data-image-input" in submit_page.text
+    assert 'name="files"' in submit_page.text
+    assert "data-file-input" in submit_page.text
+    assert "文件上传" in submit_page.text
 
 
 def test_admin_users_allows_multiple_accounts_and_logs_actual_operator(tmp_path, monkeypatch):
@@ -175,6 +245,51 @@ def test_legacy_admin_credentials_still_work_when_admin_users_missing(tmp_path, 
 
     assert client.get("/admin", auth=("legacy-admin", "legacy-secret")).status_code == 200
     assert client.get("/admin", auth=("legacy-admin", "wrong-password")).status_code == 401
+
+
+def test_file_upload_download_detail_admin_and_export(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch)
+    file_content = b"sku,qty\nA001,1\n"
+
+    response = submit_ticket_with_file(client, filename="采购清单.xlsx", content=file_content)
+    assert response.status_code == 200
+
+    ticket_files = rows_for(tmp_path, "ticket_files")
+    assert len(ticket_files) == 1
+    ticket_file = ticket_files[0]
+    assert ticket_file["original_filename"] == "采购清单.xlsx"
+    assert ticket_file["file_ext"] == "xlsx"
+    assert ticket_file["file_size"] == len(file_content)
+    assert ticket_file["stored_filename"].startswith("FILE-REQ-")
+    assert ticket_file["stored_filename"].endswith(".xlsx")
+    assert ticket_file["stored_filename"] != "采购清单.xlsx"
+    assert ticket_file["file_path"].startswith("uploads/")
+    assert (tmp_path / ticket_file["file_path"]).read_bytes() == file_content
+
+    assert client.get("/admin/files/1").status_code == 401
+    download_response = client.get("/admin/files/1", auth=ADMIN_AUTH)
+    assert download_response.status_code == 200
+    assert download_response.content == file_content
+    assert download_response.headers["content-disposition"].lower().startswith("attachment")
+    assert "%E9%87%87%E8%B4%AD%E6%B8%85%E5%8D%95.xlsx" in download_response.headers["content-disposition"]
+    assert client.get("/files/1").status_code == 404
+
+    detail_page = client.get("/admin/ticket/1", auth=ADMIN_AUTH)
+    assert detail_page.status_code == 200
+    assert "文件附件" in detail_page.text
+    assert "采购清单.xlsx" in detail_page.text
+    assert "/admin/files/1" in detail_page.text
+
+    admin_page = client.get("/admin", auth=ADMIN_AUTH)
+    assert admin_page.status_code == 200
+    assert "图片 0 / 文件 1" in admin_page.text
+
+    export_response = client.get("/admin/export", auth=ADMIN_AUTH)
+    workbook = load_workbook(BytesIO(export_response.content))
+    sheet = workbook.active
+    assert [cell.value for cell in sheet[1]] == EXPECTED_EXPORT_HEADERS
+    assert sheet["M2"].value == "采购清单.xlsx"
+    assert sheet["N2"].value == "/admin/files/1"
 
 
 def test_submit_admin_security_lifecycle_export_and_persistence(tmp_path, monkeypatch):
@@ -262,12 +377,14 @@ def test_submit_admin_security_lifecycle_export_and_persistence(tmp_path, monkey
     assert [cell.value for cell in sheet[1]] == EXPECTED_EXPORT_HEADERS
     assert sheet["A2"].value == ticket_no
     assert sheet["L2"].value == protected_path
-    assert sheet["M2"].value == "2026-07-04"
-    assert sheet["N2"].value == "处理中"
-    assert sheet["O2"].value == "采购"
-    assert sheet["P2"].value == "重新打开"
-    assert isinstance(sheet["S2"].value, (int, float))
-    assert sheet["T2"].value in ("是", "否")
+    assert sheet["M2"].value in ("", None)
+    assert sheet["N2"].value in ("", None)
+    assert sheet["O2"].value == "2026-07-04"
+    assert sheet["P2"].value == "处理中"
+    assert sheet["Q2"].value == "采购"
+    assert sheet["R2"].value == "重新打开"
+    assert isinstance(sheet["U2"].value, (int, float))
+    assert sheet["V2"].value in ("是", "否")
 
     monkeypatch.setenv("ADMIN_USERS", "")
     restarted_client = TestClient(main.create_app())
@@ -321,6 +438,117 @@ def test_upload_validation_rejects_fake_images_count_and_total_size(tmp_path, mo
     assert too_large_total.status_code == 400
     assert "图片总大小不能超过 1MB" in too_large_total.text
     assert "REQ-" not in client.get("/admin", auth=ADMIN_AUTH).text
+
+
+def test_file_upload_validation_rejects_extension_count_single_and_total_size(tmp_path, monkeypatch):
+    limited_file_config = {
+        "system.json": {
+            "app_name": "门店需求工单系统",
+            "port": 8701,
+            "max_image_mb": 10,
+            "allowed_image_extensions": ["jpg", "jpeg", "png", "webp"],
+            "default_status": "待处理",
+            "excel_filename_prefix": "门店需求工单",
+            "page_size": 50,
+            "max_image_count": 5,
+            "max_total_upload_mb": 30,
+            "allowed_file_extensions": ["txt"],
+            "max_file_mb": 1,
+            "max_file_count": 1,
+            "max_total_file_upload_mb": 1,
+        }
+    }
+    client, _ = build_client(tmp_path / "limited", monkeypatch, limited_file_config)
+
+    executable = submit_ticket_with_file(client, filename="danger.exe", content=b"MZ")
+    assert executable.status_code == 400
+    assert "文件仅支持 txt 格式" in executable.text
+
+    too_many = client.post(
+        "/submit",
+        data={
+            "store_name": "南京门东店",
+            "submitter": "测试提报人",
+            "request_type": "建单需求",
+            "urgency": "普通",
+            "description": "超过文件数量限制",
+        },
+        files=[
+            ("files", ("one.txt", b"one", "text/plain")),
+            ("files", ("two.txt", b"two", "text/plain")),
+        ],
+    )
+    assert too_many.status_code == 400
+    assert "最多上传 1 个文件" in too_many.text
+
+    single_size_config = dict(limited_file_config)
+    single_size_config["system.json"] = dict(limited_file_config["system.json"], max_file_count=5, max_total_file_upload_mb=5)
+    single_client, _ = build_client(tmp_path / "single", monkeypatch, single_size_config)
+    too_large = submit_ticket_with_file(single_client, filename="large.txt", content=b"x" * (1024 * 1024 + 1))
+    assert too_large.status_code == 400
+    assert "单个文件不能超过 1MB" in too_large.text
+
+    total_size_config = dict(limited_file_config)
+    total_size_config["system.json"] = dict(limited_file_config["system.json"], max_file_mb=2, max_file_count=5)
+    total_client, _ = build_client(tmp_path / "total", monkeypatch, total_size_config)
+    too_large_total = total_client.post(
+        "/submit",
+        data={
+            "store_name": "南京门东店",
+            "submitter": "测试提报人",
+            "request_type": "建单需求",
+            "urgency": "普通",
+            "description": "超过文件总大小限制",
+        },
+        files=[
+            ("files", ("one.txt", b"x" * 600_000, "text/plain")),
+            ("files", ("two.txt", b"x" * 600_000, "text/plain")),
+        ],
+    )
+    assert too_large_total.status_code == 400
+    assert "文件总大小不能超过 1MB" in too_large_total.text
+
+
+def test_admin_can_delete_file_and_image_attachments_and_logs_actions(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch)
+    response = submit_ticket_with_image_and_file(client)
+    assert response.status_code == 200
+
+    image = rows_for(tmp_path, "ticket_images")[0]
+    ticket_file = rows_for(tmp_path, "ticket_files")[0]
+    image_path = tmp_path / image["image_path"]
+    file_path = tmp_path / ticket_file["file_path"]
+    assert image_path.exists()
+    assert file_path.exists()
+
+    file_path.unlink()
+    file_delete = client.post(
+        f"/admin/ticket/1/file/{ticket_file['id']}/delete",
+        auth=ADMIN_AUTH,
+        follow_redirects=False,
+    )
+    assert file_delete.status_code == 303
+    assert rows_for(tmp_path, "ticket_files") == []
+
+    image_path.unlink()
+    image_delete = client.post(
+        f"/admin/ticket/1/image/{image['id']}/delete",
+        auth=ADMIN_AUTH,
+        follow_redirects=False,
+    )
+    assert image_delete.status_code == 303
+    assert rows_for(tmp_path, "ticket_images") == []
+
+    logs = rows_for(tmp_path, "ticket_logs")
+    assert [log["action"] for log in logs] == ["删除文件", "删除图片"]
+    assert all(log["operator"] == ADMIN_AUTH[0] for log in logs)
+
+    detail_page = client.get("/admin/ticket/1", auth=ADMIN_AUTH)
+    assert detail_page.status_code == 200
+    assert "未上传图片" in detail_page.text
+    assert "未上传文件附件" in detail_page.text
+    assert "删除文件" in detail_page.text
+    assert "删除图片" in detail_page.text
 
 
 def test_admin_pagination_filters_handlers_and_keyword_search(tmp_path, monkeypatch):
@@ -464,6 +692,7 @@ def test_legacy_database_is_migrated_without_losing_existing_rows(tmp_path, monk
     assert "assigned_to" in ticket_columns
     assert "closed_at" in ticket_columns
     assert "ticket_logs" in tables
+    assert "ticket_files" in tables
     assert ticket_count == 1
     assert image_count == 1
 
@@ -568,12 +797,27 @@ def test_missing_and_invalid_config_files_fall_back_to_defaults(tmp_path, monkey
     assert main.load_app_config().page_size == 50
     assert main.load_app_config().max_image_count == 5
     assert main.load_app_config().max_total_upload_mb == 30
+    assert main.load_app_config().allowed_file_extensions == ["pdf", "doc", "docx", "xls", "xlsx", "csv", "txt", "zip", "rar"]
+    assert main.load_app_config().max_file_mb == 20
+    assert main.load_app_config().max_file_count == 5
+    assert main.load_app_config().max_total_file_upload_mb == 50
 
     config_dir = tmp_path / "config"
     config_dir.mkdir(parents=True, exist_ok=True)
     (config_dir / "stores.json").write_text("{bad json", encoding="utf-8")
     (config_dir / "system.json").write_text(
-        json.dumps({"page_size": -1, "max_image_count": "bad", "max_total_upload_mb": 0}, ensure_ascii=False),
+        json.dumps(
+            {
+                "page_size": -1,
+                "max_image_count": "bad",
+                "max_total_upload_mb": 0,
+                "allowed_file_extensions": "bad",
+                "max_file_mb": -1,
+                "max_file_count": "bad",
+                "max_total_file_upload_mb": 0,
+            },
+            ensure_ascii=False,
+        ),
         encoding="utf-8",
     )
     sys.modules.pop("main", None)
@@ -586,3 +830,7 @@ def test_missing_and_invalid_config_files_fall_back_to_defaults(tmp_path, monkey
     assert main.load_app_config().page_size == 50
     assert main.load_app_config().max_image_count == 5
     assert main.load_app_config().max_total_upload_mb == 30
+    assert main.load_app_config().allowed_file_extensions == ["pdf", "doc", "docx", "xls", "xlsx", "csv", "txt", "zip", "rar"]
+    assert main.load_app_config().max_file_mb == 20
+    assert main.load_app_config().max_file_count == 5
+    assert main.load_app_config().max_total_file_upload_mb == 50

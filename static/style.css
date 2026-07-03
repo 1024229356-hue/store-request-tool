@@ -182,6 +182,21 @@ textarea:focus {
   color: var(--text);
 }
 
+.danger-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 38px;
+  border-radius: 6px;
+  border: 1px solid #fecdca;
+  padding: 0 12px;
+  background: #fff;
+  color: var(--danger);
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
 .compact {
   width: auto;
   min-height: 38px;
@@ -229,11 +244,21 @@ textarea:focus {
   margin-top: 14px;
 }
 
-.image-preview {
+.upload-tools {
+  display: flex;
+  justify-content: flex-end;
+  margin: -6px 0 10px;
+}
+
+.upload-preview {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
   gap: 8px;
   margin: -4px 0 14px;
+}
+
+.file-preview {
+  grid-template-columns: 1fr;
 }
 
 .preview-item {
@@ -246,6 +271,13 @@ textarea:focus {
   color: var(--muted);
 }
 
+.preview-item-file {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
 .preview-item img {
   width: 100%;
   aspect-ratio: 1 / 1;
@@ -254,11 +286,27 @@ textarea:focus {
   margin-bottom: 6px;
 }
 
-.preview-item span {
+.preview-meta {
+  min-width: 0;
+}
+
+.preview-item span,
+.preview-name,
+.preview-size {
   display: block;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.preview-size {
+  margin-top: 3px;
+  color: var(--muted);
+}
+
+.preview-remove {
+  min-height: 32px;
+  padding: 0 10px;
 }
 
 .admin-topbar {
@@ -482,6 +530,11 @@ dd {
   background: #fafcff;
 }
 
+.image-card a {
+  display: block;
+  text-decoration: none;
+}
+
 .image-card img {
   width: 100%;
   aspect-ratio: 4 / 3;
@@ -498,6 +551,10 @@ dd {
   overflow-wrap: anywhere;
 }
 
+.image-card form {
+  margin-top: 8px;
+}
+
 .image-card.missing::before {
   content: "图片文件缺失";
   display: flex;
@@ -508,6 +565,45 @@ dd {
   border-radius: 4px;
   background: #f2f4f7;
   color: var(--muted);
+}
+
+.file-list {
+  display: grid;
+  gap: 10px;
+}
+
+.file-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fafcff;
+  padding: 10px;
+}
+
+.file-info {
+  min-width: 0;
+}
+
+.file-info strong,
+.file-info span {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.file-info span {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.file-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
 }
 
 .handler-panel {
@@ -562,6 +658,15 @@ dd {
   .pagination-bar {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .file-row {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .file-actions {
+    justify-content: flex-start;
   }
 
   .admin-shell,

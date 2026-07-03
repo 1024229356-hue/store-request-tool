@@ -46,8 +46,13 @@ DEFAULT_SYSTEM = {
     "page_size": 50,
     "max_image_count": 5,
     "max_total_upload_mb": 30,
+    "allowed_file_extensions": ["pdf", "doc", "docx", "xls", "xlsx", "csv", "txt", "zip", "rar"],
+    "max_file_mb": 20,
+    "max_file_count": 5,
+    "max_total_file_upload_mb": 50,
 }
 COMPLETED_STATUS = "已完成"
+BLOCKED_FILE_EXTENSIONS = {"exe", "bat", "cmd", "js", "py", "sh", "php", "jar", "msi"}
 IMAGE_FORMAT_EXTENSIONS = {
     "JPEG": {"jpg", "jpeg"},
     "PNG": {"png"},
@@ -72,6 +77,10 @@ class AppConfig:
     page_size: int
     max_image_count: int
     max_total_upload_mb: int
+    allowed_file_extensions: List[str]
+    max_file_mb: int
+    max_file_count: int
+    max_total_file_upload_mb: int
 
     @property
     def max_image_bytes(self) -> int:
@@ -80,6 +89,22 @@ class AppConfig:
     @property
     def max_total_upload_bytes(self) -> int:
         return self.max_total_upload_mb * 1024 * 1024
+
+    @property
+    def max_file_bytes(self) -> int:
+        return self.max_file_mb * 1024 * 1024
+
+    @property
+    def max_total_file_upload_bytes(self) -> int:
+        return self.max_total_file_upload_mb * 1024 * 1024
+
+
+@dataclass(frozen=True)
+class PreparedFile:
+    original_filename: str
+    file_ext: str
+    file_size: int
+    content: bytes
 
 EXCEL_HEADERS = [
     "工单号",
@@ -94,6 +119,8 @@ EXCEL_HEADERS = [
     "数量",
     "问题说明",
     "图片路径",
+    "文件名称",
+    "文件路径",
     "期望完成时间",
     "当前状态",
     "处理人",
@@ -258,6 +285,21 @@ def init_db() -> None:
         )
         connection.execute(
             """
+            CREATE TABLE IF NOT EXISTS ticket_files (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticket_id INTEGER NOT NULL,
+                original_filename TEXT NOT NULL,
+                stored_filename TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                file_ext TEXT NOT NULL,
+                file_size INTEGER NOT NULL,
+                uploaded_at TEXT NOT NULL,
+                FOREIGN KEY (ticket_id) REFERENCES tickets(id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            """
             CREATE TABLE IF NOT EXISTS ticket_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 ticket_id INTEGER NOT NULL,
@@ -277,6 +319,7 @@ def init_db() -> None:
         connection.execute("CREATE INDEX IF NOT EXISTS idx_tickets_status ON tickets(status)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_tickets_assigned_to ON tickets(assigned_to)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_ticket_images_ticket_id ON ticket_images(ticket_id)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_ticket_files_ticket_id ON ticket_files(ticket_id)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_ticket_logs_ticket_id ON ticket_logs(ticket_id)")
 
 
@@ -311,20 +354,45 @@ def positive_int_config(system: Dict[str, object], key: str) -> int:
     return default_value
 
 
+def normalized_extensions(value: object, default: List[str], blocked: Optional[set[str]] = None) -> List[str]:
+    extensions = clean_string_list(value, default)
+    blocked = blocked or set()
+    normalized: List[str] = []
+    for extension in extensions:
+        clean_extension = extension.lower().lstrip(".")
+        if clean_extension and clean_extension not in blocked and clean_extension not in normalized:
+            normalized.append(clean_extension)
+    if normalized:
+        return normalized
+    return [extension for extension in default if extension not in blocked]
+
+
 def load_system_config(statuses: List[str]) -> Dict[str, object]:
     raw_system = load_json_file("system.json", DEFAULT_SYSTEM)
     system = dict(DEFAULT_SYSTEM)
     if isinstance(raw_system, dict):
         system.update(raw_system)
 
-    for key in ("max_image_mb", "page_size", "max_image_count", "max_total_upload_mb"):
+    for key in (
+        "max_image_mb",
+        "page_size",
+        "max_image_count",
+        "max_total_upload_mb",
+        "max_file_mb",
+        "max_file_count",
+        "max_total_file_upload_mb",
+    ):
         system[key] = positive_int_config(system, key)
 
-    allowed_extensions = clean_string_list(
+    system["allowed_image_extensions"] = normalized_extensions(
         system.get("allowed_image_extensions"),
         list(DEFAULT_SYSTEM["allowed_image_extensions"]),
     )
-    system["allowed_image_extensions"] = [extension.lower().lstrip(".") for extension in allowed_extensions]
+    system["allowed_file_extensions"] = normalized_extensions(
+        system.get("allowed_file_extensions"),
+        list(DEFAULT_SYSTEM["allowed_file_extensions"]),
+        BLOCKED_FILE_EXTENSIONS,
+    )
 
     default_status = str(system.get("default_status", "")).strip()
     system["default_status"] = default_status if default_status in statuses else statuses[0]
@@ -362,6 +430,10 @@ def load_app_config() -> AppConfig:
         page_size=int(system["page_size"]),
         max_image_count=int(system["max_image_count"]),
         max_total_upload_mb=int(system["max_total_upload_mb"]),
+        allowed_file_extensions=list(system["allowed_file_extensions"]),
+        max_file_mb=int(system["max_file_mb"]),
+        max_file_count=int(system["max_file_count"]),
+        max_total_file_upload_mb=int(system["max_total_file_upload_mb"]),
     )
 
 
@@ -384,7 +456,27 @@ def protected_upload_url(image_path: str) -> str:
     return f"/admin/uploads/{quote(image_filename(image_path))}"
 
 
-def resolve_upload_file(filename: str) -> Optional[Path]:
+def protected_file_url(file_id: object) -> str:
+    return f"/admin/files/{file_id}"
+
+
+def file_size_label(size: object) -> str:
+    try:
+        size_value = int(size)
+    except (TypeError, ValueError):
+        return ""
+    if size_value >= 1024 * 1024:
+        return f"{size_value / (1024 * 1024):.1f}MB"
+    if size_value >= 1024:
+        return f"{size_value / 1024:.1f}KB"
+    return f"{size_value}B"
+
+
+def safe_uploaded_name(filename: str) -> str:
+    return Path(str(filename or "").replace("\\", "/")).name.strip()
+
+
+def resolve_upload_path(filename: str) -> Optional[Path]:
     normalized = filename.replace("\\", "/")
     if not normalized or "/" in normalized or normalized in {".", ".."}:
         return None
@@ -393,6 +485,13 @@ def resolve_upload_file(filename: str) -> Optional[Path]:
     try:
         target.relative_to(upload_root)
     except ValueError:
+        return None
+    return target
+
+
+def resolve_upload_file(filename: str) -> Optional[Path]:
+    target = resolve_upload_path(filename)
+    if target is None:
         return None
     if not target.is_file():
         return None
@@ -480,7 +579,7 @@ async def prepare_images(images: Optional[List[UploadFile]], config: AppConfig) 
     for image in images or []:
         if not image or not image.filename:
             continue
-        original_name = Path(image.filename).name
+        original_name = safe_uploaded_name(image.filename)
         content = await image.read()
         if not content:
             continue
@@ -518,18 +617,84 @@ async def prepare_images(images: Optional[List[UploadFile]], config: AppConfig) 
     return prepared_images
 
 
+async def prepare_files(files: Optional[List[UploadFile]], config: AppConfig) -> List[PreparedFile]:
+    raw_files: List[PreparedFile] = []
+    for upload in files or []:
+        if not upload or not upload.filename:
+            continue
+        original_name = safe_uploaded_name(upload.filename)
+        content = await upload.read()
+        if not original_name or not content:
+            continue
+        extension = Path(original_name).suffix.lower().lstrip(".")
+        raw_files.append(
+            PreparedFile(
+                original_filename=original_name,
+                file_ext=extension,
+                file_size=len(content),
+                content=content,
+            )
+        )
+
+    if len(raw_files) > config.max_file_count:
+        raise ValueError(f"最多上传 {config.max_file_count} 个文件。")
+
+    total_bytes = sum(file.file_size for file in raw_files)
+    if total_bytes > config.max_total_file_upload_bytes:
+        raise ValueError(f"文件总大小不能超过 {config.max_total_file_upload_mb}MB。")
+
+    allowed_extensions = set(config.allowed_file_extensions)
+    for file in raw_files:
+        if not file.file_ext or file.file_ext in BLOCKED_FILE_EXTENSIONS or file.file_ext not in allowed_extensions:
+            allowed_text = "、".join(config.allowed_file_extensions)
+            raise ValueError(f"文件仅支持 {allowed_text} 格式。")
+        if file.file_size > config.max_file_bytes:
+            raise ValueError(f"单个文件不能超过 {config.max_file_mb}MB。")
+    return raw_files
+
+
 def save_images(ticket_no: str, prepared_images: List[Tuple[str, bytes]]) -> Tuple[List[str], List[Path]]:
     image_paths: List[str] = []
     saved_files: List[Path] = []
     upload_dir = get_upload_dir()
     upload_dir.mkdir(parents=True, exist_ok=True)
-    for index, (extension, content) in enumerate(prepared_images, start=1):
-        filename = f"{ticket_no}_{index}_{uuid.uuid4().hex[:8]}.{extension}"
-        target_path = upload_dir / filename
-        target_path.write_bytes(content)
-        saved_files.append(target_path)
-        image_paths.append(f"uploads/{filename}")
-    return image_paths, saved_files
+    try:
+        for index, (extension, content) in enumerate(prepared_images, start=1):
+            filename = f"{ticket_no}_{index}_{uuid.uuid4().hex[:8]}.{extension}"
+            target_path = upload_dir / filename
+            target_path.write_bytes(content)
+            saved_files.append(target_path)
+            image_paths.append(f"uploads/{filename}")
+        return image_paths, saved_files
+    except Exception:
+        cleanup_saved_files(saved_files)
+        raise
+
+
+def save_files(ticket_no: str, prepared_files: List[PreparedFile]) -> Tuple[List[Dict[str, object]], List[Path]]:
+    file_records: List[Dict[str, object]] = []
+    saved_files: List[Path] = []
+    upload_dir = get_upload_dir()
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        for prepared_file in prepared_files:
+            stored_filename = f"FILE-{ticket_no}-{uuid.uuid4().hex}.{prepared_file.file_ext}"
+            target_path = upload_dir / stored_filename
+            target_path.write_bytes(prepared_file.content)
+            saved_files.append(target_path)
+            file_records.append(
+                {
+                    "original_filename": prepared_file.original_filename,
+                    "stored_filename": stored_filename,
+                    "file_path": f"uploads/{stored_filename}",
+                    "file_ext": prepared_file.file_ext,
+                    "file_size": prepared_file.file_size,
+                }
+            )
+        return file_records, saved_files
+    except Exception:
+        cleanup_saved_files(saved_files)
+        raise
 
 
 def cleanup_saved_files(paths: List[Path]) -> None:
@@ -548,7 +713,9 @@ def create_ticket_with_images(
     ticket_data: Dict[str, object],
     prepared_images: List[Tuple[str, bytes]],
     config: AppConfig,
+    prepared_files: Optional[List[PreparedFile]] = None,
 ) -> Tuple[int, str]:
+    prepared_files = prepared_files or []
     for _attempt in range(3):
         saved_files: List[Path] = []
         timestamp = now_text()
@@ -592,11 +759,33 @@ def create_ticket_with_images(
                     raise
 
                 ticket_id = int(cursor.lastrowid)
-                image_paths, saved_files = save_images(ticket_no, prepared_images)
+                image_paths, saved_image_files = save_images(ticket_no, prepared_images)
+                saved_files.extend(saved_image_files)
                 for image_path in image_paths:
                     connection.execute(
                         "INSERT INTO ticket_images (ticket_id, image_path, uploaded_at) VALUES (?, ?, ?)",
                         (ticket_id, image_path, timestamp),
+                    )
+                file_records, saved_attachment_files = save_files(ticket_no, prepared_files)
+                saved_files.extend(saved_attachment_files)
+                for file_record in file_records:
+                    connection.execute(
+                        """
+                        INSERT INTO ticket_files (
+                            ticket_id, original_filename, stored_filename, file_path,
+                            file_ext, file_size, uploaded_at
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            ticket_id,
+                            file_record["original_filename"],
+                            file_record["stored_filename"],
+                            file_record["file_path"],
+                            file_record["file_ext"],
+                            file_record["file_size"],
+                            timestamp,
+                        ),
                     )
             return ticket_id, ticket_no
         except sqlite3.IntegrityError as exc:
@@ -723,11 +912,21 @@ def fetch_tickets(
                 tickets.id, ticket_no, created_at, updated_at, store_name, submitter,
                 request_type, urgency, brand, product_name, sku_barcode,
                 quantity, description, expected_finish_date, status, assigned_to,
-                handler_note, closed_at, COUNT(ticket_images.id) AS image_count
+                handler_note, closed_at,
+                COALESCE(image_counts.image_count, 0) AS image_count,
+                COALESCE(file_counts.file_count, 0) AS file_count
             FROM tickets
-            LEFT JOIN ticket_images ON ticket_images.ticket_id = tickets.id
+            LEFT JOIN (
+                SELECT ticket_id, COUNT(*) AS image_count
+                FROM ticket_images
+                GROUP BY ticket_id
+            ) AS image_counts ON image_counts.ticket_id = tickets.id
+            LEFT JOIN (
+                SELECT ticket_id, COUNT(*) AS file_count
+                FROM ticket_files
+                GROUP BY ticket_id
+            ) AS file_counts ON file_counts.ticket_id = tickets.id
             {where_sql}
-            GROUP BY tickets.id
             {order_sql}
             {limit_sql}
             """,
@@ -776,6 +975,50 @@ def fetch_ticket_images(ticket_id: int) -> List[Dict[str, object]]:
     return images
 
 
+def fetch_ticket_files(ticket_id: int) -> List[Dict[str, object]]:
+    with get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT id, ticket_id, original_filename, stored_filename, file_path,
+                   file_ext, file_size, uploaded_at
+            FROM ticket_files
+            WHERE ticket_id = ?
+            ORDER BY id
+            """,
+            (ticket_id,),
+        ).fetchall()
+    files = [dict(row) for row in rows]
+    for file in files:
+        file["download_url"] = protected_file_url(file["id"])
+        file["size_label"] = file_size_label(file.get("file_size"))
+    return files
+
+
+def fetch_ticket_file(file_id: int, ticket_id: Optional[int] = None) -> Optional[Dict[str, object]]:
+    sql = """
+        SELECT id, ticket_id, original_filename, stored_filename, file_path,
+               file_ext, file_size, uploaded_at
+        FROM ticket_files
+        WHERE id = ?
+    """
+    params: List[object] = [file_id]
+    if ticket_id is not None:
+        sql += " AND ticket_id = ?"
+        params.append(ticket_id)
+    with get_connection() as connection:
+        row = connection.execute(sql, params).fetchone()
+    return dict(row) if row else None
+
+
+def fetch_ticket_image(image_id: int, ticket_id: int) -> Optional[Dict[str, object]]:
+    with get_connection() as connection:
+        row = connection.execute(
+            "SELECT id, ticket_id, image_path, uploaded_at FROM ticket_images WHERE id = ? AND ticket_id = ?",
+            (image_id, ticket_id),
+        ).fetchone()
+    return dict(row) if row else None
+
+
 def fetch_ticket_logs(ticket_id: int) -> List[Dict[str, object]]:
     with get_connection() as connection:
         rows = connection.execute(
@@ -804,6 +1047,8 @@ def build_excel(tickets: List[Dict[str, object]]) -> BytesIO:
         cell.alignment = Alignment(horizontal="center", vertical="center")
 
     image_map: Dict[int, List[str]] = {}
+    file_name_map: Dict[int, List[str]] = {}
+    file_url_map: Dict[int, List[str]] = {}
     if tickets:
         ids = [int(ticket["id"]) for ticket in tickets]
         placeholders = ",".join("?" for _ in ids)
@@ -812,8 +1057,21 @@ def build_excel(tickets: List[Dict[str, object]]) -> BytesIO:
                 f"SELECT ticket_id, image_path FROM ticket_images WHERE ticket_id IN ({placeholders}) ORDER BY id",
                 ids,
             ).fetchall()
+            file_rows = connection.execute(
+                f"""
+                SELECT id, ticket_id, original_filename
+                FROM ticket_files
+                WHERE ticket_id IN ({placeholders})
+                ORDER BY id
+                """,
+                ids,
+            ).fetchall()
         for row in rows:
             image_map.setdefault(int(row["ticket_id"]), []).append(protected_upload_url(str(row["image_path"])))
+        for row in file_rows:
+            ticket_id = int(row["ticket_id"])
+            file_name_map.setdefault(ticket_id, []).append(str(row["original_filename"]))
+            file_url_map.setdefault(ticket_id, []).append(protected_file_url(row["id"]))
 
     for ticket in tickets:
         sheet.append(
@@ -830,6 +1088,8 @@ def build_excel(tickets: List[Dict[str, object]]) -> BytesIO:
                 ticket.get("quantity") if ticket.get("quantity") is not None else "",
                 ticket.get("description"),
                 "; ".join(image_map.get(int(ticket["id"]), [])),
+                "; ".join(file_name_map.get(int(ticket["id"]), [])),
+                "; ".join(file_url_map.get(int(ticket["id"]), [])),
                 ticket.get("expected_finish_date") or "",
                 ticket.get("status"),
                 ticket.get("assigned_to") or "",
@@ -841,7 +1101,7 @@ def build_excel(tickets: List[Dict[str, object]]) -> BytesIO:
             ]
         )
 
-    widths = [22, 20, 16, 14, 14, 14, 16, 20, 20, 10, 38, 42, 18, 14, 14, 32, 20, 20, 16, 12]
+    widths = [22, 20, 16, 14, 14, 14, 16, 20, 20, 10, 38, 42, 26, 34, 18, 14, 14, 32, 20, 20, 16, 12]
     for index, width in enumerate(widths, start=1):
         sheet.column_dimensions[get_column_letter(index)].width = width
     for row in sheet.iter_rows(min_row=2):
@@ -881,9 +1141,14 @@ def create_app() -> FastAPI:
                 "urgency_levels": config.urgency_levels,
                 "brands": config.brands,
                 "image_accept": ",".join(f".{extension}" for extension in config.allowed_image_extensions),
+                "file_accept": ",".join(f".{extension}" for extension in config.allowed_file_extensions),
                 "max_image_count": config.max_image_count,
                 "max_total_upload_mb": config.max_total_upload_mb,
                 "max_image_mb": config.max_image_mb,
+                "allowed_file_extensions": config.allowed_file_extensions,
+                "max_file_count": config.max_file_count,
+                "max_file_mb": config.max_file_mb,
+                "max_total_file_upload_mb": config.max_total_file_upload_mb,
                 "error": error,
                 "values": values or {},
             },
@@ -912,6 +1177,7 @@ def create_app() -> FastAPI:
         description: str = Form(""),
         expected_finish_date: str = Form(""),
         images: Optional[List[UploadFile]] = File(None),
+        files: Optional[List[UploadFile]] = File(None),
     ) -> HTMLResponse:
         config = load_app_config()
         stores = config.stores
@@ -943,6 +1209,7 @@ def create_app() -> FastAPI:
 
         try:
             prepared_images = await prepare_images(images, config)
+            prepared_files = await prepare_files(files, config)
         except ValueError as exc:
             return render_submit_form(request, status_code=400, error=str(exc), values=form_values)
 
@@ -965,11 +1232,12 @@ def create_app() -> FastAPI:
                 },
                 prepared_images,
                 config,
+                prepared_files,
             )
         except RuntimeError as exc:
             return render_submit_form(request, status_code=500, error=str(exc), values=form_values)
         except OSError:
-            return render_submit_form(request, status_code=500, error="图片保存失败，请稍后重试。", values=form_values)
+            return render_submit_form(request, status_code=500, error="附件保存失败，请稍后重试。", values=form_values)
 
         return templates.TemplateResponse(
             request,
@@ -1039,6 +1307,7 @@ def create_app() -> FastAPI:
         if not ticket:
             raise HTTPException(status_code=404, detail="工单不存在")
         images = fetch_ticket_images(ticket_id)
+        files = fetch_ticket_files(ticket_id)
         logs = fetch_ticket_logs(ticket_id)
         config = load_app_config()
         return templates.TemplateResponse(
@@ -1048,6 +1317,7 @@ def create_app() -> FastAPI:
                 "request": request,
                 "ticket": ticket,
                 "images": images,
+                "files": files,
                 "statuses": config.statuses,
                 "handlers": config.handlers,
                 "logs": logs,
@@ -1117,12 +1387,92 @@ def create_app() -> FastAPI:
                 )
         return RedirectResponse(url=f"/admin/ticket/{ticket_id}?saved=1", status_code=303)
 
+    @app.post("/admin/ticket/{ticket_id}/image/{image_id}/delete")
+    def delete_ticket_image(
+        ticket_id: int,
+        image_id: int,
+        admin: str = Depends(require_admin),
+    ) -> RedirectResponse:
+        image = fetch_ticket_image(image_id, ticket_id)
+        if not image:
+            raise HTTPException(status_code=404, detail="图片不存在")
+        image_path = str(image.get("image_path") or "")
+        physical_path = resolve_upload_path(image_filename(image_path))
+        timestamp = now_text()
+        with get_connection() as connection:
+            connection.execute("DELETE FROM ticket_images WHERE id = ? AND ticket_id = ?", (image_id, ticket_id))
+            connection.execute("UPDATE tickets SET updated_at = ? WHERE id = ?", (timestamp, ticket_id))
+            connection.execute(
+                """
+                INSERT INTO ticket_logs (
+                    ticket_id, action, old_status, new_status, old_assigned_to,
+                    new_assigned_to, note, operator, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (ticket_id, "删除图片", None, None, None, None, image_path, admin, timestamp),
+            )
+        if physical_path:
+            try:
+                physical_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        return RedirectResponse(url=f"/admin/ticket/{ticket_id}?saved=1", status_code=303)
+
+    @app.post("/admin/ticket/{ticket_id}/file/{file_id}/delete")
+    def delete_ticket_file(
+        ticket_id: int,
+        file_id: int,
+        admin: str = Depends(require_admin),
+    ) -> RedirectResponse:
+        ticket_file = fetch_ticket_file(file_id, ticket_id)
+        if not ticket_file:
+            raise HTTPException(status_code=404, detail="文件不存在")
+        stored_filename = safe_uploaded_name(str(ticket_file.get("stored_filename") or ""))
+        physical_path = resolve_upload_path(stored_filename)
+        original_filename = str(ticket_file.get("original_filename") or "")
+        timestamp = now_text()
+        with get_connection() as connection:
+            connection.execute("DELETE FROM ticket_files WHERE id = ? AND ticket_id = ?", (file_id, ticket_id))
+            connection.execute("UPDATE tickets SET updated_at = ? WHERE id = ?", (timestamp, ticket_id))
+            connection.execute(
+                """
+                INSERT INTO ticket_logs (
+                    ticket_id, action, old_status, new_status, old_assigned_to,
+                    new_assigned_to, note, operator, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (ticket_id, "删除文件", None, None, None, None, original_filename, admin, timestamp),
+            )
+        if physical_path:
+            try:
+                physical_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        return RedirectResponse(url=f"/admin/ticket/{ticket_id}?saved=1", status_code=303)
+
     @app.get("/admin/uploads/{filename:path}")
     def protected_upload(filename: str, _admin: str = Depends(require_admin)) -> FileResponse:
         target = resolve_upload_file(filename)
         if not target:
             raise HTTPException(status_code=404, detail="图片不存在")
         return FileResponse(target)
+
+    @app.get("/admin/files/{file_id}")
+    def protected_file(file_id: int, _admin: str = Depends(require_admin)) -> FileResponse:
+        ticket_file = fetch_ticket_file(file_id)
+        if not ticket_file:
+            raise HTTPException(status_code=404, detail="文件不存在")
+        target = resolve_upload_file(safe_uploaded_name(str(ticket_file.get("stored_filename") or "")))
+        if not target:
+            raise HTTPException(status_code=404, detail="文件不存在")
+        return FileResponse(
+            target,
+            media_type="application/octet-stream",
+            filename=str(ticket_file.get("original_filename") or target.name),
+            content_disposition_type="attachment",
+        )
 
     @app.get("/admin/export")
     def export_tickets(
