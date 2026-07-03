@@ -250,6 +250,12 @@ textarea:focus {
   margin: -6px 0 10px;
 }
 
+.upload-clear {
+  min-height: 40px;
+  padding: 0 14px;
+  border-color: #b8c6d8;
+}
+
 .upload-preview {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
@@ -266,16 +272,22 @@ textarea:focus {
   border: 1px solid var(--line);
   border-radius: 6px;
   background: #fafcff;
-  padding: 6px;
+  padding: 8px;
   font-size: 12px;
   color: var(--muted);
+}
+
+.preview-item-image {
+  display: grid;
+  gap: 7px;
 }
 
 .preview-item-file {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  gap: 8px;
+  gap: 10px;
   align-items: center;
+  min-height: 58px;
 }
 
 .preview-item img {
@@ -305,8 +317,10 @@ textarea:focus {
 }
 
 .preview-remove {
-  min-height: 32px;
-  padding: 0 10px;
+  min-height: 40px;
+  padding: 0 14px;
+  border-color: #fecdca;
+  color: var(--danger);
 }
 
 .admin-topbar {
@@ -667,6 +681,14 @@ dd {
 
   .file-actions {
     justify-content: flex-start;
+  }
+
+  .preview-item-file {
+    grid-template-columns: 1fr;
+  }
+
+  .preview-remove {
+    width: 100%;
   }
 
   .admin-shell,

@@ -1,5 +1,15 @@
-(function () {
-  function formatSize(bytes) {
+document.addEventListener("DOMContentLoaded", () => {
+  const imageInput = document.querySelector("[data-image-input]");
+  const imagePreview = document.querySelector("[data-image-preview]");
+  const clearImagesButton = document.querySelector("[data-clear-images]");
+  const fileInput = document.querySelector("[data-file-input]");
+  const filePreview = document.querySelector("[data-file-preview]");
+  const clearFilesButton = document.querySelector("[data-clear-files]");
+
+  let selectedImages = [];
+  let selectedFiles = [];
+
+  function formatFileSize(bytes) {
     if (bytes >= 1024 * 1024) {
       return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
     }
@@ -9,8 +19,8 @@
     return `${bytes}B`;
   }
 
-  function replaceInputFiles(input, files) {
-    if (typeof DataTransfer === "undefined") {
+  function syncInputFiles(input, files) {
+    if (!input || typeof DataTransfer === "undefined") {
       return;
     }
     const transfer = new DataTransfer();
@@ -18,91 +28,118 @@
     input.files = transfer.files;
   }
 
-  function setupUploadList(options) {
-    const input = document.querySelector(options.inputSelector);
-    const preview = document.querySelector(options.previewSelector);
-    const clearButton = document.querySelector(options.clearSelector);
-    if (!input || !preview) {
+  function createRemoveButton(onRemove) {
+    const button = document.createElement("button");
+    button.className = "ghost-button compact preview-remove";
+    button.type = "button";
+    button.textContent = "删除";
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      onRemove();
+    });
+    return button;
+  }
+
+  function createFileMeta(file) {
+    const meta = document.createElement("div");
+    meta.className = "preview-meta";
+
+    const name = document.createElement("span");
+    name.className = "preview-name";
+    name.textContent = file.name;
+    meta.appendChild(name);
+
+    const size = document.createElement("span");
+    size.className = "preview-size";
+    size.textContent = formatFileSize(file.size);
+    meta.appendChild(size);
+
+    return meta;
+  }
+
+  function renderImages() {
+    if (!imagePreview) {
       return;
     }
+    imagePreview.innerHTML = "";
+    selectedImages.forEach((file, index) => {
+      const item = document.createElement("div");
+      item.className = "preview-item preview-item-image";
 
-    let selectedFiles = Array.from(input.files || []);
+      const thumbnail = document.createElement("img");
+      thumbnail.alt = file.name;
+      thumbnail.src = URL.createObjectURL(file);
+      thumbnail.onload = () => URL.revokeObjectURL(thumbnail.src);
+      item.appendChild(thumbnail);
 
-    function syncFiles(nextFiles) {
-      selectedFiles = nextFiles;
-      replaceInputFiles(input, selectedFiles);
-      render();
-    }
-
-    function render() {
-      preview.innerHTML = "";
-      selectedFiles.forEach((file, index) => {
-        const item = document.createElement("div");
-        item.className = options.image ? "preview-item preview-item-image" : "preview-item preview-item-file";
-
-        if (options.image && file.type.startsWith("image/")) {
-          const image = document.createElement("img");
-          image.alt = file.name;
-          image.src = URL.createObjectURL(file);
-          image.onload = () => URL.revokeObjectURL(image.src);
-          item.appendChild(image);
-        }
-
-        const meta = document.createElement("div");
-        meta.className = "preview-meta";
-
-        const name = document.createElement("span");
-        name.className = "preview-name";
-        name.textContent = file.name;
-        meta.appendChild(name);
-
-        const size = document.createElement("span");
-        size.className = "preview-size";
-        size.textContent = formatSize(file.size);
-        meta.appendChild(size);
-
-        item.appendChild(meta);
-
-        const remove = document.createElement("button");
-        remove.className = "ghost-button compact preview-remove";
-        remove.type = "button";
-        remove.textContent = "删除";
-        remove.addEventListener("click", () => {
-          syncFiles(selectedFiles.filter((_file, fileIndex) => fileIndex !== index));
-        });
-        item.appendChild(remove);
-
-        preview.appendChild(item);
-      });
-    }
-
-    input.addEventListener("change", () => {
-      syncFiles(Array.from(input.files || []));
+      item.appendChild(createFileMeta(file));
+      item.appendChild(
+        createRemoveButton(() => {
+          selectedImages.splice(index, 1);
+          renderImages();
+          syncInputFiles(imageInput, selectedImages);
+        }),
+      );
+      imagePreview.appendChild(item);
     });
-
-    if (clearButton) {
-      clearButton.addEventListener("click", () => {
-        syncFiles([]);
-      });
-    }
-
-    render();
   }
 
-  try {
-    setupUploadList({
-      inputSelector: "[data-image-input]",
-      previewSelector: "[data-image-preview]",
-      clearSelector: "[data-image-clear]",
-      image: true,
+  function renderFiles() {
+    if (!filePreview) {
+      return;
+    }
+    filePreview.innerHTML = "";
+    selectedFiles.forEach((file, index) => {
+      const item = document.createElement("div");
+      item.className = "preview-item preview-item-file";
+      item.appendChild(createFileMeta(file));
+      item.appendChild(
+        createRemoveButton(() => {
+          selectedFiles.splice(index, 1);
+          renderFiles();
+          syncInputFiles(fileInput, selectedFiles);
+        }),
+      );
+      filePreview.appendChild(item);
     });
-    setupUploadList({
-      inputSelector: "[data-file-input]",
-      previewSelector: "[data-file-preview]",
-      clearSelector: "[data-file-clear]",
-      image: false,
-    });
-  } catch (_error) {
-    // Form submission must keep working even if preview management is unavailable.
   }
-})();
+
+  if (imageInput && imagePreview) {
+    imageInput.addEventListener("change", () => {
+      selectedImages = selectedImages.concat(Array.from(imageInput.files || []));
+      renderImages();
+      syncInputFiles(imageInput, selectedImages);
+    });
+  }
+
+  if (fileInput && filePreview) {
+    fileInput.addEventListener("change", () => {
+      selectedFiles = selectedFiles.concat(Array.from(fileInput.files || []));
+      renderFiles();
+      syncInputFiles(fileInput, selectedFiles);
+    });
+  }
+
+  if (clearImagesButton && imageInput && imagePreview) {
+    clearImagesButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      selectedImages = [];
+      imageInput.value = "";
+      syncInputFiles(imageInput, selectedImages);
+      imagePreview.innerHTML = "";
+    });
+  }
+
+  if (clearFilesButton && fileInput && filePreview) {
+    clearFilesButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      selectedFiles = [];
+      fileInput.value = "";
+      syncInputFiles(fileInput, selectedFiles);
+      filePreview.innerHTML = "";
+    });
+  }
+});

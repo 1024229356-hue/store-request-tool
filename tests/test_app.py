@@ -206,9 +206,28 @@ def test_submit_page_exposes_image_and_file_upload_inputs(tmp_path, monkeypatch)
     assert submit_page.status_code == 200
     assert 'name="images"' in submit_page.text
     assert "data-image-input" in submit_page.text
+    assert "data-image-preview" in submit_page.text
+    assert 'type="button"' in submit_page.text
+    assert "data-clear-images" in submit_page.text
     assert 'name="files"' in submit_page.text
     assert "data-file-input" in submit_page.text
+    assert "data-file-preview" in submit_page.text
+    assert "data-clear-files" in submit_page.text
     assert "文件上传" in submit_page.text
+    assert '/static/app.js?v=20260704' in submit_page.text
+
+
+def test_upload_script_uses_independent_state_and_clear_selectors():
+    script = (PROJECT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+
+    assert "DOMContentLoaded" in script
+    assert "selectedImages" in script
+    assert "selectedFiles" in script
+    assert "[data-clear-images]" in script
+    assert "[data-clear-files]" in script
+    assert "event.preventDefault()" in script
+    assert "event.stopPropagation()" in script
+    assert "new DataTransfer()" in script
 
 
 def test_admin_users_allows_multiple_accounts_and_logs_actual_operator(tmp_path, monkeypatch):

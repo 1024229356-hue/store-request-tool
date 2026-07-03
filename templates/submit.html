@@ -92,7 +92,7 @@
       </label>
       <p class="field-hint">支持 {{ image_accept }}，单张不超过 {{ max_image_mb }}MB。</p>
       <div class="upload-tools">
-        <button class="ghost-button compact upload-clear" type="button" data-image-clear>清空图片</button>
+        <button class="ghost-button compact upload-clear" type="button" data-clear-images>清空图片</button>
       </div>
       <div class="upload-preview image-preview" data-image-preview></div>
 
@@ -102,7 +102,7 @@
       </label>
       <p class="field-hint">支持 PDF、Word、Excel、CSV、TXT、ZIP、RAR 等文件，具体格式来自 config/system.json。最多 {{ max_file_count }} 个文件，单个不超过 {{ max_file_mb }}MB，总大小不超过 {{ max_total_file_upload_mb }}MB。</p>
       <div class="upload-tools">
-        <button class="ghost-button compact upload-clear" type="button" data-file-clear>清空文件</button>
+        <button class="ghost-button compact upload-clear" type="button" data-clear-files>清空文件</button>
       </div>
       <div class="upload-preview file-preview" data-file-preview></div>
 
@@ -114,6 +114,6 @@
       <button class="primary-button" type="submit">提交需求</button>
     </form>
   </main>
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v=20260704"></script>
 </body>
 </html>
