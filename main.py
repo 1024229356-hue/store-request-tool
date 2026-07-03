@@ -3,6 +3,7 @@ import os
 import secrets
 import sqlite3
 import uuid
+from dataclasses import dataclass
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
@@ -25,15 +26,43 @@ TEMPLATES_DIR = BASE_DIR / "templates"
 STATIC_DIR = BASE_DIR / "static"
 DEFAULT_DATA_DIR = BASE_DIR / "data"
 DEFAULT_UPLOAD_DIR = BASE_DIR / "uploads"
-STORES_FILE = CONFIG_DIR / "stores.json"
-
-REQUEST_TYPES = ["建单需求", "审单需求", "商品异常", "缺货需求", "新品需求", "系统问题", "其他"]
-URGENCY_LEVELS = ["普通", "加急", "当天必须处理"]
-STATUSES = ["待处理", "处理中", "待门店补充", "已完成", "已驳回"]
-ALLOWED_IMAGE_EXTENSIONS = {"jpg", "jpeg", "png", "webp"}
-MAX_IMAGE_BYTES = 10 * 1024 * 1024
 ENV_FILE = BASE_DIR / ".env"
 admin_security = HTTPBasic()
+
+DEFAULT_STORES = ["南京门东店", "南昌万寿宫店", "山城巷店", "东郊记忆店", "蟠龙天地店", "秀水街店", "湾里店", "下浩里店", "烟台山店"]
+DEFAULT_REQUEST_TYPES = ["建单需求", "审单需求", "商品异常", "缺货需求", "新品需求", "系统问题", "其他"]
+DEFAULT_URGENCY_LEVELS = ["普通", "加急", "当天必须处理"]
+DEFAULT_STATUSES = ["待处理", "处理中", "待门店补充", "已完成", "已驳回"]
+DEFAULT_BRANDS: List[str] = []
+DEFAULT_HANDLERS = ["总部商品", "总部运营", "采购", "财务"]
+DEFAULT_SYSTEM = {
+    "app_name": "门店需求工单系统",
+    "port": 8701,
+    "max_image_mb": 10,
+    "allowed_image_extensions": ["jpg", "jpeg", "png", "webp"],
+    "default_status": "待处理",
+    "excel_filename_prefix": "门店需求工单",
+}
+
+
+@dataclass(frozen=True)
+class AppConfig:
+    stores: List[str]
+    request_types: List[str]
+    urgency_levels: List[str]
+    statuses: List[str]
+    brands: List[str]
+    handlers: List[str]
+    app_name: str
+    port: int
+    max_image_mb: int
+    allowed_image_extensions: List[str]
+    default_status: str
+    excel_filename_prefix: str
+
+    @property
+    def max_image_bytes(self) -> int:
+        return self.max_image_mb * 1024 * 1024
 
 EXCEL_HEADERS = [
     "工单号",
@@ -97,6 +126,10 @@ def get_upload_dir() -> Path:
     return Path(os.environ.get("STORE_REQUEST_UPLOAD_DIR", DEFAULT_UPLOAD_DIR))
 
 
+def get_config_dir() -> Path:
+    return Path(os.environ.get("STORE_REQUEST_CONFIG_DIR", CONFIG_DIR))
+
+
 def now_text() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -104,7 +137,7 @@ def now_text() -> str:
 def ensure_directories() -> None:
     get_db_path().parent.mkdir(parents=True, exist_ok=True)
     get_upload_dir().mkdir(parents=True, exist_ok=True)
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    get_config_dir().mkdir(parents=True, exist_ok=True)
     TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
     STATIC_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -156,16 +189,81 @@ def init_db() -> None:
         connection.execute("CREATE INDEX IF NOT EXISTS idx_ticket_images_ticket_id ON ticket_images(ticket_id)")
 
 
-def load_stores() -> List[str]:
+def clean_string_list(value: object, default: List[str], allow_empty: bool = False) -> List[str]:
+    if not isinstance(value, list):
+        return list(default)
+    clean_values = [str(item).strip() for item in value if str(item).strip()]
+    if clean_values or allow_empty:
+        return clean_values
+    return list(default)
+
+
+def load_json_file(filename: str, default: object) -> object:
     try:
-        with STORES_FILE.open("r", encoding="utf-8") as file:
-            stores = json.load(file)
-        clean_stores = [str(store).strip() for store in stores if str(store).strip()]
-        if clean_stores:
-            return clean_stores
+        with (get_config_dir() / filename).open("r", encoding="utf-8") as file:
+            return json.load(file)
     except (OSError, json.JSONDecodeError):
-        pass
-    return ["南京门东店", "南昌万寿宫店", "山城巷店", "东郊记忆店", "蟠龙天地店", "秀水街店", "湾里店", "下浩里店", "烟台山店"]
+        return default
+
+
+def load_list_config(filename: str, default: List[str], allow_empty: bool = False) -> List[str]:
+    return clean_string_list(load_json_file(filename, default), default, allow_empty=allow_empty)
+
+
+def load_system_config(statuses: List[str]) -> Dict[str, object]:
+    raw_system = load_json_file("system.json", DEFAULT_SYSTEM)
+    system = dict(DEFAULT_SYSTEM)
+    if isinstance(raw_system, dict):
+        system.update(raw_system)
+
+    max_image_mb = system.get("max_image_mb")
+    if not isinstance(max_image_mb, int) or max_image_mb <= 0:
+        system["max_image_mb"] = DEFAULT_SYSTEM["max_image_mb"]
+
+    allowed_extensions = clean_string_list(
+        system.get("allowed_image_extensions"),
+        list(DEFAULT_SYSTEM["allowed_image_extensions"]),
+    )
+    system["allowed_image_extensions"] = [extension.lower().lstrip(".") for extension in allowed_extensions]
+
+    default_status = str(system.get("default_status", "")).strip()
+    system["default_status"] = default_status if default_status in statuses else statuses[0]
+
+    for key in ("app_name", "excel_filename_prefix"):
+        value = str(system.get(key, "")).strip()
+        if value:
+            system[key] = value
+        else:
+            system[key] = DEFAULT_SYSTEM[key]
+
+    port = system.get("port")
+    if not isinstance(port, int) or port <= 0:
+        system["port"] = DEFAULT_SYSTEM["port"]
+
+    return system
+
+
+def load_app_config() -> AppConfig:
+    statuses = load_list_config("statuses.json", DEFAULT_STATUSES)
+    system = load_system_config(statuses)
+    return AppConfig(
+        stores=load_list_config("stores.json", DEFAULT_STORES),
+        request_types=load_list_config("request_types.json", DEFAULT_REQUEST_TYPES),
+        urgency_levels=load_list_config("urgency_levels.json", DEFAULT_URGENCY_LEVELS),
+        statuses=statuses,
+        brands=load_list_config("brands.json", DEFAULT_BRANDS, allow_empty=True),
+        handlers=load_list_config("handlers.json", DEFAULT_HANDLERS, allow_empty=True),
+        app_name=str(system["app_name"]),
+        port=int(system["port"]),
+        max_image_mb=int(system["max_image_mb"]),
+        allowed_image_extensions=list(system["allowed_image_extensions"]),
+        default_status=str(system["default_status"]),
+        excel_filename_prefix=str(system["excel_filename_prefix"]),
+    )
+
+
+def load_stores() -> List[str]:
+    return load_app_config().stores
 
 
 def compact_text(value: Optional[str], max_len: int = 36) -> str:
@@ -194,14 +292,16 @@ def validate_submission(
     quantity: str,
     description: str,
     stores: Iterable[str],
+    request_types: Iterable[str],
+    urgency_levels: Iterable[str],
 ) -> Optional[str]:
     if not store_name or store_name not in stores:
         return "请选择有效门店。"
     if not submitter.strip():
         return "请填写提报人。"
-    if request_type not in REQUEST_TYPES:
+    if request_type not in request_types:
         return "请选择有效需求类型。"
-    if urgency not in URGENCY_LEVELS:
+    if urgency not in urgency_levels:
         return "请选择有效紧急程度。"
     if not description.strip():
         return "请填写问题说明。"
@@ -210,18 +310,20 @@ def validate_submission(
     return None
 
 
-async def prepare_images(images: Optional[List[UploadFile]]) -> List[Tuple[str, bytes]]:
+async def prepare_images(images: Optional[List[UploadFile]], config: AppConfig) -> List[Tuple[str, bytes]]:
     prepared_images: List[Tuple[str, bytes]] = []
+    allowed_extensions = set(config.allowed_image_extensions)
     for image in images or []:
         if not image or not image.filename:
             continue
         original_name = Path(image.filename).name
         extension = Path(original_name).suffix.lower().lstrip(".")
-        if extension not in ALLOWED_IMAGE_EXTENSIONS:
-            raise ValueError("图片仅支持 jpg、jpeg、png、webp 格式。")
+        if extension not in allowed_extensions:
+            allowed_text = "、".join(config.allowed_image_extensions)
+            raise ValueError(f"图片仅支持 {allowed_text} 格式。")
         content = await image.read()
-        if len(content) > MAX_IMAGE_BYTES:
-            raise ValueError("单张图片不能超过 10MB。")
+        if len(content) > config.max_image_bytes:
+            raise ValueError(f"单张图片不能超过 {config.max_image_mb}MB。")
         if not content:
             continue
         prepared_images.append((extension, content))
@@ -289,38 +391,43 @@ def build_ticket_where(filters: Dict[str, str]) -> Tuple[str, List[str]]:
     return where_sql, params
 
 
-def build_order_sql(sort: str) -> str:
+def build_case_order(values: List[str]) -> str:
+    cases = []
+    for index, value in enumerate(values):
+        escaped_value = value.replace("'", "''")
+        cases.append(f"WHEN '{escaped_value}' THEN {index}")
+    return " ".join(cases)
+
+
+def build_order_sql(sort: str, config: AppConfig) -> str:
     if sort == "urgency":
+        urgency_cases = build_case_order(config.urgency_levels)
         return """
         ORDER BY
             CASE urgency
-                WHEN '当天必须处理' THEN 0
-                WHEN '加急' THEN 1
-                ELSE 2
+                {urgency_cases}
+                ELSE {fallback_index}
             END,
             created_at DESC,
             id DESC
-        """
+        """.format(urgency_cases=urgency_cases, fallback_index=len(config.urgency_levels))
     if sort == "status":
+        status_cases = build_case_order(config.statuses)
         return """
         ORDER BY
             CASE status
-                WHEN '待处理' THEN 0
-                WHEN '处理中' THEN 1
-                WHEN '待门店补充' THEN 2
-                WHEN '已驳回' THEN 3
-                WHEN '已完成' THEN 4
-                ELSE 9
+                {status_cases}
+                ELSE {fallback_index}
             END,
             created_at DESC,
             id DESC
-        """
+        """.format(status_cases=status_cases, fallback_index=len(config.statuses))
     return "ORDER BY created_at DESC, id DESC"
 
 
-def fetch_tickets(filters: Dict[str, str], sort: str) -> List[Dict[str, object]]:
+def fetch_tickets(filters: Dict[str, str], sort: str, config: AppConfig) -> List[Dict[str, object]]:
     where_sql, params = build_ticket_where(filters)
-    order_sql = build_order_sql(sort)
+    order_sql = build_order_sql(sort, config)
     with get_connection() as connection:
         rows = connection.execute(
             f"""
@@ -419,7 +526,7 @@ def create_app() -> FastAPI:
     ensure_directories()
     init_db()
 
-    app = FastAPI(title="门店需求工单系统")
+    app = FastAPI(title=load_app_config().app_name)
     templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
     app.mount("/uploads", StaticFiles(directory=str(get_upload_dir())), name="uploads")
@@ -430,14 +537,17 @@ def create_app() -> FastAPI:
         error: str = "",
         values: Optional[Dict[str, str]] = None,
     ) -> HTMLResponse:
+        config = load_app_config()
         return templates.TemplateResponse(
             request,
             "submit.html",
             {
                 "request": request,
-                "stores": load_stores(),
-                "request_types": REQUEST_TYPES,
-                "urgency_levels": URGENCY_LEVELS,
+                "stores": config.stores,
+                "request_types": config.request_types,
+                "urgency_levels": config.urgency_levels,
+                "brands": config.brands,
+                "image_accept": ",".join(f".{extension}" for extension in config.allowed_image_extensions),
                 "error": error,
                 "values": values or {},
             },
@@ -467,7 +577,8 @@ def create_app() -> FastAPI:
         expected_finish_date: str = Form(""),
         images: Optional[List[UploadFile]] = File(None),
     ) -> HTMLResponse:
-        stores = load_stores()
+        config = load_app_config()
+        stores = config.stores
         form_values = {
             "store_name": store_name,
             "submitter": submitter,
@@ -480,12 +591,22 @@ def create_app() -> FastAPI:
             "description": description,
             "expected_finish_date": expected_finish_date,
         }
-        error = validate_submission(store_name, submitter, request_type, urgency, quantity, description, stores)
+        error = validate_submission(
+            store_name,
+            submitter,
+            request_type,
+            urgency,
+            quantity,
+            description,
+            stores,
+            config.request_types,
+            config.urgency_levels,
+        )
         if error:
             return render_submit_form(request, status_code=400, error=error, values=form_values)
 
         try:
-            prepared_images = await prepare_images(images)
+            prepared_images = await prepare_images(images, config)
         except ValueError as exc:
             return render_submit_form(request, status_code=400, error=str(exc), values=form_values)
 
@@ -516,7 +637,7 @@ def create_app() -> FastAPI:
                     quantity_value,
                     description.strip(),
                     expected_finish_date.strip(),
-                    "待处理",
+                    config.default_status,
                     "",
                 ),
             )
@@ -556,7 +677,8 @@ def create_app() -> FastAPI:
             "date_end": date_end,
             "keyword": keyword,
         }
-        tickets = fetch_tickets(filters, sort)
+        config = load_app_config()
+        tickets = fetch_tickets(filters, sort, config)
         export_url = "/admin/export"
         if request.url.query:
             export_url += f"?{request.url.query}"
@@ -566,10 +688,10 @@ def create_app() -> FastAPI:
             {
                 "request": request,
                 "tickets": tickets,
-                "stores": load_stores(),
-                "request_types": REQUEST_TYPES,
-                "urgency_levels": URGENCY_LEVELS,
-                "statuses": STATUSES,
+                "stores": config.stores,
+                "request_types": config.request_types,
+                "urgency_levels": config.urgency_levels,
+                "statuses": config.statuses,
                 "filters": filters,
                 "sort": sort,
                 "export_url": export_url,
@@ -587,6 +709,7 @@ def create_app() -> FastAPI:
         if not ticket:
             raise HTTPException(status_code=404, detail="工单不存在")
         images = fetch_ticket_images(ticket_id)
+        config = load_app_config()
         return templates.TemplateResponse(
             request,
             "ticket_detail.html",
@@ -594,7 +717,7 @@ def create_app() -> FastAPI:
                 "request": request,
                 "ticket": ticket,
                 "images": images,
-                "statuses": STATUSES,
+                "statuses": config.statuses,
                 "saved": saved,
             },
         )
@@ -606,7 +729,8 @@ def create_app() -> FastAPI:
         status: str = Form(""),
         handler_note: str = Form(""),
     ) -> RedirectResponse:
-        if status not in STATUSES:
+        config = load_app_config()
+        if status not in config.statuses:
             raise HTTPException(status_code=400, detail="状态不正确")
         with get_connection() as connection:
             cursor = connection.execute(
@@ -638,8 +762,9 @@ def create_app() -> FastAPI:
             "date_end": date_end,
             "keyword": keyword,
         }
-        output = build_excel(fetch_tickets(filters, sort))
-        filename = f"门店需求工单_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+        config = load_app_config()
+        output = build_excel(fetch_tickets(filters, sort, config))
+        filename = f"{config.excel_filename_prefix}_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
         return StreamingResponse(
             output,
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

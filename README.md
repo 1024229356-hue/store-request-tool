@@ -154,15 +154,25 @@ http://服务器公网IP:8701/admin
 
 访问后台和 Excel 导出时，浏览器会要求输入 `.env` 中配置的账号密码。
 
-## 如何新增门店
+## 配置文件说明
 
-编辑：
+业务配置统一放在 `config/` 目录：
 
 ```text
 config/stores.json
+config/request_types.json
+config/urgency_levels.json
+config/statuses.json
+config/brands.json
+config/handlers.json
+config/system.json
 ```
 
-按 JSON 数组格式增加门店名称，例如：
+如果配置文件不存在、JSON 格式错误或核心配置为空，系统会自动使用内置默认值兜底，不会因为配置问题启动失败。
+
+### 如何新增门店
+
+编辑 `config/stores.json`，按 JSON 数组格式增加门店名称，例如：
 
 ```json
 [
@@ -172,7 +182,71 @@ config/stores.json
 ]
 ```
 
-保存后刷新页面即可看到新的门店选项。
+### 如何新增需求类型
+
+编辑 `config/request_types.json`，按 JSON 数组格式增加需求类型，例如：
+
+```json
+[
+  "建单需求",
+  "审单需求",
+  "门店陈列需求"
+]
+```
+
+新增后，门店提报页和后台筛选会使用新的需求类型；提交校验也会按这个文件判断。
+
+### 如何新增品牌
+
+编辑 `config/brands.json`，按 JSON 数组格式增加品牌名称，例如：
+
+```json
+[
+  "自有品牌",
+  "联名品牌"
+]
+```
+
+品牌仍然保存到原有工单字段，页面会把这里的品牌作为输入建议。
+
+### 如何修改图片大小限制
+
+编辑 `config/system.json` 中的 `max_image_mb`：
+
+```json
+{
+  "max_image_mb": 10
+}
+```
+
+同时可通过 `allowed_image_extensions` 修改允许上传的图片格式：
+
+```json
+{
+  "allowed_image_extensions": ["jpg", "jpeg", "png", "webp"]
+}
+```
+
+### 如何修改 Excel 文件名前缀
+
+编辑 `config/system.json` 中的 `excel_filename_prefix`：
+
+```json
+{
+  "excel_filename_prefix": "门店需求工单"
+}
+```
+
+导出文件名格式为：
+
+```text
+配置的前缀_YYYYMMDD_HHMM.xlsx
+```
+
+### 哪些配置改完需要重启服务
+
+- 通常不需要重启：`stores.json`、`request_types.json`、`urgency_levels.json`、`statuses.json`、`brands.json`、`handlers.json`、`system.json` 中的图片限制、默认状态、导出文件名前缀。
+- 建议重启后生效：`system.json` 中的 `app_name`，以及 systemd 服务文件、`.env` 后台账号密码、端口监听方式等启动级配置。
 
 ## 数据和图片位置
 

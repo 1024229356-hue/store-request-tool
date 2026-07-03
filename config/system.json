@@ -1,0 +1,8 @@
+{
+  "app_name": "门店需求工单系统",
+  "port": 8701,
+  "max_image_mb": 10,
+  "allowed_image_extensions": ["jpg", "jpeg", "png", "webp"],
+  "default_status": "待处理",
+  "excel_filename_prefix": "门店需求工单"
+}

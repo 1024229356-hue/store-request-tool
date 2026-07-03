@@ -57,7 +57,12 @@
       <div class="grid-two">
         <label>
           <span>品牌</span>
-          <input name="brand" type="text" value="{{ values.get('brand', '') }}">
+          <input name="brand" type="text" value="{{ values.get('brand', '') }}" list="brand-options">
+          <datalist id="brand-options">
+            {% for brand in brands %}
+            <option value="{{ brand }}"></option>
+            {% endfor %}
+          </datalist>
         </label>
         <label>
           <span>商品名称</span>
@@ -83,7 +88,7 @@
 
       <label>
         <span>图片上传</span>
-        <input name="images" type="file" accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp" multiple data-image-input>
+        <input name="images" type="file" accept="{{ image_accept }}" multiple data-image-input>
       </label>
       <div class="image-preview" data-image-preview></div>
 
