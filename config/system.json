@@ -4,5 +4,8 @@
   "max_image_mb": 10,
   "allowed_image_extensions": ["jpg", "jpeg", "png", "webp"],
   "default_status": "待处理",
-  "excel_filename_prefix": "门店需求工单"
+  "excel_filename_prefix": "门店需求工单",
+  "page_size": 50,
+  "max_image_count": 5,
+  "max_total_upload_mb": 30
 }

@@ -8,16 +8,17 @@ from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile, status as http_status
-from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
+from PIL import Image, UnidentifiedImageError
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -42,6 +43,15 @@ DEFAULT_SYSTEM = {
     "allowed_image_extensions": ["jpg", "jpeg", "png", "webp"],
     "default_status": "待处理",
     "excel_filename_prefix": "门店需求工单",
+    "page_size": 50,
+    "max_image_count": 5,
+    "max_total_upload_mb": 30,
+}
+COMPLETED_STATUS = "已完成"
+IMAGE_FORMAT_EXTENSIONS = {
+    "JPEG": {"jpg", "jpeg"},
+    "PNG": {"png"},
+    "WEBP": {"webp"},
 }
 
 
@@ -59,10 +69,17 @@ class AppConfig:
     allowed_image_extensions: List[str]
     default_status: str
     excel_filename_prefix: str
+    page_size: int
+    max_image_count: int
+    max_total_upload_mb: int
 
     @property
     def max_image_bytes(self) -> int:
         return self.max_image_mb * 1024 * 1024
+
+    @property
+    def max_total_upload_bytes(self) -> int:
+        return self.max_total_upload_mb * 1024 * 1024
 
 EXCEL_HEADERS = [
     "工单号",
@@ -77,9 +94,14 @@ EXCEL_HEADERS = [
     "数量",
     "问题说明",
     "图片路径",
-    "状态",
+    "期望完成时间",
+    "当前状态",
+    "处理人",
     "处理备注",
+    "完成时间",
     "最后更新时间",
+    "处理时长小时",
+    "是否超时",
 ]
 
 
@@ -148,6 +170,31 @@ def get_connection() -> sqlite3.Connection:
     return connection
 
 
+def table_exists(connection: sqlite3.Connection, table_name: str) -> bool:
+    row = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table_name,),
+    ).fetchone()
+    return row is not None
+
+
+def column_exists(connection: sqlite3.Connection, table_name: str, column_name: str) -> bool:
+    if not table_exists(connection, table_name):
+        return False
+    rows = connection.execute(f"PRAGMA table_info({table_name})").fetchall()
+    return any(str(row["name"]) == column_name for row in rows)
+
+
+def add_column_if_missing(
+    connection: sqlite3.Connection,
+    table_name: str,
+    column_name: str,
+    column_definition: str,
+) -> None:
+    if not column_exists(connection, table_name, column_name):
+        connection.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}")
+
+
 def init_db() -> None:
     ensure_directories()
     with get_connection() as connection:
@@ -169,10 +216,14 @@ def init_db() -> None:
                 description TEXT NOT NULL,
                 expected_finish_date TEXT,
                 status TEXT NOT NULL,
-                handler_note TEXT
+                assigned_to TEXT,
+                handler_note TEXT,
+                closed_at TEXT
             )
             """
         )
+        add_column_if_missing(connection, "tickets", "assigned_to", "TEXT")
+        add_column_if_missing(connection, "tickets", "closed_at", "TEXT")
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS ticket_images (
@@ -184,9 +235,28 @@ def init_db() -> None:
             )
             """
         )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ticket_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticket_id INTEGER NOT NULL,
+                action TEXT NOT NULL,
+                old_status TEXT,
+                new_status TEXT,
+                old_assigned_to TEXT,
+                new_assigned_to TEXT,
+                note TEXT,
+                operator TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (ticket_id) REFERENCES tickets(id) ON DELETE CASCADE
+            )
+            """
+        )
         connection.execute("CREATE INDEX IF NOT EXISTS idx_tickets_created_at ON tickets(created_at)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_tickets_status ON tickets(status)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_tickets_assigned_to ON tickets(assigned_to)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_ticket_images_ticket_id ON ticket_images(ticket_id)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_ticket_logs_ticket_id ON ticket_logs(ticket_id)")
 
 
 def clean_string_list(value: object, default: List[str], allow_empty: bool = False) -> List[str]:
@@ -210,15 +280,24 @@ def load_list_config(filename: str, default: List[str], allow_empty: bool = Fals
     return clean_string_list(load_json_file(filename, default), default, allow_empty=allow_empty)
 
 
+def positive_int_config(system: Dict[str, object], key: str) -> int:
+    value = system.get(key)
+    default_value = int(DEFAULT_SYSTEM[key])
+    if isinstance(value, bool):
+        return default_value
+    if isinstance(value, int) and value > 0:
+        return value
+    return default_value
+
+
 def load_system_config(statuses: List[str]) -> Dict[str, object]:
     raw_system = load_json_file("system.json", DEFAULT_SYSTEM)
     system = dict(DEFAULT_SYSTEM)
     if isinstance(raw_system, dict):
         system.update(raw_system)
 
-    max_image_mb = system.get("max_image_mb")
-    if not isinstance(max_image_mb, int) or max_image_mb <= 0:
-        system["max_image_mb"] = DEFAULT_SYSTEM["max_image_mb"]
+    for key in ("max_image_mb", "page_size", "max_image_count", "max_total_upload_mb"):
+        system[key] = positive_int_config(system, key)
 
     allowed_extensions = clean_string_list(
         system.get("allowed_image_extensions"),
@@ -259,6 +338,9 @@ def load_app_config() -> AppConfig:
         allowed_image_extensions=list(system["allowed_image_extensions"]),
         default_status=str(system["default_status"]),
         excel_filename_prefix=str(system["excel_filename_prefix"]),
+        page_size=int(system["page_size"]),
+        max_image_count=int(system["max_image_count"]),
+        max_total_upload_mb=int(system["max_total_upload_mb"]),
     )
 
 
@@ -273,6 +355,29 @@ def compact_text(value: Optional[str], max_len: int = 36) -> str:
     return text[:max_len] + "..."
 
 
+def image_filename(image_path: str) -> str:
+    return Path(str(image_path).replace("\\", "/")).name
+
+
+def protected_upload_url(image_path: str) -> str:
+    return f"/admin/uploads/{quote(image_filename(image_path))}"
+
+
+def resolve_upload_file(filename: str) -> Optional[Path]:
+    normalized = filename.replace("\\", "/")
+    if not normalized or "/" in normalized or normalized in {".", ".."}:
+        return None
+    upload_root = get_upload_dir().resolve()
+    target = (upload_root / normalized).resolve()
+    try:
+        target.relative_to(upload_root)
+    except ValueError:
+        return None
+    if not target.is_file():
+        return None
+    return target
+
+
 def generate_ticket_no(connection: sqlite3.Connection) -> str:
     today = datetime.now().strftime("%Y%m%d")
     prefix = f"REQ-{today}-"
@@ -282,6 +387,45 @@ def generate_ticket_no(connection: sqlite3.Connection) -> str:
     ).fetchone()
     next_no = (row["max_no"] or 0) + 1
     return f"{prefix}{next_no:04d}"
+
+
+def parse_datetime_text(value: object) -> Optional[datetime]:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def processing_hours(ticket: Dict[str, object]) -> object:
+    created_at = parse_datetime_text(ticket.get("created_at"))
+    if not created_at:
+        return ""
+    finished_at = parse_datetime_text(ticket.get("closed_at")) or datetime.now()
+    seconds = max((finished_at - created_at).total_seconds(), 0)
+    return round(seconds / 3600, 2)
+
+
+def overdue_text(ticket: Dict[str, object]) -> str:
+    expected = parse_datetime_text(ticket.get("expected_finish_date"))
+    if not expected:
+        return ""
+    closed_at = parse_datetime_text(ticket.get("closed_at"))
+    compare_date = closed_at.date() if closed_at else datetime.now().date()
+    return "是" if compare_date > expected.date() else "否"
+
+
+def build_query_params(filters: Dict[str, str], sort: str, page: Optional[int] = None) -> str:
+    params = {key: value for key, value in filters.items() if str(value or "").strip()}
+    if sort:
+        params["sort"] = sort
+    if page is not None:
+        params["page"] = str(page)
+    return urlencode(params)
 
 
 def validate_submission(
@@ -311,35 +455,138 @@ def validate_submission(
 
 
 async def prepare_images(images: Optional[List[UploadFile]], config: AppConfig) -> List[Tuple[str, bytes]]:
-    prepared_images: List[Tuple[str, bytes]] = []
-    allowed_extensions = set(config.allowed_image_extensions)
+    raw_images: List[Tuple[str, bytes]] = []
     for image in images or []:
         if not image or not image.filename:
             continue
         original_name = Path(image.filename).name
+        content = await image.read()
+        if not content:
+            continue
+        raw_images.append((original_name, content))
+
+    if len(raw_images) > config.max_image_count:
+        raise ValueError(f"最多上传 {config.max_image_count} 张图片。")
+
+    total_bytes = sum(len(content) for _, content in raw_images)
+    if total_bytes > config.max_total_upload_bytes:
+        raise ValueError(f"图片总大小不能超过 {config.max_total_upload_mb}MB。")
+
+    prepared_images: List[Tuple[str, bytes]] = []
+    allowed_extensions = set(config.allowed_image_extensions)
+    for original_name, content in raw_images:
         extension = Path(original_name).suffix.lower().lstrip(".")
         if extension not in allowed_extensions:
             allowed_text = "、".join(config.allowed_image_extensions)
             raise ValueError(f"图片仅支持 {allowed_text} 格式。")
-        content = await image.read()
         if len(content) > config.max_image_bytes:
             raise ValueError(f"单张图片不能超过 {config.max_image_mb}MB。")
-        if not content:
-            continue
+
+        try:
+            with Image.open(BytesIO(content)) as image_file:
+                image_format = str(image_file.format or "").upper()
+                image_file.verify()
+        except (UnidentifiedImageError, OSError, ValueError):
+            raise ValueError("图片文件无法识别，请重新上传。") from None
+
+        valid_extensions = IMAGE_FORMAT_EXTENSIONS.get(image_format, {image_format.lower()})
+        if extension not in valid_extensions:
+            raise ValueError("图片后缀与实际格式不匹配，请重新上传。")
+
         prepared_images.append((extension, content))
     return prepared_images
 
 
-def save_images(ticket_id: int, ticket_no: str, prepared_images: List[Tuple[str, bytes]]) -> List[str]:
+def save_images(ticket_no: str, prepared_images: List[Tuple[str, bytes]]) -> Tuple[List[str], List[Path]]:
     image_paths: List[str] = []
+    saved_files: List[Path] = []
     upload_dir = get_upload_dir()
     upload_dir.mkdir(parents=True, exist_ok=True)
     for index, (extension, content) in enumerate(prepared_images, start=1):
         filename = f"{ticket_no}_{index}_{uuid.uuid4().hex[:8]}.{extension}"
         target_path = upload_dir / filename
         target_path.write_bytes(content)
+        saved_files.append(target_path)
         image_paths.append(f"uploads/{filename}")
-    return image_paths
+    return image_paths, saved_files
+
+
+def cleanup_saved_files(paths: List[Path]) -> None:
+    for path in paths:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def is_ticket_no_conflict(error: sqlite3.IntegrityError) -> bool:
+    return "ticket_no" in str(error).lower()
+
+
+def create_ticket_with_images(
+    ticket_data: Dict[str, object],
+    prepared_images: List[Tuple[str, bytes]],
+    config: AppConfig,
+) -> Tuple[int, str]:
+    for _attempt in range(3):
+        saved_files: List[Path] = []
+        timestamp = now_text()
+        try:
+            with get_connection() as connection:
+                ticket_no = generate_ticket_no(connection)
+                try:
+                    cursor = connection.execute(
+                        """
+                        INSERT INTO tickets (
+                            ticket_no, created_at, updated_at, store_name, submitter,
+                            request_type, urgency, brand, product_name, sku_barcode,
+                            quantity, description, expected_finish_date, status,
+                            assigned_to, handler_note, closed_at
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            ticket_no,
+                            timestamp,
+                            timestamp,
+                            ticket_data["store_name"],
+                            ticket_data["submitter"],
+                            ticket_data["request_type"],
+                            ticket_data["urgency"],
+                            ticket_data["brand"],
+                            ticket_data["product_name"],
+                            ticket_data["sku_barcode"],
+                            ticket_data["quantity"],
+                            ticket_data["description"],
+                            ticket_data["expected_finish_date"],
+                            config.default_status,
+                            "",
+                            "",
+                            None,
+                        ),
+                    )
+                except sqlite3.IntegrityError as exc:
+                    if is_ticket_no_conflict(exc):
+                        continue
+                    raise
+
+                ticket_id = int(cursor.lastrowid)
+                image_paths, saved_files = save_images(ticket_no, prepared_images)
+                for image_path in image_paths:
+                    connection.execute(
+                        "INSERT INTO ticket_images (ticket_id, image_path, uploaded_at) VALUES (?, ?, ?)",
+                        (ticket_id, image_path, timestamp),
+                    )
+            return ticket_id, ticket_no
+        except sqlite3.IntegrityError as exc:
+            cleanup_saved_files(saved_files)
+            if is_ticket_no_conflict(exc):
+                continue
+            raise
+        except Exception:
+            cleanup_saved_files(saved_files)
+            raise
+    raise RuntimeError("工单号生成冲突，请稍后重试。")
 
 
 def build_ticket_where(filters: Dict[str, str]) -> Tuple[str, List[str]]:
@@ -351,6 +598,7 @@ def build_ticket_where(filters: Dict[str, str]) -> Tuple[str, List[str]]:
         "request_type": "request_type",
         "urgency": "urgency",
         "status": "status",
+        "assigned_to": "assigned_to",
     }
     for filter_key, column_name in exact_fields.items():
         value = filters.get(filter_key, "").strip()
@@ -381,11 +629,12 @@ def build_ticket_where(filters: Dict[str, str]) -> Tuple[str, List[str]]:
                 OR product_name LIKE ?
                 OR sku_barcode LIKE ?
                 OR description LIKE ?
+                OR assigned_to LIKE ?
                 OR handler_note LIKE ?
             )
             """
         )
-        params.extend([like_value] * 8)
+        params.extend([like_value] * 9)
 
     where_sql = " WHERE " + " AND ".join(clauses) if clauses else ""
     return where_sql, params
@@ -409,7 +658,7 @@ def build_order_sql(sort: str, config: AppConfig) -> str:
                 ELSE {fallback_index}
             END,
             created_at DESC,
-            id DESC
+            tickets.id DESC
         """.format(urgency_cases=urgency_cases, fallback_index=len(config.urgency_levels))
     if sort == "status":
         status_cases = build_case_order(config.statuses)
@@ -420,31 +669,71 @@ def build_order_sql(sort: str, config: AppConfig) -> str:
                 ELSE {fallback_index}
             END,
             created_at DESC,
-            id DESC
+            tickets.id DESC
         """.format(status_cases=status_cases, fallback_index=len(config.statuses))
-    return "ORDER BY created_at DESC, id DESC"
+    return "ORDER BY created_at DESC, tickets.id DESC"
 
 
-def fetch_tickets(filters: Dict[str, str], sort: str, config: AppConfig) -> List[Dict[str, object]]:
+def count_tickets(filters: Dict[str, str]) -> int:
+    where_sql, params = build_ticket_where(filters)
+    with get_connection() as connection:
+        row = connection.execute(f"SELECT COUNT(*) AS total FROM tickets {where_sql}", params).fetchone()
+    return int(row["total"] or 0)
+
+
+def fetch_tickets(
+    filters: Dict[str, str],
+    sort: str,
+    config: AppConfig,
+    limit: Optional[int] = None,
+    offset: int = 0,
+) -> List[Dict[str, object]]:
     where_sql, params = build_ticket_where(filters)
     order_sql = build_order_sql(sort, config)
+    limit_sql = ""
+    query_params: List[object] = list(params)
+    if limit is not None:
+        limit_sql = "LIMIT ? OFFSET ?"
+        query_params.extend([limit, offset])
     with get_connection() as connection:
         rows = connection.execute(
             f"""
             SELECT
-                id, ticket_no, created_at, updated_at, store_name, submitter,
+                tickets.id, ticket_no, created_at, updated_at, store_name, submitter,
                 request_type, urgency, brand, product_name, sku_barcode,
-                quantity, description, expected_finish_date, status, handler_note
+                quantity, description, expected_finish_date, status, assigned_to,
+                handler_note, closed_at, COUNT(ticket_images.id) AS image_count
             FROM tickets
+            LEFT JOIN ticket_images ON ticket_images.ticket_id = tickets.id
             {where_sql}
+            GROUP BY tickets.id
             {order_sql}
+            {limit_sql}
             """,
-            params,
+            query_params,
         ).fetchall()
     tickets = [dict(row) for row in rows]
     for ticket in tickets:
         ticket["description_summary"] = compact_text(str(ticket.get("description") or ""))
     return tickets
+
+
+def fetch_ticket_page(filters: Dict[str, str], sort: str, config: AppConfig, page: int) -> Tuple[List[Dict[str, object]], Dict[str, int]]:
+    total_count = count_tickets(filters)
+    total_pages = max((total_count + config.page_size - 1) // config.page_size, 1)
+    current_page = min(max(page, 1), total_pages)
+    offset = (current_page - 1) * config.page_size
+    tickets = fetch_tickets(filters, sort, config, limit=config.page_size, offset=offset)
+    return tickets, {
+        "current_page": current_page,
+        "total_pages": total_pages,
+        "total_count": total_count,
+        "page_size": config.page_size,
+        "has_prev": 1 if current_page > 1 else 0,
+        "has_next": 1 if current_page < total_pages else 0,
+        "prev_page": max(current_page - 1, 1),
+        "next_page": min(current_page + 1, total_pages),
+    }
 
 
 def fetch_ticket(ticket_id: int) -> Optional[Dict[str, object]]:
@@ -457,6 +746,25 @@ def fetch_ticket_images(ticket_id: int) -> List[Dict[str, object]]:
     with get_connection() as connection:
         rows = connection.execute(
             "SELECT id, ticket_id, image_path, uploaded_at FROM ticket_images WHERE ticket_id = ? ORDER BY id",
+            (ticket_id,),
+        ).fetchall()
+    images = [dict(row) for row in rows]
+    for image in images:
+        image["filename"] = image_filename(str(image.get("image_path") or ""))
+        image["protected_url"] = protected_upload_url(str(image.get("image_path") or ""))
+    return images
+
+
+def fetch_ticket_logs(ticket_id: int) -> List[Dict[str, object]]:
+    with get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT id, ticket_id, action, old_status, new_status, old_assigned_to,
+                   new_assigned_to, note, operator, created_at
+            FROM ticket_logs
+            WHERE ticket_id = ?
+            ORDER BY created_at DESC, id DESC
+            """,
             (ticket_id,),
         ).fetchall()
     return [dict(row) for row in rows]
@@ -484,7 +792,7 @@ def build_excel(tickets: List[Dict[str, object]]) -> BytesIO:
                 ids,
             ).fetchall()
         for row in rows:
-            image_map.setdefault(int(row["ticket_id"]), []).append(str(row["image_path"]))
+            image_map.setdefault(int(row["ticket_id"]), []).append(protected_upload_url(str(row["image_path"])))
 
     for ticket in tickets:
         sheet.append(
@@ -501,13 +809,18 @@ def build_excel(tickets: List[Dict[str, object]]) -> BytesIO:
                 ticket.get("quantity") if ticket.get("quantity") is not None else "",
                 ticket.get("description"),
                 "; ".join(image_map.get(int(ticket["id"]), [])),
+                ticket.get("expected_finish_date") or "",
                 ticket.get("status"),
+                ticket.get("assigned_to") or "",
                 ticket.get("handler_note") or "",
+                ticket.get("closed_at") or "",
                 ticket.get("updated_at"),
+                processing_hours(ticket),
+                overdue_text(ticket),
             ]
         )
 
-    widths = [22, 20, 16, 14, 14, 14, 16, 20, 20, 10, 38, 42, 14, 32, 20]
+    widths = [22, 20, 16, 14, 14, 14, 16, 20, 20, 10, 38, 42, 18, 14, 14, 32, 20, 20, 16, 12]
     for index, width in enumerate(widths, start=1):
         sheet.column_dimensions[get_column_letter(index)].width = width
     for row in sheet.iter_rows(min_row=2):
@@ -529,7 +842,6 @@ def create_app() -> FastAPI:
     app = FastAPI(title=load_app_config().app_name)
     templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
-    app.mount("/uploads", StaticFiles(directory=str(get_upload_dir())), name="uploads")
 
     def render_submit_form(
         request: Request,
@@ -548,6 +860,9 @@ def create_app() -> FastAPI:
                 "urgency_levels": config.urgency_levels,
                 "brands": config.brands,
                 "image_accept": ",".join(f".{extension}" for extension in config.allowed_image_extensions),
+                "max_image_count": config.max_image_count,
+                "max_total_upload_mb": config.max_total_upload_mb,
+                "max_image_mb": config.max_image_mb,
                 "error": error,
                 "values": values or {},
             },
@@ -612,42 +927,28 @@ def create_app() -> FastAPI:
 
         timestamp = now_text()
         quantity_value = int(quantity.strip()) if quantity.strip() else None
-        with get_connection() as connection:
-            ticket_no = generate_ticket_no(connection)
-            cursor = connection.execute(
-                """
-                INSERT INTO tickets (
-                    ticket_no, created_at, updated_at, store_name, submitter,
-                    request_type, urgency, brand, product_name, sku_barcode,
-                    quantity, description, expected_finish_date, status, handler_note
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    ticket_no,
-                    timestamp,
-                    timestamp,
-                    store_name.strip(),
-                    submitter.strip(),
-                    request_type,
-                    urgency,
-                    brand.strip(),
-                    product_name.strip(),
-                    sku_barcode.strip(),
-                    quantity_value,
-                    description.strip(),
-                    expected_finish_date.strip(),
-                    config.default_status,
-                    "",
-                ),
+        try:
+            _ticket_id, ticket_no = create_ticket_with_images(
+                {
+                    "created_at": timestamp,
+                    "store_name": store_name.strip(),
+                    "submitter": submitter.strip(),
+                    "request_type": request_type,
+                    "urgency": urgency,
+                    "brand": brand.strip(),
+                    "product_name": product_name.strip(),
+                    "sku_barcode": sku_barcode.strip(),
+                    "quantity": quantity_value,
+                    "description": description.strip(),
+                    "expected_finish_date": expected_finish_date.strip(),
+                },
+                prepared_images,
+                config,
             )
-            ticket_id = int(cursor.lastrowid)
-            image_paths = save_images(ticket_id, ticket_no, prepared_images)
-            for image_path in image_paths:
-                connection.execute(
-                    "INSERT INTO ticket_images (ticket_id, image_path, uploaded_at) VALUES (?, ?, ?)",
-                    (ticket_id, image_path, timestamp),
-                )
+        except RuntimeError as exc:
+            return render_submit_form(request, status_code=500, error=str(exc), values=form_values)
+        except OSError:
+            return render_submit_form(request, status_code=500, error="图片保存失败，请稍后重试。", values=form_values)
 
         return templates.TemplateResponse(
             request,
@@ -663,25 +964,29 @@ def create_app() -> FastAPI:
         request_type: str = Query(""),
         urgency: str = Query(""),
         status: str = Query(""),
+        assigned_to: str = Query(""),
         date_start: str = Query(""),
         date_end: str = Query(""),
         keyword: str = Query(""),
         sort: str = Query("newest"),
+        page: int = Query(1),
     ) -> HTMLResponse:
         filters = {
             "store_name": store_name,
             "request_type": request_type,
             "urgency": urgency,
             "status": status,
+            "assigned_to": assigned_to,
             "date_start": date_start,
             "date_end": date_end,
             "keyword": keyword,
         }
         config = load_app_config()
-        tickets = fetch_tickets(filters, sort, config)
-        export_url = "/admin/export"
-        if request.url.query:
-            export_url += f"?{request.url.query}"
+        tickets, pagination = fetch_ticket_page(filters, sort, config, page)
+        export_query = build_query_params(filters, sort)
+        export_url = "/admin/export" + (f"?{export_query}" if export_query else "")
+        prev_query = build_query_params(filters, sort, pagination["prev_page"])
+        next_query = build_query_params(filters, sort, pagination["next_page"])
         return templates.TemplateResponse(
             request,
             "admin.html",
@@ -692,9 +997,13 @@ def create_app() -> FastAPI:
                 "request_types": config.request_types,
                 "urgency_levels": config.urgency_levels,
                 "statuses": config.statuses,
+                "handlers": config.handlers,
                 "filters": filters,
                 "sort": sort,
                 "export_url": export_url,
+                "pagination": pagination,
+                "prev_page_url": "/admin" + (f"?{prev_query}" if prev_query else ""),
+                "next_page_url": "/admin" + (f"?{next_query}" if next_query else ""),
             },
         )
 
@@ -709,6 +1018,7 @@ def create_app() -> FastAPI:
         if not ticket:
             raise HTTPException(status_code=404, detail="工单不存在")
         images = fetch_ticket_images(ticket_id)
+        logs = fetch_ticket_logs(ticket_id)
         config = load_app_config()
         return templates.TemplateResponse(
             request,
@@ -718,6 +1028,8 @@ def create_app() -> FastAPI:
                 "ticket": ticket,
                 "images": images,
                 "statuses": config.statuses,
+                "handlers": config.handlers,
+                "logs": logs,
                 "saved": saved,
             },
         )
@@ -725,21 +1037,71 @@ def create_app() -> FastAPI:
     @app.post("/admin/ticket/{ticket_id}")
     def update_ticket(
         ticket_id: int,
-        _admin: str = Depends(require_admin),
+        admin: str = Depends(require_admin),
         status: str = Form(""),
+        assigned_to: str = Form(""),
         handler_note: str = Form(""),
     ) -> RedirectResponse:
         config = load_app_config()
         if status not in config.statuses:
             raise HTTPException(status_code=400, detail="状态不正确")
+        assigned_to = assigned_to.strip()
+        if assigned_to and config.handlers and assigned_to not in config.handlers:
+            raise HTTPException(status_code=400, detail="处理人不正确")
+        handler_note = handler_note.strip()
+        timestamp = now_text()
         with get_connection() as connection:
-            cursor = connection.execute(
-                "UPDATE tickets SET status = ?, handler_note = ?, updated_at = ? WHERE id = ?",
-                (status, handler_note.strip(), now_text(), ticket_id),
-            )
-            if cursor.rowcount == 0:
+            old_row = connection.execute("SELECT * FROM tickets WHERE id = ?", (ticket_id,)).fetchone()
+            if not old_row:
                 raise HTTPException(status_code=404, detail="工单不存在")
+            old_ticket = dict(old_row)
+            old_status = str(old_ticket.get("status") or "")
+            old_assigned_to = str(old_ticket.get("assigned_to") or "")
+            old_note = str(old_ticket.get("handler_note") or "")
+            closed_at = old_ticket.get("closed_at")
+            if status == COMPLETED_STATUS and not closed_at:
+                closed_at = timestamp
+            elif old_status == COMPLETED_STATUS and status != COMPLETED_STATUS:
+                closed_at = None
+
+            changed = status != old_status or assigned_to != old_assigned_to or handler_note != old_note
+            if changed:
+                connection.execute(
+                    """
+                    UPDATE tickets
+                    SET status = ?, assigned_to = ?, handler_note = ?, closed_at = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (status, assigned_to, handler_note, closed_at, timestamp, ticket_id),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO ticket_logs (
+                        ticket_id, action, old_status, new_status, old_assigned_to,
+                        new_assigned_to, note, operator, created_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        ticket_id,
+                        "update",
+                        old_status,
+                        status,
+                        old_assigned_to,
+                        assigned_to,
+                        handler_note,
+                        admin,
+                        timestamp,
+                    ),
+                )
         return RedirectResponse(url=f"/admin/ticket/{ticket_id}?saved=1", status_code=303)
+
+    @app.get("/admin/uploads/{filename:path}")
+    def protected_upload(filename: str, _admin: str = Depends(require_admin)) -> FileResponse:
+        target = resolve_upload_file(filename)
+        if not target:
+            raise HTTPException(status_code=404, detail="图片不存在")
+        return FileResponse(target)
 
     @app.get("/admin/export")
     def export_tickets(
@@ -748,6 +1110,7 @@ def create_app() -> FastAPI:
         request_type: str = Query(""),
         urgency: str = Query(""),
         status: str = Query(""),
+        assigned_to: str = Query(""),
         date_start: str = Query(""),
         date_end: str = Query(""),
         keyword: str = Query(""),
@@ -758,6 +1121,7 @@ def create_app() -> FastAPI:
             "request_type": request_type,
             "urgency": urgency,
             "status": status,
+            "assigned_to": assigned_to,
             "date_start": date_start,
             "date_end": date_end,
             "keyword": keyword,

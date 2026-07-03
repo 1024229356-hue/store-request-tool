@@ -1,9 +1,12 @@
+import base64
 import importlib
 import json
 import re
+import sqlite3
 import sys
 from io import BytesIO
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi.testclient import TestClient
 from openpyxl import load_workbook
@@ -11,6 +14,10 @@ from openpyxl import load_workbook
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 ADMIN_AUTH = ("regional-admin", "very-secret-value")
+
+VALID_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4//8/AAX+Av4N70a4AAAAAElFTkSuQmCC"
+)
 
 DEFAULT_TEST_CONFIG = {
     "stores.json": ["南京门东店", "南昌万寿宫店", "山城巷店"],
@@ -26,8 +33,34 @@ DEFAULT_TEST_CONFIG = {
         "allowed_image_extensions": ["jpg", "jpeg", "png", "webp"],
         "default_status": "待处理",
         "excel_filename_prefix": "门店需求工单",
+        "page_size": 50,
+        "max_image_count": 5,
+        "max_total_upload_mb": 30,
     },
 }
+
+EXPECTED_EXPORT_HEADERS = [
+    "工单号",
+    "提交时间",
+    "门店",
+    "提报人",
+    "需求类型",
+    "紧急程度",
+    "品牌",
+    "商品名称",
+    "规格条码",
+    "数量",
+    "问题说明",
+    "图片路径",
+    "期望完成时间",
+    "当前状态",
+    "处理人",
+    "处理备注",
+    "完成时间",
+    "最后更新时间",
+    "处理时长小时",
+    "是否超时",
+]
 
 
 def write_config(config_dir, overrides=None):
@@ -53,61 +86,122 @@ def build_client(tmp_path, monkeypatch, config_overrides=None, write_configs=Tru
     return TestClient(main.app), main
 
 
-def test_submit_ticket_with_image_admin_update_export_and_persistence(tmp_path, monkeypatch):
+def submit_ticket(client, **overrides):
+    data = {
+        "store_name": "南京门东店",
+        "submitter": "测试提报人",
+        "request_type": "建单需求",
+        "urgency": "加急",
+        "brand": "测试品牌",
+        "product_name": "测试商品",
+        "sku_barcode": "690000000001",
+        "quantity": "12",
+        "description": "这是一条自动化测试工单",
+        "expected_finish_date": "2026-07-04",
+    }
+    data.update(overrides)
+    return client.post("/submit", data=data)
+
+
+def submit_ticket_with_image(client, filename="issue.png", content=VALID_PNG, **overrides):
+    data = {
+        "store_name": "南京门东店",
+        "submitter": "测试提报人",
+        "request_type": "建单需求",
+        "urgency": "加急",
+        "brand": "测试品牌",
+        "product_name": "测试商品",
+        "sku_barcode": "690000000001",
+        "quantity": "12",
+        "description": "这是一条自动化测试工单",
+        "expected_finish_date": "2026-07-04",
+    }
+    data.update(overrides)
+    media_type = "image/png" if filename.endswith(".png") else "image/jpeg"
+    return client.post("/submit", data=data, files=[("images", (filename, content, media_type))])
+
+
+def rows_for(tmp_path, table_name):
+    with sqlite3.connect(tmp_path / "tickets.db") as connection:
+        connection.row_factory = sqlite3.Row
+        return [dict(row) for row in connection.execute(f"SELECT * FROM {table_name} ORDER BY id")]
+
+
+def test_submit_admin_security_lifecycle_export_and_persistence(tmp_path, monkeypatch):
     client, main = build_client(tmp_path, monkeypatch)
 
     submit_page = client.get("/submit")
     assert submit_page.status_code == 200
     assert "南京门东店" in submit_page.text
 
-    image_bytes = b"\x89PNG\r\n\x1a\n" + b"0" * 128
-    response = client.post(
-        "/submit",
-        data={
-            "store_name": "南京门东店",
-            "submitter": "测试提报人",
-            "request_type": "建单需求",
-            "urgency": "加急",
-            "brand": "测试品牌",
-            "product_name": "测试商品",
-            "sku_barcode": "690000000001",
-            "quantity": "12",
-            "description": "这是一条自动化测试工单",
-            "expected_finish_date": "2026-07-04",
-        },
-        files=[("images", ("issue.png", image_bytes, "image/png"))],
-    )
+    response = submit_ticket_with_image(client)
     assert response.status_code == 200
     assert "已提交" in response.text
+    assert "请截图保存工单号" in response.text
     ticket_no = re.search(r"REQ-\d{8}-0001", response.text).group(0)
+
+    tickets = rows_for(tmp_path, "tickets")
+    assert tickets[0]["assigned_to"] in ("", None)
+    assert tickets[0]["closed_at"] in ("", None)
 
     uploaded_files = list((tmp_path / "uploads").glob("*.png"))
     assert len(uploaded_files) == 1
+    protected_path = f"/admin/uploads/{uploaded_files[0].name}"
+
+    assert client.get(f"/uploads/{uploaded_files[0].name}").status_code != 200
+    assert client.get(protected_path).status_code == 401
+    protected_response = client.get(protected_path, auth=ADMIN_AUTH)
+    assert protected_response.status_code == 200
+    assert protected_response.content.startswith(b"\x89PNG")
+    assert client.get("/admin/uploads/../tickets.db", auth=ADMIN_AUTH).status_code == 404
 
     assert client.get("/admin").status_code == 401
     assert client.get("/admin", auth=("admin", "change-me")).status_code == 401
     admin_page = client.get("/admin", auth=ADMIN_AUTH)
     assert admin_page.status_code == 200
     assert ticket_no in admin_page.text
-    assert "测试商品" in admin_page.text
+    assert "处理人" in admin_page.text
+    assert "图片数" in admin_page.text
 
     assert client.get("/admin/ticket/1").status_code == 401
     assert client.post("/admin/ticket/1", data={"status": "处理中"}).status_code == 401
     update_response = client.post(
         "/admin/ticket/1",
-        data={"status": "处理中", "handler_note": "已安排总部同事处理"},
+        data={"status": "已完成", "assigned_to": "采购", "handler_note": "已安排总部同事处理"},
         auth=ADMIN_AUTH,
         follow_redirects=False,
     )
     assert update_response.status_code == 303
 
+    tickets = rows_for(tmp_path, "tickets")
+    assert tickets[0]["status"] == "已完成"
+    assert tickets[0]["assigned_to"] == "采购"
+    assert tickets[0]["closed_at"]
+    logs = rows_for(tmp_path, "ticket_logs")
+    assert len(logs) == 1
+    assert logs[0]["old_status"] == "待处理"
+    assert logs[0]["new_status"] == "已完成"
+    assert logs[0]["new_assigned_to"] == "采购"
+    assert logs[0]["operator"] == ADMIN_AUTH[0]
+
     detail_page = client.get("/admin/ticket/1", auth=ADMIN_AUTH)
     assert detail_page.status_code == 200
-    assert "处理中" in detail_page.text
     assert "已安排总部同事处理" in detail_page.text
-    assert "/uploads/" in detail_page.text
+    assert "完成时间" in detail_page.text
+    assert "处理日志" in detail_page.text
+    assert protected_path in detail_page.text
 
-    assert client.get("/admin/export").status_code == 401
+    reopen_response = client.post(
+        "/admin/ticket/1",
+        data={"status": "处理中", "assigned_to": "采购", "handler_note": "重新打开"},
+        auth=ADMIN_AUTH,
+        follow_redirects=False,
+    )
+    assert reopen_response.status_code == 303
+    tickets = rows_for(tmp_path, "tickets")
+    assert tickets[0]["closed_at"] in ("", None)
+    assert len(rows_for(tmp_path, "ticket_logs")) == 2
+
     export_response = client.get("/admin/export", auth=ADMIN_AUTH)
     assert export_response.status_code == 200
     assert export_response.headers["content-type"].startswith(
@@ -115,11 +209,15 @@ def test_submit_ticket_with_image_admin_update_export_and_persistence(tmp_path, 
     )
     workbook = load_workbook(BytesIO(export_response.content))
     sheet = workbook.active
+    assert [cell.value for cell in sheet[1]] == EXPECTED_EXPORT_HEADERS
     assert sheet["A2"].value == ticket_no
-    assert sheet["K2"].value == "这是一条自动化测试工单"
-    assert "uploads/" in sheet["L2"].value
-    assert sheet["M2"].value == "处理中"
-    assert sheet["N2"].value == "已安排总部同事处理"
+    assert sheet["L2"].value == protected_path
+    assert sheet["M2"].value == "2026-07-04"
+    assert sheet["N2"].value == "处理中"
+    assert sheet["O2"].value == "采购"
+    assert sheet["P2"].value == "重新打开"
+    assert isinstance(sheet["S2"].value, (int, float))
+    assert sheet["T2"].value in ("是", "否")
 
     restarted_client = TestClient(main.create_app())
     restarted_admin_page = restarted_client.get("/admin", auth=ADMIN_AUTH)
@@ -127,38 +225,102 @@ def test_submit_ticket_with_image_admin_update_export_and_persistence(tmp_path, 
     assert ticket_no in restarted_admin_page.text
 
 
-def test_submit_rejects_bad_quantity_and_bad_image_type(tmp_path, monkeypatch):
-    client, _ = build_client(tmp_path, monkeypatch)
+def test_upload_validation_rejects_fake_images_count_and_total_size(tmp_path, monkeypatch):
+    client, _ = build_client(
+        tmp_path,
+        monkeypatch,
+        {
+            "system.json": {
+                "app_name": "门店需求工单系统",
+                "port": 8701,
+                "max_image_mb": 10,
+                "allowed_image_extensions": ["jpg", "jpeg", "png", "webp"],
+                "default_status": "待处理",
+                "excel_filename_prefix": "门店需求工单",
+                "page_size": 50,
+                "max_image_count": 1,
+                "max_total_upload_mb": 1,
+            }
+        },
+    )
 
-    bad_quantity = client.post(
+    fake_jpg = submit_ticket_with_image(client, filename="fake.jpg", content=b"not an image")
+    assert fake_jpg.status_code == 400
+    assert "图片文件无法识别" in fake_jpg.text
+
+    too_many = client.post(
         "/submit",
         data={
             "store_name": "南京门东店",
             "submitter": "测试提报人",
             "request_type": "建单需求",
             "urgency": "普通",
-            "quantity": "12a",
-            "description": "数量非法时不能提交",
+            "description": "超过图片数量限制",
         },
+        files=[
+            ("images", ("one.png", VALID_PNG, "image/png")),
+            ("images", ("two.png", VALID_PNG, "image/png")),
+        ],
     )
-    assert bad_quantity.status_code == 400
-    assert "数量只能填写数字" in bad_quantity.text
+    assert too_many.status_code == 400
+    assert "最多上传 1 张图片" in too_many.text
+
+    too_large_total = submit_ticket_with_image(client, filename="large.png", content=VALID_PNG + b"x" * (1024 * 1024 + 1))
+    assert too_large_total.status_code == 400
+    assert "图片总大小不能超过 1MB" in too_large_total.text
     assert "REQ-" not in client.get("/admin", auth=ADMIN_AUTH).text
 
-    bad_image = client.post(
-        "/submit",
-        data={
-            "store_name": "南京门东店",
-            "submitter": "测试提报人",
-            "request_type": "建单需求",
-            "urgency": "普通",
-            "description": "图片格式非法时不能提交",
+
+def test_admin_pagination_filters_handlers_and_keyword_search(tmp_path, monkeypatch):
+    client, _ = build_client(
+        tmp_path,
+        monkeypatch,
+        {
+            "system.json": {
+                "app_name": "门店需求工单系统",
+                "port": 8701,
+                "max_image_mb": 10,
+                "allowed_image_extensions": ["jpg", "jpeg", "png", "webp"],
+                "default_status": "待处理",
+                "excel_filename_prefix": "门店需求工单",
+                "page_size": 2,
+                "max_image_count": 5,
+                "max_total_upload_mb": 30,
+            },
+            "handlers.json": ["张三", "李四"],
         },
-        files=[("images", ("bad.gif", b"GIF89a", "image/gif"))],
     )
-    assert bad_image.status_code == 400
-    assert "图片仅支持" in bad_image.text
-    assert "REQ-" not in client.get("/admin", auth=ADMIN_AUTH).text
+
+    for index in range(3):
+        response = submit_ticket(client, description=f"分页测试工单 {index}", product_name=f"测试商品{index}")
+        assert response.status_code == 200
+
+    client.post(
+        "/admin/ticket/1",
+        data={"status": "处理中", "assigned_to": "张三", "handler_note": "分配给张三"},
+        auth=ADMIN_AUTH,
+    )
+
+    page_1 = client.get("/admin?page=1&sort=newest", auth=ADMIN_AUTH)
+    assert page_1.status_code == 200
+    assert "当前第 1 页" in page_1.text
+    assert "共 2 页" in page_1.text
+    assert "共 3 条工单" in page_1.text
+    assert "sort=newest" in page_1.text
+    assert "page=2" in page_1.text
+
+    page_2 = client.get("/admin?page=2&sort=newest", auth=ADMIN_AUTH)
+    assert page_2.status_code == 200
+    assert "当前第 2 页" in page_2.text
+
+    assigned_filter = client.get(f"/admin?assigned_to={quote('张三')}&keyword={quote('张三')}", auth=ADMIN_AUTH)
+    assert assigned_filter.status_code == 200
+    assert "分配给张三" in assigned_filter.text or "张三" in assigned_filter.text
+    assert "共 1 条工单" in assigned_filter.text
+
+    export_response = client.get("/admin/export?page=2", auth=ADMIN_AUTH)
+    workbook = load_workbook(BytesIO(export_response.content))
+    assert workbook.active.max_row == 4
 
 
 def test_export_without_data_still_contains_headers(tmp_path, monkeypatch):
@@ -171,25 +333,89 @@ def test_export_without_data_still_contains_headers(tmp_path, monkeypatch):
     workbook = load_workbook(BytesIO(response.content))
     sheet = workbook.active
 
-    headers = [cell.value for cell in sheet[1]]
-    assert headers == [
-        "工单号",
-        "提交时间",
-        "门店",
-        "提报人",
-        "需求类型",
-        "紧急程度",
-        "品牌",
-        "商品名称",
-        "规格条码",
-        "数量",
-        "问题说明",
-        "图片路径",
-        "状态",
-        "处理备注",
-        "最后更新时间",
-    ]
+    assert [cell.value for cell in sheet[1]] == EXPECTED_EXPORT_HEADERS
     assert sheet.max_row == 1
+
+
+def test_legacy_database_is_migrated_without_losing_existing_rows(tmp_path, monkeypatch):
+    config_dir = tmp_path / "config"
+    write_config(config_dir)
+    db_path = tmp_path / "tickets.db"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE tickets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticket_no TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                store_name TEXT NOT NULL,
+                submitter TEXT NOT NULL,
+                request_type TEXT NOT NULL,
+                urgency TEXT NOT NULL,
+                brand TEXT,
+                product_name TEXT,
+                sku_barcode TEXT,
+                quantity INTEGER,
+                description TEXT NOT NULL,
+                expected_finish_date TEXT,
+                status TEXT NOT NULL,
+                handler_note TEXT
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE ticket_images (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticket_id INTEGER NOT NULL,
+                image_path TEXT NOT NULL,
+                uploaded_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO tickets (
+                ticket_no, created_at, updated_at, store_name, submitter, request_type, urgency,
+                brand, product_name, sku_barcode, quantity, description, expected_finish_date, status, handler_note
+            )
+            VALUES (
+                'REQ-20260703-0001', '2026-07-03 10:00:00', '2026-07-03 10:00:00',
+                '南京门东店', '旧数据', '建单需求', '普通', '', '旧商品', '', 1,
+                '旧库里的工单', '2026-07-04', '待处理', ''
+            )
+            """
+        )
+        connection.execute(
+            "INSERT INTO ticket_images (ticket_id, image_path, uploaded_at) VALUES (1, 'uploads/old.png', '2026-07-03 10:00:00')"
+        )
+
+    monkeypatch.setenv("STORE_REQUEST_DB_PATH", str(db_path))
+    monkeypatch.setenv("STORE_REQUEST_UPLOAD_DIR", str(tmp_path / "uploads"))
+    monkeypatch.setenv("STORE_REQUEST_CONFIG_DIR", str(config_dir))
+    monkeypatch.setenv("ADMIN_USERNAME", ADMIN_AUTH[0])
+    monkeypatch.setenv("ADMIN_PASSWORD", ADMIN_AUTH[1])
+    monkeypatch.syspath_prepend(str(PROJECT_DIR))
+    sys.modules.pop("main", None)
+    main = importlib.import_module("main")
+    client = TestClient(main.app)
+
+    with sqlite3.connect(db_path) as connection:
+        ticket_columns = {row[1] for row in connection.execute("PRAGMA table_info(tickets)").fetchall()}
+        tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()}
+        ticket_count = connection.execute("SELECT COUNT(*) FROM tickets").fetchone()[0]
+        image_count = connection.execute("SELECT COUNT(*) FROM ticket_images").fetchone()[0]
+
+    assert "assigned_to" in ticket_columns
+    assert "closed_at" in ticket_columns
+    assert "ticket_logs" in tables
+    assert ticket_count == 1
+    assert image_count == 1
+
+    admin_page = client.get("/admin", auth=ADMIN_AUTH)
+    assert admin_page.status_code == 200
+    assert "旧库里的工单" in admin_page.text
 
 
 def test_config_files_drive_options_validation_images_and_export_name(tmp_path, monkeypatch):
@@ -209,6 +435,9 @@ def test_config_files_drive_options_validation_images_and_export_name(tmp_path, 
                 "allowed_image_extensions": ["png"],
                 "default_status": "新建",
                 "excel_filename_prefix": "配置导出",
+                "page_size": 25,
+                "max_image_count": 2,
+                "max_total_upload_mb": 3,
             },
         },
     )
@@ -243,7 +472,7 @@ def test_config_files_drive_options_validation_images_and_export_name(tmp_path, 
             "urgency": "立刻处理",
             "description": "图片大小限制来自 system.json",
         },
-        files=[("images", ("large.png", b"\x89PNG\r\n\x1a\n" + b"0" * (1024 * 1024 + 1), "image/png"))],
+        files=[("images", ("large.png", VALID_PNG + b"0" * (1024 * 1024 + 1), "image/png"))],
     )
     assert oversized_image.status_code == 400
     assert "单张图片不能超过 1MB" in oversized_image.text
@@ -277,15 +506,22 @@ def test_config_files_drive_options_validation_images_and_export_name(tmp_path, 
 
 
 def test_missing_and_invalid_config_files_fall_back_to_defaults(tmp_path, monkeypatch):
-    client, _ = build_client(tmp_path, monkeypatch, write_configs=False)
+    client, main = build_client(tmp_path, monkeypatch, write_configs=False)
     submit_page = client.get("/submit")
     assert submit_page.status_code == 200
     assert "南京门东店" in submit_page.text
     assert "建单需求" in submit_page.text
+    assert main.load_app_config().page_size == 50
+    assert main.load_app_config().max_image_count == 5
+    assert main.load_app_config().max_total_upload_mb == 30
 
     config_dir = tmp_path / "config"
     config_dir.mkdir(parents=True, exist_ok=True)
     (config_dir / "stores.json").write_text("{bad json", encoding="utf-8")
+    (config_dir / "system.json").write_text(
+        json.dumps({"page_size": -1, "max_image_count": "bad", "max_total_upload_mb": 0}, ensure_ascii=False),
+        encoding="utf-8",
+    )
     sys.modules.pop("main", None)
     main = importlib.import_module("main")
     invalid_config_client = TestClient(main.app)
@@ -293,3 +529,6 @@ def test_missing_and_invalid_config_files_fall_back_to_defaults(tmp_path, monkey
     invalid_submit_page = invalid_config_client.get("/submit")
     assert invalid_submit_page.status_code == 200
     assert "南京门东店" in invalid_submit_page.text
+    assert main.load_app_config().page_size == 50
+    assert main.load_app_config().max_image_count == 5
+    assert main.load_app_config().max_total_upload_mb == 30

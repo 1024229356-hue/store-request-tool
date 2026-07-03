@@ -87,6 +87,12 @@ h2 {
   line-height: 1.5;
 }
 
+.field-hint {
+  margin: -8px 0 14px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
 .form-panel {
   padding: 16px;
 }
@@ -331,6 +337,26 @@ textarea:focus {
   padding: 28px !important;
 }
 
+.pagination-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 14px;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.pagination-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
 .badge {
   display: inline-flex;
   align-items: center;
@@ -489,6 +515,32 @@ dd {
   top: 16px;
 }
 
+.log-section {
+  margin-top: 14px;
+  overflow-x: auto;
+}
+
+.log-table {
+  width: 100%;
+  min-width: 860px;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+
+.log-table th,
+.log-table td {
+  border-bottom: 1px solid var(--line);
+  padding: 9px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.log-table th {
+  background: #eef3f9;
+  color: #344054;
+  font-size: 13px;
+}
+
 @media (max-width: 900px) {
   .grid-two,
   .filter-bar,
@@ -505,6 +557,11 @@ dd {
     align-items: flex-start;
     flex-direction: column;
     padding: 16px;
+  }
+
+  .pagination-bar {
+    align-items: flex-start;
+    flex-direction: column;
   }
 
   .admin-shell,

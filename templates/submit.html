@@ -11,7 +11,7 @@
     <section class="page-header">
       <p class="eyebrow">门店需求工单</p>
       <h1>需求提报</h1>
-      <p class="subtle">请把问题描述清楚，图片可多选上传。</p>
+      <p class="subtle">请把问题描述清楚，最多上传 {{ max_image_count }} 张图片，总大小不超过 {{ max_total_upload_mb }}MB。</p>
     </section>
 
     {% if error %}
@@ -90,6 +90,7 @@
         <span>图片上传</span>
         <input name="images" type="file" accept="{{ image_accept }}" multiple data-image-input>
       </label>
+      <p class="field-hint">支持 {{ image_accept }}，单张不超过 {{ max_image_mb }}MB。</p>
       <div class="image-preview" data-image-preview></div>
 
       <label>

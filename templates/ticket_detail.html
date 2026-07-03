@@ -25,8 +25,10 @@
         <section class="detail-section">
           <h2>提交信息</h2>
           <dl class="detail-grid">
+            <div><dt>工单号</dt><dd>{{ ticket.ticket_no }}</dd></div>
             <div><dt>提交时间</dt><dd>{{ ticket.created_at }}</dd></div>
             <div><dt>最后更新时间</dt><dd>{{ ticket.updated_at }}</dd></div>
+            <div><dt>完成时间</dt><dd>{{ ticket.closed_at or '-' }}</dd></div>
             <div><dt>门店</dt><dd>{{ ticket.store_name }}</dd></div>
             <div><dt>提报人</dt><dd>{{ ticket.submitter }}</dd></div>
             <div><dt>需求类型</dt><dd>{{ ticket.request_type }}</dd></div>
@@ -37,6 +39,7 @@
             <div><dt>数量</dt><dd>{{ ticket.quantity if ticket.quantity is not none else '-' }}</dd></div>
             <div><dt>期望完成时间</dt><dd>{{ ticket.expected_finish_date or '-' }}</dd></div>
             <div><dt>当前状态</dt><dd><span class="badge status-{{ ticket.status }}">{{ ticket.status }}</span></dd></div>
+            <div><dt>处理人</dt><dd>{{ ticket.assigned_to or '-' }}</dd></div>
           </dl>
         </section>
 
@@ -49,8 +52,8 @@
           <h2>图片</h2>
           <div class="uploaded-images">
             {% for image in images %}
-            <a class="image-card" href="/{{ image.image_path }}" target="_blank">
-              <img src="/{{ image.image_path }}" alt="工单图片" onerror="this.parentElement.classList.add('missing'); this.remove();">
+            <a class="image-card" href="{{ image.protected_url }}" target="_blank">
+              <img src="{{ image.protected_url }}" alt="工单图片" onerror="this.parentElement.classList.add('missing'); this.remove();">
               <span>{{ image.image_path }}</span>
             </a>
             {% else %}
@@ -72,12 +75,55 @@
             </select>
           </label>
           <label>
+            <span>处理人</span>
+            <select name="assigned_to">
+              <option value="">暂不指定</option>
+              {% for item in handlers %}
+              <option value="{{ item }}" {% if ticket.assigned_to == item %}selected{% endif %}>{{ item }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>
             <span>处理备注</span>
             <textarea name="handler_note" rows="8">{{ ticket.handler_note or '' }}</textarea>
           </label>
           <button class="primary-button" type="submit">保存处理结果</button>
         </form>
       </aside>
+    </section>
+
+    <section class="detail-section log-section">
+      <h2>处理日志</h2>
+      <table class="log-table">
+        <thead>
+          <tr>
+            <th>时间</th>
+            <th>操作人</th>
+            <th>原状态</th>
+            <th>新状态</th>
+            <th>原处理人</th>
+            <th>新处理人</th>
+            <th>备注</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for log in logs %}
+          <tr>
+            <td>{{ log.created_at }}</td>
+            <td>{{ log.operator or '-' }}</td>
+            <td>{{ log.old_status or '-' }}</td>
+            <td>{{ log.new_status or '-' }}</td>
+            <td>{{ log.old_assigned_to or '-' }}</td>
+            <td>{{ log.new_assigned_to or '-' }}</td>
+            <td>{{ log.note or '-' }}</td>
+          </tr>
+          {% else %}
+          <tr>
+            <td class="empty-cell" colspan="7">暂无处理日志</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
     </section>
   </main>
 </body>

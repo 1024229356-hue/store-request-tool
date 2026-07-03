@@ -54,6 +54,15 @@
         </select>
       </label>
       <label>
+        <span>处理人</span>
+        <select name="assigned_to">
+          <option value="">全部</option>
+          {% for item in handlers %}
+          <option value="{{ item }}" {% if filters.get('assigned_to') == item %}selected{% endif %}>{{ item }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>
         <span>开始日期</span>
         <input type="date" name="date_start" value="{{ filters.get('date_start', '') }}">
       </label>
@@ -63,7 +72,7 @@
       </label>
       <label class="filter-keyword">
         <span>关键词</span>
-        <input type="search" name="keyword" value="{{ filters.get('keyword', '') }}" placeholder="工单号、商品、说明">
+        <input type="search" name="keyword" value="{{ filters.get('keyword', '') }}" placeholder="工单号、商品、说明、处理人">
       </label>
       <label>
         <span>排序</span>
@@ -92,7 +101,10 @@
             <th>规格条码</th>
             <th>数量</th>
             <th>问题说明摘要</th>
+            <th>图片数</th>
             <th>当前状态</th>
+            <th>处理人</th>
+            <th>完成时间</th>
             <th>最后更新时间</th>
           </tr>
         </thead>
@@ -110,17 +122,36 @@
             <td>{{ ticket.sku_barcode or '' }}</td>
             <td>{{ ticket.quantity if ticket.quantity is not none else '' }}</td>
             <td class="summary-cell" title="{{ ticket.description }}">{{ ticket.description_summary }}</td>
+            <td>{{ ticket.image_count or 0 }}</td>
             <td><span class="badge status-{{ ticket.status }}">{{ ticket.status }}</span></td>
+            <td>{{ ticket.assigned_to or '' }}</td>
+            <td>{{ ticket.closed_at or '' }}</td>
             <td>{{ ticket.updated_at }}</td>
           </tr>
           {% else %}
           <tr>
-            <td class="empty-cell" colspan="13">暂无工单</td>
+            <td class="empty-cell" colspan="16">暂无工单</td>
           </tr>
           {% endfor %}
         </tbody>
       </table>
     </section>
+
+    <nav class="pagination-bar" aria-label="后台分页">
+      <div>当前第 {{ pagination.current_page }} 页 / 共 {{ pagination.total_pages }} 页 / 共 {{ pagination.total_count }} 条工单</div>
+      <div class="pagination-actions">
+        {% if pagination.has_prev %}
+        <a class="ghost-button compact" href="{{ prev_page_url }}">上一页</a>
+        {% else %}
+        <span class="ghost-button compact disabled">上一页</span>
+        {% endif %}
+        {% if pagination.has_next %}
+        <a class="ghost-button compact" href="{{ next_page_url }}">下一页</a>
+        {% else %}
+        <span class="ghost-button compact disabled">下一页</span>
+        {% endif %}
+      </div>
+    </nav>
   </main>
 </body>
 </html>
