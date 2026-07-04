@@ -42,6 +42,8 @@ SESSION_SECRET=change-this-to-a-random-long-secret
 
 请改成随机长字符串。修改 `.env` 后需要重启服务才会生效。登录后后台顶部会显示当前账号，并提供“退出登录”和“切换账号”。本地 HTTP 环境下 Cookie 使用 `HttpOnly` 和 `SameSite=Lax`；正式部署到 HTTPS 后建议在反向代理和应用配置中启用 Secure Cookie。
 
+后台认证只读取 `admin_session` Cookie，不再接受浏览器缓存的 HTTP Basic Authorization 自动登录。点击“退出登录”或“切换账号”会删除登录 Cookie 并返回 `/admin/login?logged_out=1`，需要重新输入账号密码。
+
 上传图片和普通文件都通过后台登录保护访问。图片地址为 `/admin/uploads/{filename}`，普通文件下载地址为 `/admin/files/{file_id}`。不要把 `uploads/` 配置成公开静态目录。
 
 ## 访问地址

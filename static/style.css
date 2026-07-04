@@ -565,7 +565,8 @@ a:focus-visible {
   gap: 8px;
 }
 
-.admin-actions form {
+.admin-actions form,
+.account-action-form {
   margin: 0;
 }
 

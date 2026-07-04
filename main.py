@@ -235,26 +235,8 @@ def read_admin_session(token: str) -> Optional[str]:
     return None
 
 
-def read_basic_auth_username(request: Request) -> Optional[str]:
-    header = request.headers.get("authorization", "")
-    scheme, _, credentials = header.partition(" ")
-    if scheme.lower() != "basic" or not credentials:
-        return None
-    try:
-        decoded = base64.b64decode(credentials, validate=True).decode("utf-8")
-    except (ValueError, UnicodeDecodeError):
-        return None
-    username, separator, password = decoded.partition(":")
-    if not separator:
-        return None
-    return authenticate_admin(username, password)
-
-
 def current_admin_username(request: Request) -> Optional[str]:
-    session_username = read_admin_session(request.cookies.get(SESSION_COOKIE_NAME, ""))
-    if session_username:
-        return session_username
-    return read_basic_auth_username(request)
+    return read_admin_session(request.cookies.get(SESSION_COOKIE_NAME, ""))
 
 
 def safe_admin_return_url(value: str) -> str:
@@ -296,11 +278,6 @@ def require_admin(request: Request) -> str:
     username = current_admin_username(request)
     if username:
         return username
-    if request.headers.get("authorization", "").lower().startswith("basic "):
-        raise HTTPException(
-            status_code=http_status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid admin credentials.",
-        )
     if should_redirect_to_login(request):
         raise HTTPException(status_code=303, detail="Login required.", headers={"Location": login_redirect_location(request)})
     raise HTTPException(
@@ -1371,6 +1348,7 @@ def create_app() -> FastAPI:
         error: str = "",
         username: str = "",
         next_url: str = "/admin",
+        logged_out: str = "",
     ) -> HTMLResponse:
         return templates.TemplateResponse(
             request,
@@ -1380,6 +1358,7 @@ def create_app() -> FastAPI:
                 "error": error,
                 "username": username,
                 "next_url": safe_admin_return_url(next_url),
+                "logged_out": logged_out,
             },
             status_code=status_code,
         )
@@ -1429,11 +1408,11 @@ def create_app() -> FastAPI:
         )
 
     @app.get("/admin/login", response_class=HTMLResponse)
-    def admin_login_page(request: Request, next: str = Query("/admin")) -> HTMLResponse:
+    def admin_login_page(request: Request, next: str = Query("/admin"), logged_out: str = Query("")) -> HTMLResponse:
         next_url = safe_admin_return_url(next)
         if current_admin_username(request):
             return RedirectResponse(url=next_url, status_code=303)
-        return render_login_form(request, next_url=next_url)
+        return render_login_form(request, next_url=next_url, logged_out=logged_out)
 
     @app.post("/admin/login", response_class=HTMLResponse)
     def admin_login(
@@ -1463,13 +1442,13 @@ def create_app() -> FastAPI:
 
     @app.post("/admin/logout")
     def admin_logout() -> RedirectResponse:
-        response = RedirectResponse(url="/admin/login", status_code=303)
+        response = RedirectResponse(url="/admin/login?logged_out=1", status_code=303)
         response.delete_cookie(SESSION_COOKIE_NAME)
         return response
 
     @app.get("/admin/logout")
     def admin_logout_get() -> RedirectResponse:
-        response = RedirectResponse(url="/admin/login", status_code=303)
+        response = RedirectResponse(url="/admin/login?logged_out=1", status_code=303)
         response.delete_cookie(SESSION_COOKIE_NAME)
         return response
 

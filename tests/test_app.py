@@ -221,6 +221,11 @@ def logged_in_client(client, username=ADMIN_AUTH[0], password=ADMIN_AUTH[1]):
     return client
 
 
+def basic_auth_headers(username=ADMIN_AUTH[0], password=ADMIN_AUTH[1]):
+    credentials = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
+    return {"Authorization": f"Basic {credentials}"}
+
+
 def test_submit_page_exposes_image_and_file_upload_inputs(tmp_path, monkeypatch):
     client, _ = build_client(tmp_path, monkeypatch)
 
@@ -313,10 +318,27 @@ def test_cookie_login_logout_switch_account_and_operator_log(tmp_path, monkeypat
     logout = client.post("/admin/logout", follow_redirects=False)
     assert logout.status_code == 303
     assert logout.headers["location"].startswith("/admin/login")
+    assert "logged_out=1" in logout.headers["location"]
     assert "admin_session=" in logout.headers.get("set-cookie", "")
-    assert client.get("/admin", follow_redirects=False).status_code == 303
+    logout_page = client.get(logout.headers["location"])
+    assert logout_page.status_code == 200
+    assert "\u5df2\u9000\u51fa\u767b\u5f55\uff0c\u8bf7\u91cd\u65b0\u767b\u5f55\u3002" in logout_page.text
+    after_logout = client.get("/admin", follow_redirects=False)
+    assert after_logout.status_code == 303
+    assert after_logout.headers["location"].startswith("/admin/login")
+
+    basic_after_logout = client.get(
+        "/admin",
+        headers=basic_auth_headers("admin", "123456"),
+        follow_redirects=False,
+    )
+    assert basic_after_logout.status_code == 303
+    assert basic_after_logout.headers["location"].startswith("/admin/login")
 
     assert_login_success(login_admin(client, "caigou", "123456"))
+    caigou_page = client.get("/admin")
+    assert caigou_page.status_code == 200
+    assert "\u5f53\u524d\u8d26\u53f7\uff1acaigou" in caigou_page.text
     response = submit_ticket(client)
     assert response.status_code == 200
     update_response = client.post(
@@ -340,6 +362,31 @@ def test_legacy_admin_credentials_can_login_with_cookie_when_admin_users_missing
     wrong_password = login_admin(client, "legacy-admin", "wrong-password")
     assert wrong_password.status_code == 400
     assert "用户名或密码不正确" in wrong_password.text
+
+
+def test_basic_auth_header_does_not_authenticate_admin_or_protected_files(tmp_path, monkeypatch):
+    client, main = build_client(
+        tmp_path,
+        monkeypatch,
+        admin_auth=("legacy-admin", "legacy-secret"),
+        admin_users="admin:123456,caigou:123456",
+    )
+    submit_ticket_with_image_and_file(client)
+    uploaded_image = next((tmp_path / "uploads").glob("*.png"))
+    basic_headers = basic_auth_headers("admin", "123456")
+    fresh_client = TestClient(main.app)
+
+    admin_page = fresh_client.get("/admin", headers=basic_headers, follow_redirects=False)
+    assert admin_page.status_code == 303
+    assert admin_page.headers["location"].startswith("/admin/login")
+
+    login_page = fresh_client.get("/admin/login", headers=basic_headers, follow_redirects=False)
+    assert login_page.status_code == 200
+    assert "login-form" in login_page.text
+
+    assert fresh_client.get("/admin/export", headers=basic_headers).status_code == 401
+    assert fresh_client.get(f"/admin/uploads/{uploaded_image.name}", headers=basic_headers).status_code == 401
+    assert fresh_client.get("/admin/files/1", headers=basic_headers).status_code == 401
 
 
 def test_admin_detail_can_add_images_and_files_as_supplemental_attachments(tmp_path, monkeypatch):
@@ -467,7 +514,8 @@ def test_admin_page_renders_polished_header_stats_and_table_badges(tmp_path, mon
     submit_ticket(client, urgency="当天必须处理", description="今天必须处理的陈列问题")
     submit_ticket(client, urgency="普通", description="普通补货需求")
 
-    admin_page = client.get("/admin", auth=ADMIN_AUTH)
+    logged_in_client(client)
+    admin_page = client.get("/admin")
 
     assert admin_page.status_code == 200
     assert "止痒工单后台" in admin_page.text
@@ -486,7 +534,8 @@ def test_detail_page_renders_grouped_layout_and_handler_hint(tmp_path, monkeypat
     response = submit_ticket_with_image_and_file(client)
     assert response.status_code == 200
 
-    detail_page = client.get("/admin/ticket/1", auth=ADMIN_AUTH)
+    logged_in_client(client)
+    detail_page = client.get("/admin/ticket/1")
 
     assert detail_page.status_code == 200
     assert "基础信息" in detail_page.text
@@ -508,10 +557,17 @@ def test_admin_users_allows_multiple_accounts_and_logs_actual_operator(tmp_path,
         admin_users=" admin : 123456 , caigou : 123456 , baduser: , :badpass ",
     )
 
-    assert client.get("/admin", auth=("admin", "123456")).status_code == 200
-    assert client.get("/admin", auth=("caigou", "123456")).status_code == 200
-    assert client.get("/admin", auth=("caigou", "wrong-password")).status_code == 401
-    assert client.get("/admin", auth=("legacy-admin", "legacy-secret")).status_code == 401
+    assert_login_success(login_admin(client, "admin", "123456"))
+    admin_page = client.get("/admin")
+    assert admin_page.status_code == 200
+    assert "\u5f53\u524d\u8d26\u53f7\uff1aadmin" in admin_page.text
+    client.post("/admin/logout", follow_redirects=False)
+    assert login_admin(client, "caigou", "wrong-password").status_code == 400
+    assert login_admin(client, "legacy-admin", "legacy-secret").status_code == 400
+    assert_login_success(login_admin(client, "caigou", "123456"))
+    caigou_page = client.get("/admin")
+    assert caigou_page.status_code == 200
+    assert "\u5f53\u524d\u8d26\u53f7\uff1acaigou" in caigou_page.text
 
     response = submit_ticket(client)
     assert response.status_code == 200
@@ -519,7 +575,6 @@ def test_admin_users_allows_multiple_accounts_and_logs_actual_operator(tmp_path,
     update_response = client.post(
         "/admin/ticket/1",
         data={"status": "处理中", "assigned_to": "采购", "handler_note": "采购账号处理"},
-        auth=("caigou", "123456"),
         follow_redirects=False,
     )
     assert update_response.status_code == 303
@@ -532,8 +587,10 @@ def test_admin_users_allows_multiple_accounts_and_logs_actual_operator(tmp_path,
 def test_legacy_admin_credentials_still_work_when_admin_users_missing(tmp_path, monkeypatch):
     client, _ = build_client(tmp_path, monkeypatch, admin_auth=("legacy-admin", "legacy-secret"))
 
-    assert client.get("/admin", auth=("legacy-admin", "legacy-secret")).status_code == 200
-    assert client.get("/admin", auth=("legacy-admin", "wrong-password")).status_code == 401
+    assert_login_success(login_admin(client, "legacy-admin", "legacy-secret"))
+    assert client.get("/admin").status_code == 200
+    client.post("/admin/logout", follow_redirects=False)
+    assert login_admin(client, "legacy-admin", "wrong-password").status_code == 400
 
 
 def test_file_upload_download_detail_admin_and_export(tmp_path, monkeypatch):
@@ -556,24 +613,25 @@ def test_file_upload_download_detail_admin_and_export(tmp_path, monkeypatch):
     assert (tmp_path / ticket_file["file_path"]).read_bytes() == file_content
 
     assert client.get("/admin/files/1").status_code == 401
-    download_response = client.get("/admin/files/1", auth=ADMIN_AUTH)
+    logged_in_client(client)
+    download_response = client.get("/admin/files/1")
     assert download_response.status_code == 200
     assert download_response.content == file_content
     assert download_response.headers["content-disposition"].lower().startswith("attachment")
     assert "%E9%87%87%E8%B4%AD%E6%B8%85%E5%8D%95.xlsx" in download_response.headers["content-disposition"]
     assert client.get("/files/1").status_code == 404
 
-    detail_page = client.get("/admin/ticket/1", auth=ADMIN_AUTH)
+    detail_page = client.get("/admin/ticket/1")
     assert detail_page.status_code == 200
     assert "文件附件" in detail_page.text
     assert "采购清单.xlsx" in detail_page.text
     assert "/admin/files/1" in detail_page.text
 
-    admin_page = client.get("/admin", auth=ADMIN_AUTH)
+    admin_page = client.get("/admin")
     assert admin_page.status_code == 200
     assert "图片 0 / 文件 1" in admin_page.text
 
-    export_response = client.get("/admin/export", auth=ADMIN_AUTH)
+    export_response = client.get("/admin/export")
     workbook = load_workbook(BytesIO(export_response.content))
     sheet = workbook.active
     assert [cell.value for cell in sheet[1]] == EXPECTED_EXPORT_HEADERS
@@ -604,28 +662,27 @@ def test_submit_admin_security_lifecycle_export_and_persistence(tmp_path, monkey
 
     assert client.get(f"/uploads/{uploaded_files[0].name}").status_code != 200
     assert client.get(protected_path).status_code == 401
-    protected_response = client.get(protected_path, auth=ADMIN_AUTH)
+    logged_in_client(client)
+    protected_response = client.get(protected_path)
     assert protected_response.status_code == 200
     assert protected_response.content.startswith(b"\x89PNG")
-    assert client.get("/admin/uploads/../tickets.db", auth=ADMIN_AUTH).status_code == 404
+    assert client.get("/admin/uploads/../tickets.db").status_code == 404
 
-    unauthenticated_admin = client.get("/admin", follow_redirects=False)
+    unauthenticated_client = TestClient(main.app)
+    unauthenticated_admin = unauthenticated_client.get("/admin", follow_redirects=False)
     assert unauthenticated_admin.status_code == 303
     assert unauthenticated_admin.headers["location"].startswith("/admin/login")
-    assert client.get("/admin", auth=("admin", "change-me")).status_code == 401
-    admin_page = client.get("/admin", auth=ADMIN_AUTH)
+    admin_page = client.get("/admin")
     assert admin_page.status_code == 200
     assert ticket_no in admin_page.text
     assert "处理人" in admin_page.text
     assert "图片数" in admin_page.text
 
-    unauthenticated_client = TestClient(main.app)
     assert unauthenticated_client.get("/admin/ticket/1", follow_redirects=False).status_code == 303
     assert unauthenticated_client.post("/admin/ticket/1", data={"status": "处理中"}, follow_redirects=False).status_code == 303
     update_response = client.post(
         "/admin/ticket/1",
         data={"status": "已完成", "assigned_to": "采购", "handler_note": "已安排总部同事处理"},
-        auth=ADMIN_AUTH,
         follow_redirects=False,
     )
     assert update_response.status_code == 303
@@ -641,7 +698,7 @@ def test_submit_admin_security_lifecycle_export_and_persistence(tmp_path, monkey
     assert logs[0]["new_assigned_to"] == "采购"
     assert logs[0]["operator"] == ADMIN_AUTH[0]
 
-    detail_page = client.get("/admin/ticket/1", auth=ADMIN_AUTH)
+    detail_page = client.get("/admin/ticket/1")
     assert detail_page.status_code == 200
     assert "已安排总部同事处理" in detail_page.text
     assert "完成时间" in detail_page.text
@@ -651,7 +708,6 @@ def test_submit_admin_security_lifecycle_export_and_persistence(tmp_path, monkey
     reopen_response = client.post(
         "/admin/ticket/1",
         data={"status": "处理中", "assigned_to": "采购", "handler_note": "重新打开"},
-        auth=ADMIN_AUTH,
         follow_redirects=False,
     )
     assert reopen_response.status_code == 303
@@ -659,7 +715,7 @@ def test_submit_admin_security_lifecycle_export_and_persistence(tmp_path, monkey
     assert tickets[0]["closed_at"] in ("", None)
     assert len(rows_for(tmp_path, "ticket_logs")) == 2
 
-    export_response = client.get("/admin/export", auth=ADMIN_AUTH)
+    export_response = client.get("/admin/export")
     assert export_response.status_code == 200
     assert export_response.headers["content-type"].startswith(
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -681,7 +737,8 @@ def test_submit_admin_security_lifecycle_export_and_persistence(tmp_path, monkey
     monkeypatch.setenv("ADMIN_USERS", "")
     restarted_client = TestClient(main.create_app())
     monkeypatch.delenv("ADMIN_USERS", raising=False)
-    restarted_admin_page = restarted_client.get("/admin", auth=ADMIN_AUTH)
+    assert_login_success(login_admin(restarted_client))
+    restarted_admin_page = restarted_client.get("/admin")
     assert restarted_admin_page.status_code == 200
     assert ticket_no in restarted_admin_page.text
 
@@ -729,7 +786,7 @@ def test_upload_validation_rejects_fake_images_count_and_total_size(tmp_path, mo
     too_large_total = submit_ticket_with_image(client, filename="large.png", content=VALID_PNG + b"x" * (1024 * 1024 + 1))
     assert too_large_total.status_code == 400
     assert "图片总大小不能超过 1MB" in too_large_total.text
-    assert "REQ-" not in client.get("/admin", auth=ADMIN_AUTH).text
+    assert "REQ-" not in client.get("/admin").text
 
 
 def test_file_upload_validation_rejects_extension_count_single_and_total_size(tmp_path, monkeypatch):
@@ -812,11 +869,11 @@ def test_admin_can_delete_file_and_image_attachments_and_logs_actions(tmp_path, 
     file_path = tmp_path / ticket_file["file_path"]
     assert image_path.exists()
     assert file_path.exists()
+    logged_in_client(client)
 
     file_path.unlink()
     file_delete = client.post(
         f"/admin/ticket/1/file/{ticket_file['id']}/delete",
-        auth=ADMIN_AUTH,
         follow_redirects=False,
     )
     assert file_delete.status_code == 303
@@ -825,7 +882,6 @@ def test_admin_can_delete_file_and_image_attachments_and_logs_actions(tmp_path, 
     image_path.unlink()
     image_delete = client.post(
         f"/admin/ticket/1/image/{image['id']}/delete",
-        auth=ADMIN_AUTH,
         follow_redirects=False,
     )
     assert image_delete.status_code == 303
@@ -835,7 +891,7 @@ def test_admin_can_delete_file_and_image_attachments_and_logs_actions(tmp_path, 
     assert [log["action"] for log in logs] == ["删除文件", "删除图片"]
     assert all(log["operator"] == ADMIN_AUTH[0] for log in logs)
 
-    detail_page = client.get("/admin/ticket/1", auth=ADMIN_AUTH)
+    detail_page = client.get("/admin/ticket/1")
     assert detail_page.status_code == 200
     assert "未上传图片" in detail_page.text
     assert "未上传文件附件" in detail_page.text
@@ -867,13 +923,13 @@ def test_admin_pagination_filters_handlers_and_keyword_search(tmp_path, monkeypa
         response = submit_ticket(client, description=f"分页测试工单 {index}", product_name=f"测试商品{index}")
         assert response.status_code == 200
 
+    logged_in_client(client)
     client.post(
         "/admin/ticket/1",
         data={"status": "处理中", "assigned_to": "张三", "handler_note": "分配给张三"},
-        auth=ADMIN_AUTH,
     )
 
-    page_1 = client.get("/admin?page=1&sort=newest", auth=ADMIN_AUTH)
+    page_1 = client.get("/admin?page=1&sort=newest")
     assert page_1.status_code == 200
     assert "当前第 1 页" in page_1.text
     assert "共 2 页" in page_1.text
@@ -881,16 +937,16 @@ def test_admin_pagination_filters_handlers_and_keyword_search(tmp_path, monkeypa
     assert "sort=newest" in page_1.text
     assert "page=2" in page_1.text
 
-    page_2 = client.get("/admin?page=2&sort=newest", auth=ADMIN_AUTH)
+    page_2 = client.get("/admin?page=2&sort=newest")
     assert page_2.status_code == 200
     assert "当前第 2 页" in page_2.text
 
-    assigned_filter = client.get(f"/admin?assigned_to={quote('张三')}&keyword={quote('张三')}", auth=ADMIN_AUTH)
+    assigned_filter = client.get(f"/admin?assigned_to={quote('张三')}&keyword={quote('张三')}")
     assert assigned_filter.status_code == 200
     assert "分配给张三" in assigned_filter.text or "张三" in assigned_filter.text
     assert "共 1 条工单" in assigned_filter.text
 
-    export_response = client.get("/admin/export?page=2", auth=ADMIN_AUTH)
+    export_response = client.get("/admin/export?page=2")
     workbook = load_workbook(BytesIO(export_response.content))
     assert workbook.active.max_row == 4
 
@@ -900,7 +956,8 @@ def test_export_without_data_still_contains_headers(tmp_path, monkeypatch):
 
     assert client.get("/admin/export").status_code == 401
 
-    response = client.get("/admin/export", auth=ADMIN_AUTH)
+    logged_in_client(client)
+    response = client.get("/admin/export")
     assert response.status_code == 200
     workbook = load_workbook(BytesIO(response.content))
     sheet = workbook.active
@@ -988,7 +1045,8 @@ def test_legacy_database_is_migrated_without_losing_existing_rows(tmp_path, monk
     assert ticket_count == 1
     assert image_count == 1
 
-    admin_page = client.get("/admin", auth=ADMIN_AUTH)
+    assert_login_success(login_admin(client))
+    admin_page = client.get("/admin")
     assert admin_page.status_code == 200
     assert "旧库里的工单" in admin_page.text
 
@@ -1065,17 +1123,18 @@ def test_config_files_drive_options_validation_images_and_export_name(tmp_path, 
     )
     assert response.status_code == 200
 
-    admin_page = client.get("/admin?status=新建", auth=ADMIN_AUTH)
+    logged_in_client(client)
+    admin_page = client.get("/admin?status=新建")
     assert admin_page.status_code == 200
     assert "新建" in admin_page.text
     assert "跟进中" in admin_page.text
     assert "配置化提交成功" in admin_page.text
 
-    detail_page = client.get("/admin/ticket/1", auth=ADMIN_AUTH)
+    detail_page = client.get("/admin/ticket/1")
     assert detail_page.status_code == 200
     assert "跟进中" in detail_page.text
 
-    export_response = client.get("/admin/export", auth=ADMIN_AUTH)
+    export_response = client.get("/admin/export")
     assert export_response.status_code == 200
     assert "%E9%85%8D%E7%BD%AE%E5%AF%BC%E5%87%BA_" in export_response.headers["content-disposition"]
 

@@ -19,10 +19,10 @@
     <div class="admin-actions">
       <span class="admin-user">当前账号：{{ admin_user }}</span>
       <a class="ghost-button" href="{{ return_url }}">返回列表</a>
-      <form method="post" action="/admin/logout">
+      <form class="account-action-form" method="post" action="/admin/logout">
         <button class="ghost-button compact" type="submit">切换账号</button>
       </form>
-      <form method="post" action="/admin/logout">
+      <form class="account-action-form" method="post" action="/admin/logout">
         <button class="ghost-button compact" type="submit">退出登录</button>
       </form>
     </div>
