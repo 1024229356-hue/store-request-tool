@@ -5,10 +5,18 @@ document.addEventListener("DOMContentLoaded", () => {
   const fileInput = document.querySelector("[data-file-input]");
   const filePreview = document.querySelector("[data-file-preview]");
   const clearFilesButton = document.querySelector("[data-clear-files]");
+  const extraImageInput = document.querySelector("[data-extra-image-input]");
+  const extraImagePreview = document.querySelector("[data-extra-image-preview]");
+  const clearExtraImagesButton = document.querySelector("[data-clear-extra-images]");
+  const extraFileInput = document.querySelector("[data-extra-file-input]");
+  const extraFilePreview = document.querySelector("[data-extra-file-preview]");
+  const clearExtraFilesButton = document.querySelector("[data-clear-extra-files]");
   const copyTicketButtons = document.querySelectorAll("[data-copy-ticket]");
 
   let selectedImages = [];
   let selectedFiles = [];
+  let selectedExtraImages = [];
+  let selectedExtraFiles = [];
 
   function formatFileSize(bytes) {
     if (bytes >= 1024 * 1024) {
@@ -137,6 +145,53 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   }
 
+  function renderExtraImages() {
+    if (!extraImagePreview) {
+      return;
+    }
+    extraImagePreview.innerHTML = "";
+    selectedExtraImages.forEach((file, index) => {
+      const item = document.createElement("div");
+      item.className = "preview-item preview-item-image";
+
+      const thumbnail = document.createElement("img");
+      thumbnail.alt = file.name;
+      thumbnail.src = URL.createObjectURL(file);
+      thumbnail.onload = () => URL.revokeObjectURL(thumbnail.src);
+      item.appendChild(thumbnail);
+
+      item.appendChild(createFileMeta(file));
+      item.appendChild(
+        createRemoveButton(() => {
+          selectedExtraImages.splice(index, 1);
+          renderExtraImages();
+          syncInputFiles(extraImageInput, selectedExtraImages);
+        }),
+      );
+      extraImagePreview.appendChild(item);
+    });
+  }
+
+  function renderExtraFiles() {
+    if (!extraFilePreview) {
+      return;
+    }
+    extraFilePreview.innerHTML = "";
+    selectedExtraFiles.forEach((file, index) => {
+      const item = document.createElement("div");
+      item.className = "preview-item preview-item-file";
+      item.appendChild(createFileMeta(file));
+      item.appendChild(
+        createRemoveButton(() => {
+          selectedExtraFiles.splice(index, 1);
+          renderExtraFiles();
+          syncInputFiles(extraFileInput, selectedExtraFiles);
+        }),
+      );
+      extraFilePreview.appendChild(item);
+    });
+  }
+
   if (imageInput && imagePreview) {
     imageInput.addEventListener("change", () => {
       selectedImages = selectedImages.concat(Array.from(imageInput.files || []));
@@ -150,6 +205,22 @@ document.addEventListener("DOMContentLoaded", () => {
       selectedFiles = selectedFiles.concat(Array.from(fileInput.files || []));
       renderFiles();
       syncInputFiles(fileInput, selectedFiles);
+    });
+  }
+
+  if (extraImageInput && extraImagePreview) {
+    extraImageInput.addEventListener("change", () => {
+      selectedExtraImages = selectedExtraImages.concat(Array.from(extraImageInput.files || []));
+      renderExtraImages();
+      syncInputFiles(extraImageInput, selectedExtraImages);
+    });
+  }
+
+  if (extraFileInput && extraFilePreview) {
+    extraFileInput.addEventListener("change", () => {
+      selectedExtraFiles = selectedExtraFiles.concat(Array.from(extraFileInput.files || []));
+      renderExtraFiles();
+      syncInputFiles(extraFileInput, selectedExtraFiles);
     });
   }
 
@@ -172,6 +243,28 @@ document.addEventListener("DOMContentLoaded", () => {
       fileInput.value = "";
       syncInputFiles(fileInput, selectedFiles);
       filePreview.innerHTML = "";
+    });
+  }
+
+  if (clearExtraImagesButton && extraImageInput && extraImagePreview) {
+    clearExtraImagesButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      selectedExtraImages = [];
+      extraImageInput.value = "";
+      syncInputFiles(extraImageInput, selectedExtraImages);
+      extraImagePreview.innerHTML = "";
+    });
+  }
+
+  if (clearExtraFilesButton && extraFileInput && extraFilePreview) {
+    clearExtraFilesButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      selectedExtraFiles = [];
+      extraFileInput.value = "";
+      syncInputFiles(extraFileInput, selectedExtraFiles);
+      extraFilePreview.innerHTML = "";
     });
   }
 

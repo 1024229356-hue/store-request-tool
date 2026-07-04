@@ -13,30 +13,28 @@
       <h1>止痒工单后台</h1>
       <p class="subtle">统一查看、筛选、处理门店需求</p>
     </div>
-    <a class="secondary-button export-button" href="{{ export_url }}">导出 Excel</a>
+    <div class="admin-actions">
+      <span class="admin-user">当前账号：{{ admin_user }}</span>
+      <a class="secondary-button export-button" href="{{ export_url }}">导出 Excel</a>
+      <form method="post" action="/admin/logout">
+        <button class="ghost-button compact" type="submit">切换账号</button>
+      </form>
+      <form method="post" action="/admin/logout">
+        <button class="ghost-button compact" type="submit">退出登录</button>
+      </form>
+    </div>
   </header>
 
   <main class="admin-shell">
-    {% set pending = namespace(count=0) %}
-    {% set processing = namespace(count=0) %}
-    {% set today = namespace(count=0) %}
-    {% set completed = namespace(count=0) %}
-    {% for ticket in tickets %}
-      {% if ticket.status == '待处理' %}{% set pending.count = pending.count + 1 %}{% endif %}
-      {% if ticket.status == '处理中' %}{% set processing.count = processing.count + 1 %}{% endif %}
-      {% if ticket.urgency == '当天必须处理' %}{% set today.count = today.count + 1 %}{% endif %}
-      {% if ticket.status == '已完成' %}{% set completed.count = completed.count + 1 %}{% endif %}
-    {% endfor %}
-
     <section class="stats-section" aria-label="统计概览">
       <div class="section-heading admin-section-heading">
         <h2>统计概览</h2>
-        <p>统计基于当前筛选结果与当前页，方便快速判断处理压力。</p>
+        <p>统计基于当前筛选条件，不受分页影响。</p>
       </div>
       <div class="stats-grid">
-        <article class="stat-card">
+        <article class="stat-card" data-summary-total="{{ summary.total_count }}">
           <span>当前筛选结果</span>
-          <strong>{{ pagination.total_count }}</strong>
+          <strong>{{ summary.total_count }}</strong>
           <small>共 {{ pagination.total_pages }} 页</small>
         </article>
         <article class="stat-card">
@@ -44,24 +42,24 @@
           <strong>{{ tickets|length }}</strong>
           <small>每页 {{ pagination.page_size }} 条</small>
         </article>
-        <article class="stat-card">
-          <span>当前页待处理</span>
-          <strong>{{ pending.count }}</strong>
+        <article class="stat-card" data-summary-pending="{{ summary.pending_count }}">
+          <span>待处理</span>
+          <strong>{{ summary.pending_count }}</strong>
           <small>需要分配或跟进</small>
         </article>
-        <article class="stat-card">
-          <span>当前页处理中</span>
-          <strong>{{ processing.count }}</strong>
+        <article class="stat-card" data-summary-processing="{{ summary.processing_count }}">
+          <span>处理中</span>
+          <strong>{{ summary.processing_count }}</strong>
           <small>总部已接手</small>
         </article>
-        <article class="stat-card stat-alert">
+        <article class="stat-card stat-alert" data-summary-today-urgent="{{ summary.today_urgent_count }}">
           <span>当天必须处理</span>
-          <strong>{{ today.count }}</strong>
+          <strong>{{ summary.today_urgent_count }}</strong>
           <small>优先查看</small>
         </article>
-        <article class="stat-card">
-          <span>当前页已完成</span>
-          <strong>{{ completed.count }}</strong>
+        <article class="stat-card" data-summary-completed="{{ summary.completed_count }}">
+          <span>已完成</span>
+          <strong>{{ summary.completed_count }}</strong>
           <small>已闭环</small>
         </article>
       </div>
@@ -172,7 +170,7 @@
         <tbody>
           {% for ticket in tickets %}
           <tr>
-            <td><a class="table-link" href="/admin/ticket/{{ ticket.id }}">{{ ticket.ticket_no }}</a></td>
+            <td><a class="table-link" href="{{ ticket.detail_url }}">{{ ticket.ticket_no }}</a></td>
             <td>{{ ticket.created_at }}</td>
             <td>{{ ticket.store_name }}</td>
             <td>{{ ticket.submitter }}</td>
@@ -182,10 +180,14 @@
             <td>{{ ticket.product_name or '' }}</td>
             <td>{{ ticket.sku_barcode or '' }}</td>
             <td>{{ ticket.quantity if ticket.quantity is not none else '' }}</td>
-            <td class="summary-cell table-summary" title="{{ ticket.description }}">{{ ticket.description_summary }}</td>
+            <td class="summary-cell" title="{{ ticket.description }}">
+              <div class="summary-text">{{ ticket.description_summary }}</div>
+            </td>
             <td title="图片 {{ ticket.image_count or 0 }} / 文件 {{ ticket.file_count or 0 }}">
-              <span class="attachment-badge">图片 {{ ticket.image_count or 0 }}</span>
-              <span class="attachment-badge">文件 {{ ticket.file_count or 0 }}</span>
+              <div class="attachment-counts">
+                <span class="attachment-badge">图片 {{ ticket.image_count or 0 }}</span>
+                <span class="attachment-badge">文件 {{ ticket.file_count or 0 }}</span>
+              </div>
             </td>
             <td><span class="badge status-{{ ticket.status }}">{{ ticket.status }}</span></td>
             <td>{{ ticket.assigned_to or '' }}</td>

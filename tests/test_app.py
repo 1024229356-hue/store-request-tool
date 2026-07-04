@@ -98,6 +98,7 @@ def build_client(
         monkeypatch.setenv("ADMIN_USERS", admin_users)
     monkeypatch.setenv("ADMIN_USERNAME", admin_auth[0])
     monkeypatch.setenv("ADMIN_PASSWORD", admin_auth[1])
+    monkeypatch.setenv("SESSION_SECRET", "test-session-secret")
     monkeypatch.syspath_prepend(str(PROJECT_DIR))
     sys.modules.pop("main", None)
     main = importlib.import_module("main")
@@ -198,6 +199,28 @@ def rows_for(tmp_path, table_name):
         return [dict(row) for row in connection.execute(f"SELECT * FROM {table_name} ORDER BY id")]
 
 
+def login_admin(client, username=ADMIN_AUTH[0], password=ADMIN_AUTH[1], follow_redirects=False):
+    return client.post(
+        "/admin/login",
+        data={"username": username, "password": password},
+        follow_redirects=follow_redirects,
+    )
+
+
+def assert_login_success(response):
+    assert response.status_code == 303
+    assert response.headers["location"].startswith("/admin")
+    set_cookie = response.headers.get("set-cookie", "")
+    assert "admin_session=" in set_cookie
+    assert "HttpOnly" in set_cookie
+    assert "samesite=lax" in set_cookie.lower()
+
+
+def logged_in_client(client, username=ADMIN_AUTH[0], password=ADMIN_AUTH[1]):
+    assert_login_success(login_admin(client, username, password))
+    return client
+
+
 def test_submit_page_exposes_image_and_file_upload_inputs(tmp_path, monkeypatch):
     client, _ = build_client(tmp_path, monkeypatch)
 
@@ -254,6 +277,189 @@ def test_upload_script_uses_independent_state_and_clear_selectors():
     assert "new DataTransfer()" in script
     assert "[data-copy-ticket]" in script
     assert "navigator.clipboard" in script
+    assert "[data-extra-image-input]" in script
+    assert "[data-extra-file-input]" in script
+
+
+def test_cookie_login_logout_switch_account_and_operator_log(tmp_path, monkeypatch):
+    client, _ = build_client(
+        tmp_path,
+        monkeypatch,
+        admin_auth=("legacy-admin", "legacy-secret"),
+        admin_users="admin:123456,caigou:123456",
+    )
+
+    unauthenticated = client.get("/admin", follow_redirects=False)
+    assert unauthenticated.status_code == 303
+    assert unauthenticated.headers["location"].startswith("/admin/login")
+
+    login_page = client.get("/admin/login")
+    assert login_page.status_code == 200
+    assert "止痒工单后台登录" in login_page.text
+    assert "用户名" in login_page.text
+    assert "密码" in login_page.text
+
+    bad_login = client.post("/admin/login", data={"username": "admin", "password": "wrong"})
+    assert bad_login.status_code == 400
+    assert "用户名或密码不正确" in bad_login.text
+
+    assert_login_success(login_admin(client, "admin", "123456"))
+    admin_page = client.get("/admin")
+    assert admin_page.status_code == 200
+    assert "当前账号：admin" in admin_page.text
+    assert "退出登录" in admin_page.text
+    assert "切换账号" in admin_page.text
+
+    logout = client.post("/admin/logout", follow_redirects=False)
+    assert logout.status_code == 303
+    assert logout.headers["location"].startswith("/admin/login")
+    assert "admin_session=" in logout.headers.get("set-cookie", "")
+    assert client.get("/admin", follow_redirects=False).status_code == 303
+
+    assert_login_success(login_admin(client, "caigou", "123456"))
+    response = submit_ticket(client)
+    assert response.status_code == 200
+    update_response = client.post(
+        "/admin/ticket/1",
+        data={"status": "处理中", "assigned_to": "采购", "handler_note": "采购账号处理"},
+        follow_redirects=False,
+    )
+    assert update_response.status_code == 303
+
+    logs = rows_for(tmp_path, "ticket_logs")
+    assert len(logs) == 1
+    assert logs[0]["operator"] == "caigou"
+
+
+def test_legacy_admin_credentials_can_login_with_cookie_when_admin_users_missing(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch, admin_auth=("legacy-admin", "legacy-secret"))
+
+    assert_login_success(login_admin(client, "legacy-admin", "legacy-secret"))
+    assert client.get("/admin").status_code == 200
+    client.post("/admin/logout", follow_redirects=False)
+    wrong_password = login_admin(client, "legacy-admin", "wrong-password")
+    assert wrong_password.status_code == 400
+    assert "用户名或密码不正确" in wrong_password.text
+
+
+def test_admin_detail_can_add_images_and_files_as_supplemental_attachments(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch)
+    logged_in_client(client)
+    response = submit_ticket(client)
+    assert response.status_code == 200
+
+    upload_response = client.post(
+        "/admin/ticket/1/attachments",
+        files=[
+            ("new_images", ("proof.png", VALID_PNG, "image/png")),
+            ("new_files", ("reply.xlsx", b"sku,qty\nA001,1\n", "application/octet-stream")),
+        ],
+        follow_redirects=False,
+    )
+    assert upload_response.status_code == 303
+    assert "attachments_saved=1" in upload_response.headers["location"]
+
+    images = rows_for(tmp_path, "ticket_images")
+    files = rows_for(tmp_path, "ticket_files")
+    logs = rows_for(tmp_path, "ticket_logs")
+    assert len(images) == 1
+    assert len(files) == 1
+    assert files[0]["original_filename"] == "reply.xlsx"
+    assert logs[-1]["action"] == "补充附件"
+    assert logs[-1]["operator"] == ADMIN_AUTH[0]
+    assert "新增图片 1 张，文件 1 个" in logs[-1]["note"]
+
+    detail_page = client.get("/admin/ticket/1")
+    assert detail_page.status_code == 200
+    assert "proof" in detail_page.text or "查看图片" in detail_page.text
+    assert "reply.xlsx" in detail_page.text
+    assert "补充附件" in detail_page.text
+
+
+def test_admin_detail_rejects_empty_supplemental_attachment_upload(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch)
+    logged_in_client(client)
+    response = submit_ticket(client)
+    assert response.status_code == 200
+
+    upload_response = client.post("/admin/ticket/1/attachments")
+
+    assert upload_response.status_code == 400
+    assert "请选择要上传的附件" in upload_response.text
+    assert rows_for(tmp_path, "ticket_images") == []
+    assert rows_for(tmp_path, "ticket_files") == []
+
+
+def test_admin_summary_counts_all_filtered_results_not_current_page(tmp_path, monkeypatch):
+    client, _ = build_client(
+        tmp_path,
+        monkeypatch,
+        {
+            "system.json": {
+                "app_name": "门店需求工单系统",
+                "port": 8701,
+                "max_image_mb": 10,
+                "allowed_image_extensions": ["jpg", "jpeg", "png", "webp"],
+                "default_status": "待处理",
+                "excel_filename_prefix": "门店需求工单",
+                "page_size": 2,
+                "max_image_count": 5,
+                "max_total_upload_mb": 30,
+                "allowed_file_extensions": ["pdf", "doc", "docx", "xls", "xlsx", "csv", "txt", "zip", "rar"],
+                "max_file_mb": 20,
+                "max_file_count": 5,
+                "max_total_file_upload_mb": 50,
+            }
+        },
+    )
+    logged_in_client(client)
+    submit_ticket(client, urgency="当天必须处理", description="第一个")
+    submit_ticket(client, urgency="普通", description="第二个")
+    submit_ticket(client, urgency="普通", description="第三个")
+    client.post("/admin/ticket/2", data={"status": "处理中", "assigned_to": "采购", "handler_note": "处理中"})
+    client.post("/admin/ticket/3", data={"status": "已完成", "assigned_to": "采购", "handler_note": "已完成"})
+
+    admin_page = client.get("/admin?page=1")
+
+    assert admin_page.status_code == 200
+    assert "统计基于当前筛选条件，不受分页影响。" in admin_page.text
+    assert 'data-summary-total="3"' in admin_page.text
+    assert 'data-summary-pending="1"' in admin_page.text
+    assert 'data-summary-processing="1"' in admin_page.text
+    assert 'data-summary-today-urgent="1"' in admin_page.text
+    assert 'data-summary-completed="1"' in admin_page.text
+
+
+def test_admin_table_summary_uses_inner_clamped_div_instead_of_table_cell_display(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch)
+    logged_in_client(client)
+    submit_ticket(client, description="第一行\n第二行\n第三行，应该被两行省略")
+
+    admin_page = client.get("/admin")
+
+    assert admin_page.status_code == 200
+    assert '<td class="summary-cell"' in admin_page.text
+    assert '<div class="summary-text">' in admin_page.text
+    assert "table-summary" not in admin_page.text
+
+
+def test_detail_return_url_is_preserved_and_sanitized(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch)
+    logged_in_client(client)
+    submit_ticket(client)
+
+    admin_page = client.get(f"/admin?status={quote('待处理')}&keyword={quote('自动化')}")
+    assert admin_page.status_code == 200
+    assert "return_url=" in admin_page.text
+
+    safe_detail = client.get(f"/admin/ticket/1?return_url={quote('/admin?status=待处理&keyword=自动化', safe='')}")
+    assert safe_detail.status_code == 200
+    assert 'href="/admin?status=待处理&amp;keyword=自动化"' in safe_detail.text
+
+    unsafe_detail = client.get("/admin/ticket/1?return_url=https%3A%2F%2Fevil.example%2Fadmin")
+    assert unsafe_detail.status_code == 200
+    assert 'href="/admin"' in unsafe_detail.text
+    assert "evil.example" not in unsafe_detail.text
 
 
 def test_admin_page_renders_polished_header_stats_and_table_badges(tmp_path, monkeypatch):
@@ -268,11 +474,11 @@ def test_admin_page_renders_polished_header_stats_and_table_badges(tmp_path, mon
     assert "统一查看、筛选、处理门店需求" in admin_page.text
     assert "统计概览" in admin_page.text
     assert "当前筛选结果" in admin_page.text
-    assert "当前页待处理" in admin_page.text
+    assert "待处理" in admin_page.text
     assert "当天必须处理" in admin_page.text
     assert "筛选条件" in admin_page.text
     assert "attachment-badge" in admin_page.text
-    assert "table-summary" in admin_page.text
+    assert "summary-text" in admin_page.text
 
 
 def test_detail_page_renders_grouped_layout_and_handler_hint(tmp_path, monkeypatch):
@@ -403,7 +609,9 @@ def test_submit_admin_security_lifecycle_export_and_persistence(tmp_path, monkey
     assert protected_response.content.startswith(b"\x89PNG")
     assert client.get("/admin/uploads/../tickets.db", auth=ADMIN_AUTH).status_code == 404
 
-    assert client.get("/admin").status_code == 401
+    unauthenticated_admin = client.get("/admin", follow_redirects=False)
+    assert unauthenticated_admin.status_code == 303
+    assert unauthenticated_admin.headers["location"].startswith("/admin/login")
     assert client.get("/admin", auth=("admin", "change-me")).status_code == 401
     admin_page = client.get("/admin", auth=ADMIN_AUTH)
     assert admin_page.status_code == 200
@@ -411,8 +619,9 @@ def test_submit_admin_security_lifecycle_export_and_persistence(tmp_path, monkey
     assert "处理人" in admin_page.text
     assert "图片数" in admin_page.text
 
-    assert client.get("/admin/ticket/1").status_code == 401
-    assert client.post("/admin/ticket/1", data={"status": "处理中"}).status_code == 401
+    unauthenticated_client = TestClient(main.app)
+    assert unauthenticated_client.get("/admin/ticket/1", follow_redirects=False).status_code == 303
+    assert unauthenticated_client.post("/admin/ticket/1", data={"status": "处理中"}, follow_redirects=False).status_code == 303
     update_response = client.post(
         "/admin/ticket/1",
         data={"status": "已完成", "assigned_to": "采购", "handler_note": "已安排总部同事处理"},

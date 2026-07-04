@@ -21,7 +21,7 @@ python -m uvicorn main:app --host 127.0.0.1 --port 8701
 python -m uvicorn main:app --host 0.0.0.0 --port 8701
 ```
 
-后台访问需要登录，账号密码从环境变量读取：
+后台访问需要登录。系统使用 Cookie 登录会话，账号密码从环境变量读取：
 
 ```text
 ADMIN_USERNAME
@@ -33,6 +33,14 @@ ADMIN_PASSWORD
 ```text
 ADMIN_USERS=admin:123456,caigou:123456,yunying:123456
 ```
+
+生产环境必须配置 Cookie 签名密钥：
+
+```text
+SESSION_SECRET=change-this-to-a-random-long-secret
+```
+
+请改成随机长字符串。修改 `.env` 后需要重启服务才会生效。登录后后台顶部会显示当前账号，并提供“退出登录”和“切换账号”。本地 HTTP 环境下 Cookie 使用 `HttpOnly` 和 `SameSite=Lax`；正式部署到 HTTPS 后建议在反向代理和应用配置中启用 Secure Cookie。
 
 上传图片和普通文件都通过后台登录保护访问。图片地址为 `/admin/uploads/{filename}`，普通文件下载地址为 `/admin/files/{file_id}`。不要把 `uploads/` 配置成公开静态目录。
 
@@ -75,7 +83,8 @@ ADMIN_USERS=admin:123456,caigou:123456,yunying:123456
 5. 点击保存后，系统会记录最后更新时间；状态改为“已完成”时会自动写入完成时间，重新打开时会清空完成时间。
 6. 每次状态、处理人或备注发生变化，详情页底部会保留处理日志。
 7. 详情页可查看图片和文件附件，普通文件通过 `/admin/files/{file_id}` 下载。
-8. 如门店提交错附件，总部可在详情页删除图片或文件，删除操作会写入处理日志。
+8. 总部可在详情页补充上传处理凭证、截图、表格或供应商反馈文件，补充上传会写入处理日志。
+9. 如门店提交错附件，总部可在详情页删除图片或文件，删除前会有确认提示，删除操作会写入处理日志。
 
 状态包括：
 
@@ -128,13 +137,17 @@ nano .env
 ```text
 ADMIN_USERNAME=admin
 ADMIN_PASSWORD=change-me
+SESSION_SECRET=change-this-to-a-random-long-secret
 ```
 
 正式使用建议改为多账号：
 
 ```text
 ADMIN_USERS=admin:123456,caigou:123456,yunying:123456
+SESSION_SECRET=change-this-to-a-random-long-secret
 ```
+
+`SESSION_SECRET` 必须改成随机长字符串。修改 `.env` 后执行 `sudo systemctl restart store-request-tool` 重启服务。
 
 3. 运行部署脚本：
 
@@ -184,7 +197,7 @@ http://服务器公网IP:8701/submit
 http://服务器公网IP:8701/admin
 ```
 
-访问后台和 Excel 导出时，浏览器会要求输入 `.env` 中配置的账号密码。
+访问后台时会先进入 `/admin/login` 登录页。登录后可在后台顶部退出登录或切换账号；Excel 导出、图片查看和文件下载也会校验同一个后台登录 Cookie。
 
 ### 阿里云更新部署命令
 
@@ -199,7 +212,7 @@ sudo systemctl restart store-request-tool
 sudo systemctl status store-request-tool
 ```
 
-不建议长期直接使用 `http://公网IP:8701/admin` 暴露后台。正式试运行后，建议配置 Nginx + HTTPS，并限制后台访问入口。
+不建议长期直接使用 `http://公网IP:8701/admin` 暴露后台。正式试运行后，建议配置 Nginx + HTTPS，并限制后台访问入口；HTTPS 后建议启用 Secure Cookie。
 
 ## 配置文件说明
 

@@ -1,3 +1,6 @@
+import base64
+import hashlib
+import hmac
 import json
 import os
 import secrets
@@ -8,11 +11,10 @@ from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, urlencode, urlsplit
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile, status as http_status
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, StreamingResponse
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from openpyxl import Workbook
@@ -28,7 +30,8 @@ STATIC_DIR = BASE_DIR / "static"
 DEFAULT_DATA_DIR = BASE_DIR / "data"
 DEFAULT_UPLOAD_DIR = BASE_DIR / "uploads"
 ENV_FILE = BASE_DIR / ".env"
-admin_security = HTTPBasic()
+SESSION_COOKIE_NAME = "admin_session"
+DEFAULT_SESSION_SECRET = "store-request-tool-local-dev-session-secret"
 
 DEFAULT_STORES = ["南京门东店", "南昌万寿宫店", "山城巷店", "东郊记忆店", "蟠龙天地店", "秀水街店", "湾里店", "下浩里店", "烟台山店"]
 DEFAULT_REQUEST_TYPES = ["建单需求", "审单需求", "商品异常", "缺货需求", "新品需求", "系统问题", "其他"]
@@ -174,17 +177,135 @@ def get_admin_credentials() -> List[Tuple[str, str]]:
     return [(username, password)]
 
 
-def require_admin(credentials: HTTPBasicCredentials = Depends(admin_security)) -> str:
-    input_username = credentials.username.strip()
+def authenticate_admin(username: str, password: str) -> Optional[str]:
+    input_username = username.strip()
     for expected_username, expected_password in get_admin_credentials():
         username_ok = secrets.compare_digest(input_username, expected_username)
-        password_ok = secrets.compare_digest(credentials.password, expected_password)
+        password_ok = secrets.compare_digest(password, expected_password)
         if username_ok and password_ok:
             return expected_username
+    return None
+
+
+def admin_username_exists(username: str) -> bool:
+    input_username = username.strip()
+    for expected_username, _expected_password in get_admin_credentials():
+        if secrets.compare_digest(input_username, expected_username):
+            return True
+    return False
+
+
+def get_session_secret() -> str:
+    return os.environ.get("SESSION_SECRET", DEFAULT_SESSION_SECRET)
+
+
+def base64url_encode(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def base64url_decode(raw: str) -> bytes:
+    padding = "=" * (-len(raw) % 4)
+    return base64.urlsafe_b64decode((raw + padding).encode("ascii"))
+
+
+def sign_session_payload(payload: str) -> str:
+    signature = hmac.new(get_session_secret().encode("utf-8"), payload.encode("ascii"), hashlib.sha256).digest()
+    return base64url_encode(signature)
+
+
+def create_admin_session(username: str) -> str:
+    payload = base64url_encode(json.dumps({"username": username}, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+    return f"{payload}.{sign_session_payload(payload)}"
+
+
+def read_admin_session(token: str) -> Optional[str]:
+    if not token or "." not in token:
+        return None
+    payload, signature = token.rsplit(".", 1)
+    expected_signature = sign_session_payload(payload)
+    if not secrets.compare_digest(signature, expected_signature):
+        return None
+    try:
+        data = json.loads(base64url_decode(payload).decode("utf-8"))
+    except (ValueError, json.JSONDecodeError):
+        return None
+    username = str(data.get("username") or "").strip()
+    if username and admin_username_exists(username):
+        return username
+    return None
+
+
+def read_basic_auth_username(request: Request) -> Optional[str]:
+    header = request.headers.get("authorization", "")
+    scheme, _, credentials = header.partition(" ")
+    if scheme.lower() != "basic" or not credentials:
+        return None
+    try:
+        decoded = base64.b64decode(credentials, validate=True).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        return None
+    username, separator, password = decoded.partition(":")
+    if not separator:
+        return None
+    return authenticate_admin(username, password)
+
+
+def current_admin_username(request: Request) -> Optional[str]:
+    session_username = read_admin_session(request.cookies.get(SESSION_COOKIE_NAME, ""))
+    if session_username:
+        return session_username
+    return read_basic_auth_username(request)
+
+
+def safe_admin_return_url(value: str) -> str:
+    value = (value or "").strip()
+    if not value:
+        return "/admin"
+    parsed = urlsplit(value)
+    if parsed.scheme or parsed.netloc or not value.startswith("/admin") or value.startswith("//"):
+        return "/admin"
+    return value
+
+
+def request_path_with_query(request: Request) -> str:
+    return request.url.path + (f"?{request.url.query}" if request.url.query else "")
+
+
+def build_ticket_detail_url(ticket_id: int, return_url: str = "", **flags: str) -> str:
+    params = {key: value for key, value in flags.items() if value}
+    safe_return_url = safe_admin_return_url(return_url)
+    if safe_return_url != "/admin":
+        params["return_url"] = safe_return_url
+    query = urlencode(params)
+    return f"/admin/ticket/{ticket_id}" + (f"?{query}" if query else "")
+
+
+def login_redirect_location(request: Request) -> str:
+    next_url = safe_admin_return_url(request_path_with_query(request))
+    return "/admin/login?" + urlencode({"next": next_url})
+
+
+def should_redirect_to_login(request: Request) -> bool:
+    path = request.url.path
+    if path.startswith("/admin/uploads") or path.startswith("/admin/files") or path.startswith("/admin/export"):
+        return False
+    return path == "/admin" or path.startswith("/admin/ticket")
+
+
+def require_admin(request: Request) -> str:
+    username = current_admin_username(request)
+    if username:
+        return username
+    if request.headers.get("authorization", "").lower().startswith("basic "):
+        raise HTTPException(
+            status_code=http_status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid admin credentials.",
+        )
+    if should_redirect_to_login(request):
+        raise HTTPException(status_code=303, detail="Login required.", headers={"Location": login_redirect_location(request)})
     raise HTTPException(
         status_code=http_status.HTTP_401_UNAUTHORIZED,
-        detail="Invalid admin credentials.",
-        headers={"WWW-Authenticate": "Basic"},
+        detail="Login required.",
     )
 
 
@@ -891,6 +1012,31 @@ def count_tickets(filters: Dict[str, str]) -> int:
     return int(row["total"] or 0)
 
 
+def fetch_ticket_summary(filters: Dict[str, str]) -> Dict[str, int]:
+    where_sql, params = build_ticket_where(filters)
+    with get_connection() as connection:
+        row = connection.execute(
+            f"""
+            SELECT
+                COUNT(*) AS total_count,
+                SUM(CASE WHEN status = '待处理' THEN 1 ELSE 0 END) AS pending_count,
+                SUM(CASE WHEN status = '处理中' THEN 1 ELSE 0 END) AS processing_count,
+                SUM(CASE WHEN urgency = '当天必须处理' THEN 1 ELSE 0 END) AS today_urgent_count,
+                SUM(CASE WHEN status = '已完成' THEN 1 ELSE 0 END) AS completed_count
+            FROM tickets
+            {where_sql}
+            """,
+            params,
+        ).fetchone()
+    return {
+        "total_count": int(row["total_count"] or 0),
+        "pending_count": int(row["pending_count"] or 0),
+        "processing_count": int(row["processing_count"] or 0),
+        "today_urgent_count": int(row["today_urgent_count"] or 0),
+        "completed_count": int(row["completed_count"] or 0),
+    }
+
+
 def fetch_tickets(
     filters: Dict[str, str],
     sort: str,
@@ -1034,6 +1180,70 @@ def fetch_ticket_logs(ticket_id: int) -> List[Dict[str, object]]:
     return [dict(row) for row in rows]
 
 
+def add_ticket_attachments(
+    ticket_id: int,
+    ticket_no: str,
+    prepared_images: List[Tuple[str, bytes]],
+    prepared_files: List[PreparedFile],
+    operator: str,
+) -> Tuple[int, int]:
+    saved_files: List[Path] = []
+    timestamp = now_text()
+    image_count = 0
+    file_count = 0
+    try:
+        image_paths, saved_image_files = save_images(ticket_no, prepared_images)
+        saved_files.extend(saved_image_files)
+        file_records, saved_attachment_files = save_files(ticket_no, prepared_files)
+        saved_files.extend(saved_attachment_files)
+        image_count = len(image_paths)
+        file_count = len(file_records)
+        note = f"新增图片 {image_count} 张，文件 {file_count} 个"
+        with get_connection() as connection:
+            ticket_exists = connection.execute("SELECT 1 FROM tickets WHERE id = ?", (ticket_id,)).fetchone()
+            if not ticket_exists:
+                raise HTTPException(status_code=404, detail="工单不存在")
+            for image_path in image_paths:
+                connection.execute(
+                    "INSERT INTO ticket_images (ticket_id, image_path, uploaded_at) VALUES (?, ?, ?)",
+                    (ticket_id, image_path, timestamp),
+                )
+            for file_record in file_records:
+                connection.execute(
+                    """
+                    INSERT INTO ticket_files (
+                        ticket_id, original_filename, stored_filename, file_path,
+                        file_ext, file_size, uploaded_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        ticket_id,
+                        file_record["original_filename"],
+                        file_record["stored_filename"],
+                        file_record["file_path"],
+                        file_record["file_ext"],
+                        file_record["file_size"],
+                        timestamp,
+                    ),
+                )
+            connection.execute("UPDATE tickets SET updated_at = ? WHERE id = ?", (timestamp, ticket_id))
+            connection.execute(
+                """
+                INSERT INTO ticket_logs (
+                    ticket_id, action, old_status, new_status, old_assigned_to,
+                    new_assigned_to, note, operator, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (ticket_id, "补充附件", None, None, None, None, note, operator, timestamp),
+            )
+    except Exception:
+        cleanup_saved_files(saved_files)
+        raise
+    return image_count, file_count
+
+
 def build_excel(tickets: List[Dict[str, object]]) -> BytesIO:
     workbook = Workbook()
     sheet = workbook.active
@@ -1155,6 +1365,114 @@ def create_app() -> FastAPI:
             status_code=status_code,
         )
 
+    def render_login_form(
+        request: Request,
+        status_code: int = 200,
+        error: str = "",
+        username: str = "",
+        next_url: str = "/admin",
+    ) -> HTMLResponse:
+        return templates.TemplateResponse(
+            request,
+            "login.html",
+            {
+                "request": request,
+                "error": error,
+                "username": username,
+                "next_url": safe_admin_return_url(next_url),
+            },
+            status_code=status_code,
+        )
+
+    def render_ticket_detail(
+        request: Request,
+        ticket_id: int,
+        admin: str,
+        saved: str = "",
+        attachments_saved: str = "",
+        upload_error: str = "",
+        return_url: str = "",
+        status_code: int = 200,
+    ) -> HTMLResponse:
+        ticket = fetch_ticket(ticket_id)
+        if not ticket:
+            raise HTTPException(status_code=404, detail="工单不存在")
+        images = fetch_ticket_images(ticket_id)
+        files = fetch_ticket_files(ticket_id)
+        logs = fetch_ticket_logs(ticket_id)
+        config = load_app_config()
+        return templates.TemplateResponse(
+            request,
+            "ticket_detail.html",
+            {
+                "request": request,
+                "ticket": ticket,
+                "images": images,
+                "files": files,
+                "statuses": config.statuses,
+                "handlers": config.handlers,
+                "logs": logs,
+                "saved": saved,
+                "attachments_saved": attachments_saved,
+                "upload_error": upload_error,
+                "return_url": safe_admin_return_url(return_url),
+                "admin_user": admin,
+                "image_accept": ",".join(f".{extension}" for extension in config.allowed_image_extensions),
+                "file_accept": ",".join(f".{extension}" for extension in config.allowed_file_extensions),
+                "max_image_count": config.max_image_count,
+                "max_image_mb": config.max_image_mb,
+                "max_file_count": config.max_file_count,
+                "max_file_mb": config.max_file_mb,
+                "max_total_file_upload_mb": config.max_total_file_upload_mb,
+            },
+            status_code=status_code,
+        )
+
+    @app.get("/admin/login", response_class=HTMLResponse)
+    def admin_login_page(request: Request, next: str = Query("/admin")) -> HTMLResponse:
+        next_url = safe_admin_return_url(next)
+        if current_admin_username(request):
+            return RedirectResponse(url=next_url, status_code=303)
+        return render_login_form(request, next_url=next_url)
+
+    @app.post("/admin/login", response_class=HTMLResponse)
+    def admin_login(
+        request: Request,
+        username: str = Form(""),
+        password: str = Form(""),
+        next: str = Form("/admin"),
+    ) -> HTMLResponse:
+        next_url = safe_admin_return_url(next)
+        authenticated_username = authenticate_admin(username, password)
+        if not authenticated_username:
+            return render_login_form(
+                request,
+                status_code=400,
+                error="用户名或密码不正确。",
+                username=username.strip(),
+                next_url=next_url,
+            )
+        response = RedirectResponse(url=next_url, status_code=303)
+        response.set_cookie(
+            SESSION_COOKIE_NAME,
+            create_admin_session(authenticated_username),
+            httponly=True,
+            samesite="lax",
+        )
+        return response
+
+    @app.post("/admin/logout")
+    def admin_logout() -> RedirectResponse:
+        response = RedirectResponse(url="/admin/login", status_code=303)
+        response.delete_cookie(SESSION_COOKIE_NAME)
+        return response
+
+    @app.get("/admin/logout")
+    def admin_logout_get() -> RedirectResponse:
+        response = RedirectResponse(url="/admin/login", status_code=303)
+        response.delete_cookie(SESSION_COOKIE_NAME)
+        return response
+
     @app.get("/", include_in_schema=False)
     def root() -> RedirectResponse:
         return RedirectResponse(url="/submit", status_code=303)
@@ -1248,7 +1566,7 @@ def create_app() -> FastAPI:
     @app.get("/admin", response_class=HTMLResponse)
     def admin_page(
         request: Request,
-        _admin: str = Depends(require_admin),
+        admin: str = Depends(require_admin),
         store_name: str = Query(""),
         request_type: str = Query(""),
         urgency: str = Query(""),
@@ -1272,6 +1590,10 @@ def create_app() -> FastAPI:
         }
         config = load_app_config()
         tickets, pagination = fetch_ticket_page(filters, sort, config, page)
+        summary = fetch_ticket_summary(filters)
+        return_url = safe_admin_return_url(request_path_with_query(request))
+        for ticket in tickets:
+            ticket["detail_url"] = f"/admin/ticket/{ticket['id']}?{urlencode({'return_url': return_url})}"
         export_query = build_query_params(filters, sort)
         export_url = "/admin/export" + (f"?{export_query}" if export_query else "")
         prev_query = build_query_params(filters, sort, pagination["prev_page"])
@@ -1289,10 +1611,12 @@ def create_app() -> FastAPI:
                 "handlers": config.handlers,
                 "filters": filters,
                 "sort": sort,
+                "summary": summary,
                 "export_url": export_url,
                 "pagination": pagination,
                 "prev_page_url": "/admin" + (f"?{prev_query}" if prev_query else ""),
                 "next_page_url": "/admin" + (f"?{next_query}" if next_query else ""),
+                "admin_user": admin,
             },
         )
 
@@ -1301,28 +1625,19 @@ def create_app() -> FastAPI:
         request: Request,
         ticket_id: int,
         saved: str = Query(""),
-        _admin: str = Depends(require_admin),
+        attachments_saved: str = Query(""),
+        upload_error: str = Query(""),
+        return_url: str = Query(""),
+        admin: str = Depends(require_admin),
     ) -> HTMLResponse:
-        ticket = fetch_ticket(ticket_id)
-        if not ticket:
-            raise HTTPException(status_code=404, detail="工单不存在")
-        images = fetch_ticket_images(ticket_id)
-        files = fetch_ticket_files(ticket_id)
-        logs = fetch_ticket_logs(ticket_id)
-        config = load_app_config()
-        return templates.TemplateResponse(
+        return render_ticket_detail(
             request,
-            "ticket_detail.html",
-            {
-                "request": request,
-                "ticket": ticket,
-                "images": images,
-                "files": files,
-                "statuses": config.statuses,
-                "handlers": config.handlers,
-                "logs": logs,
-                "saved": saved,
-            },
+            ticket_id,
+            admin,
+            saved=saved,
+            attachments_saved=attachments_saved,
+            upload_error=upload_error,
+            return_url=return_url,
         )
 
     @app.post("/admin/ticket/{ticket_id}")
@@ -1332,6 +1647,7 @@ def create_app() -> FastAPI:
         status: str = Form(""),
         assigned_to: str = Form(""),
         handler_note: str = Form(""),
+        return_url: str = Form(""),
     ) -> RedirectResponse:
         config = load_app_config()
         if status not in config.statuses:
@@ -1385,13 +1701,61 @@ def create_app() -> FastAPI:
                         timestamp,
                     ),
                 )
-        return RedirectResponse(url=f"/admin/ticket/{ticket_id}?saved=1", status_code=303)
+        return RedirectResponse(url=build_ticket_detail_url(ticket_id, return_url, saved="1"), status_code=303)
+
+    @app.post("/admin/ticket/{ticket_id}/attachments", response_class=HTMLResponse)
+    async def add_attachments(
+        request: Request,
+        ticket_id: int,
+        admin: str = Depends(require_admin),
+        new_images: Optional[List[UploadFile]] = File(None),
+        new_files: Optional[List[UploadFile]] = File(None),
+        return_url: str = Form(""),
+    ) -> HTMLResponse:
+        ticket = fetch_ticket(ticket_id)
+        if not ticket:
+            raise HTTPException(status_code=404, detail="工单不存在")
+        config = load_app_config()
+        try:
+            prepared_images = await prepare_images(new_images, config)
+            prepared_files = await prepare_files(new_files, config)
+        except ValueError as exc:
+            return render_ticket_detail(
+                request,
+                ticket_id,
+                admin,
+                upload_error=str(exc),
+                return_url=return_url,
+                status_code=400,
+            )
+        if not prepared_images and not prepared_files:
+            return render_ticket_detail(
+                request,
+                ticket_id,
+                admin,
+                upload_error="请选择要上传的附件。",
+                return_url=return_url,
+                status_code=400,
+            )
+        try:
+            add_ticket_attachments(ticket_id, str(ticket["ticket_no"]), prepared_images, prepared_files, admin)
+        except OSError:
+            return render_ticket_detail(
+                request,
+                ticket_id,
+                admin,
+                upload_error="附件保存失败，请稍后重试。",
+                return_url=return_url,
+                status_code=500,
+            )
+        return RedirectResponse(url=build_ticket_detail_url(ticket_id, return_url, attachments_saved="1"), status_code=303)
 
     @app.post("/admin/ticket/{ticket_id}/image/{image_id}/delete")
     def delete_ticket_image(
         ticket_id: int,
         image_id: int,
         admin: str = Depends(require_admin),
+        return_url: str = Form(""),
     ) -> RedirectResponse:
         image = fetch_ticket_image(image_id, ticket_id)
         if not image:
@@ -1417,13 +1781,14 @@ def create_app() -> FastAPI:
                 physical_path.unlink(missing_ok=True)
             except OSError:
                 pass
-        return RedirectResponse(url=f"/admin/ticket/{ticket_id}?saved=1", status_code=303)
+        return RedirectResponse(url=build_ticket_detail_url(ticket_id, return_url, saved="1"), status_code=303)
 
     @app.post("/admin/ticket/{ticket_id}/file/{file_id}/delete")
     def delete_ticket_file(
         ticket_id: int,
         file_id: int,
         admin: str = Depends(require_admin),
+        return_url: str = Form(""),
     ) -> RedirectResponse:
         ticket_file = fetch_ticket_file(file_id, ticket_id)
         if not ticket_file:
@@ -1450,7 +1815,7 @@ def create_app() -> FastAPI:
                 physical_path.unlink(missing_ok=True)
             except OSError:
                 pass
-        return RedirectResponse(url=f"/admin/ticket/{ticket_id}?saved=1", status_code=303)
+        return RedirectResponse(url=build_ticket_detail_url(ticket_id, return_url, saved="1"), status_code=303)
 
     @app.get("/admin/uploads/{filename:path}")
     def protected_upload(filename: str, _admin: str = Depends(require_admin)) -> FileResponse:

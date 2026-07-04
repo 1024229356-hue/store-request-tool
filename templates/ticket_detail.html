@@ -16,12 +16,27 @@
         <span class="badge urgency-{{ ticket.urgency }}">{{ ticket.urgency }}</span>
       </div>
     </div>
-    <a class="ghost-button" href="/admin">返回列表</a>
+    <div class="admin-actions">
+      <span class="admin-user">当前账号：{{ admin_user }}</span>
+      <a class="ghost-button" href="{{ return_url }}">返回列表</a>
+      <form method="post" action="/admin/logout">
+        <button class="ghost-button compact" type="submit">切换账号</button>
+      </form>
+      <form method="post" action="/admin/logout">
+        <button class="ghost-button compact" type="submit">退出登录</button>
+      </form>
+    </div>
   </header>
 
   <main class="detail-shell">
     {% if saved %}
     <div class="alert alert-success">处理信息已保存。</div>
+    {% endif %}
+    {% if attachments_saved %}
+    <div class="alert alert-success">补充附件已上传。</div>
+    {% endif %}
+    {% if upload_error %}
+    <div class="alert alert-error">{{ upload_error }}</div>
     {% endif %}
 
     <section class="detail-layout">
@@ -80,7 +95,8 @@
               <span>{{ image.filename }}</span>
               <div class="image-actions">
                 <a class="ghost-button compact" href="{{ image.protected_url }}" target="_blank">查看图片</a>
-                <form method="post" action="/admin/ticket/{{ ticket.id }}/image/{{ image.id }}/delete">
+                <form method="post" action="/admin/ticket/{{ ticket.id }}/image/{{ image.id }}/delete" onsubmit="return confirm('确认删除这张图片吗？删除后不可恢复。');">
+                  <input type="hidden" name="return_url" value="{{ return_url }}">
                   <button class="danger-button compact" type="submit">删除附件</button>
                 </form>
               </div>
@@ -102,7 +118,8 @@
               </div>
               <div class="file-actions">
                 <a class="ghost-button compact" href="{{ file.download_url }}">下载文件</a>
-                <form method="post" action="/admin/ticket/{{ ticket.id }}/file/{{ file.id }}/delete">
+                <form method="post" action="/admin/ticket/{{ ticket.id }}/file/{{ file.id }}/delete" onsubmit="return confirm('确认删除这个文件吗？删除后不可恢复。');">
+                  <input type="hidden" name="return_url" value="{{ return_url }}">
                   <button class="danger-button compact" type="submit">删除文件</button>
                 </form>
               </div>
@@ -118,6 +135,7 @@
         <h2>总部处理面板</h2>
         <p class="panel-note">状态改为已完成会记录完成时间，请确认处理结果后保存。</p>
         <form method="post" action="/admin/ticket/{{ ticket.id }}">
+          <input type="hidden" name="return_url" value="{{ return_url }}">
           <label>
             <span>状态</span>
             <select name="status">
@@ -141,6 +159,45 @@
           </label>
           <button class="primary-button" type="submit">保存处理结果</button>
         </form>
+
+        <section class="supplement-panel">
+          <h2>补充附件</h2>
+          <p class="panel-note">总部可上传处理凭证、截图、表格或供应商反馈文件。</p>
+          <form method="post" action="/admin/ticket/{{ ticket.id }}/attachments" enctype="multipart/form-data">
+            <input type="hidden" name="return_url" value="{{ return_url }}">
+            <div class="upload-card compact-upload-card">
+              <div>
+                <h3>补充图片</h3>
+                <p class="field-hint">支持 {{ image_accept }}，最多 {{ max_image_count }} 张，单张不超过 {{ max_image_mb }}MB。</p>
+              </div>
+              <label class="file-control">
+                <span>选择图片</span>
+                <input name="new_images" type="file" accept="{{ image_accept }}" multiple data-extra-image-input>
+              </label>
+              <div class="upload-tools">
+                <button class="ghost-button compact upload-clear" type="button" data-clear-extra-images>清空图片</button>
+              </div>
+              <div class="upload-preview image-preview" data-extra-image-preview></div>
+            </div>
+
+            <div class="upload-card compact-upload-card">
+              <div>
+                <h3>补充文件</h3>
+                <p class="field-hint">最多 {{ max_file_count }} 个，单个不超过 {{ max_file_mb }}MB，总大小不超过 {{ max_total_file_upload_mb }}MB。</p>
+              </div>
+              <label class="file-control">
+                <span>选择文件</span>
+                <input name="new_files" type="file" accept="{{ file_accept }}" multiple data-extra-file-input>
+              </label>
+              <div class="upload-tools">
+                <button class="ghost-button compact upload-clear" type="button" data-clear-extra-files>清空文件</button>
+              </div>
+              <div class="upload-preview file-preview" data-extra-file-preview></div>
+            </div>
+
+            <button class="primary-button" type="submit">上传补充附件</button>
+          </form>
+        </section>
       </aside>
     </section>
 

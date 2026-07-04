@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>止痒工单后台登录</title>
+  <link rel="stylesheet" href="/static/style.css?v=ui20260704">
+</head>
+<body class="page-submit page-login">
+  <main class="login-shell">
+    <section class="success-panel login-panel">
+      <p class="eyebrow">总部后台</p>
+      <h1>止痒工单后台登录</h1>
+      <p class="subtle">请输入后台账号和密码，登录后可查看、筛选和处理门店需求。</p>
+
+      {% if error %}
+      <div class="alert alert-error">{{ error }}</div>
+      {% endif %}
+
+      <form class="login-form" method="post" action="/admin/login">
+        <input type="hidden" name="next" value="{{ next_url }}">
+        <label>
+          <span>用户名</span>
+          <input name="username" type="text" value="{{ username }}" autocomplete="username" required>
+        </label>
+        <label>
+          <span>密码</span>
+          <input name="password" type="password" autocomplete="current-password" required>
+        </label>
+        <button class="primary-button" type="submit">登录</button>
+      </form>
+    </section>
+  </main>
+</body>
+</html>

@@ -508,6 +508,28 @@ a:focus-visible {
   margin-top: 18px;
 }
 
+.page-login {
+  display: grid;
+  align-items: start;
+}
+
+.login-shell {
+  width: min(100%, 440px);
+  margin: 0 auto;
+  padding: 48px 14px;
+}
+
+.login-panel {
+  margin-top: 0;
+  text-align: left;
+}
+
+.login-form {
+  display: grid;
+  gap: 14px;
+  margin-top: 18px;
+}
+
 .page-admin {
   min-height: 100vh;
   background: var(--bg);
@@ -533,6 +555,31 @@ a:focus-visible {
 
 .export-button {
   min-width: 120px;
+}
+
+.admin-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.admin-actions form {
+  margin: 0;
+}
+
+.admin-user {
+  display: inline-flex;
+  align-items: center;
+  min-height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel-soft);
+  padding: 0 11px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 800;
 }
 
 .admin-shell,
@@ -716,18 +763,26 @@ a:focus-visible {
   line-height: 1.5;
 }
 
-.table-summary {
+.summary-text {
   display: -webkit-box;
   overflow: hidden;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
+  line-height: 1.5;
+}
+
+.attachment-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  max-width: 118px;
 }
 
 .attachment-badge {
   display: inline-flex;
   align-items: center;
-  min-height: 24px;
-  margin: 0 4px 4px 0;
+  min-height: 22px;
+  margin: 0;
   border: 1px solid var(--line);
   border-radius: 999px;
   background: #fff;
@@ -1028,6 +1083,17 @@ dd {
 
 .handler-panel .primary-button {
   width: 100%;
+}
+
+.supplement-panel {
+  margin-top: 18px;
+  border-top: 1px solid var(--line);
+  padding-top: 16px;
+}
+
+.compact-upload-card {
+  margin-bottom: 12px;
+  padding: 12px;
 }
 
 .log-section {
