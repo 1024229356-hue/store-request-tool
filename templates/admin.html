@@ -3,88 +3,149 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>总部后台</title>
-  <link rel="stylesheet" href="/static/style.css">
+  <title>止痒工单后台</title>
+  <link rel="stylesheet" href="/static/style.css?v=ui20260704">
 </head>
 <body class="page-admin">
   <header class="admin-topbar">
     <div>
       <p class="eyebrow">总部后台</p>
-      <h1>门店需求工单</h1>
+      <h1>止痒工单后台</h1>
+      <p class="subtle">统一查看、筛选、处理门店需求</p>
     </div>
-    <a class="secondary-button" href="{{ export_url }}">导出 Excel</a>
+    <a class="secondary-button export-button" href="{{ export_url }}">导出 Excel</a>
   </header>
 
   <main class="admin-shell">
-    <form class="filter-bar" method="get" action="/admin">
-      <label>
-        <span>门店</span>
-        <select name="store_name">
-          <option value="">全部</option>
-          {% for store in stores %}
-          <option value="{{ store }}" {% if filters.get('store_name') == store %}selected{% endif %}>{{ store }}</option>
-          {% endfor %}
-        </select>
-      </label>
-      <label>
-        <span>需求类型</span>
-        <select name="request_type">
-          <option value="">全部</option>
-          {% for item in request_types %}
-          <option value="{{ item }}" {% if filters.get('request_type') == item %}selected{% endif %}>{{ item }}</option>
-          {% endfor %}
-        </select>
-      </label>
-      <label>
-        <span>紧急程度</span>
-        <select name="urgency">
-          <option value="">全部</option>
-          {% for item in urgency_levels %}
-          <option value="{{ item }}" {% if filters.get('urgency') == item %}selected{% endif %}>{{ item }}</option>
-          {% endfor %}
-        </select>
-      </label>
-      <label>
-        <span>状态</span>
-        <select name="status">
-          <option value="">全部</option>
-          {% for item in statuses %}
-          <option value="{{ item }}" {% if filters.get('status') == item %}selected{% endif %}>{{ item }}</option>
-          {% endfor %}
-        </select>
-      </label>
-      <label>
-        <span>处理人</span>
-        <select name="assigned_to">
-          <option value="">全部</option>
-          {% for item in handlers %}
-          <option value="{{ item }}" {% if filters.get('assigned_to') == item %}selected{% endif %}>{{ item }}</option>
-          {% endfor %}
-        </select>
-      </label>
-      <label>
-        <span>开始日期</span>
-        <input type="date" name="date_start" value="{{ filters.get('date_start', '') }}">
-      </label>
-      <label>
-        <span>结束日期</span>
-        <input type="date" name="date_end" value="{{ filters.get('date_end', '') }}">
-      </label>
-      <label class="filter-keyword">
-        <span>关键词</span>
-        <input type="search" name="keyword" value="{{ filters.get('keyword', '') }}" placeholder="工单号、商品、说明、处理人">
-      </label>
-      <label>
-        <span>排序</span>
-        <select name="sort">
-          <option value="newest" {% if sort == 'newest' %}selected{% endif %}>提交时间倒序</option>
-          <option value="urgency" {% if sort == 'urgency' %}selected{% endif %}>紧急程度优先</option>
-          <option value="status" {% if sort == 'status' %}selected{% endif %}>状态优先</option>
-        </select>
-      </label>
-      <button class="primary-button compact" type="submit">筛选</button>
-      <a class="ghost-button compact" href="/admin">重置</a>
-    </form>
+    {% set pending = namespace(count=0) %}
+    {% set processing = namespace(count=0) %}
+    {% set today = namespace(count=0) %}
+    {% set completed = namespace(count=0) %}
+    {% for ticket in tickets %}
+      {% if ticket.status == '待处理' %}{% set pending.count = pending.count + 1 %}{% endif %}
+      {% if ticket.status == '处理中' %}{% set processing.count = processing.count + 1 %}{% endif %}
+      {% if ticket.urgency == '当天必须处理' %}{% set today.count = today.count + 1 %}{% endif %}
+      {% if ticket.status == '已完成' %}{% set completed.count = completed.count + 1 %}{% endif %}
+    {% endfor %}
+
+    <section class="stats-section" aria-label="统计概览">
+      <div class="section-heading admin-section-heading">
+        <h2>统计概览</h2>
+        <p>统计基于当前筛选结果与当前页，方便快速判断处理压力。</p>
+      </div>
+      <div class="stats-grid">
+        <article class="stat-card">
+          <span>当前筛选结果</span>
+          <strong>{{ pagination.total_count }}</strong>
+          <small>共 {{ pagination.total_pages }} 页</small>
+        </article>
+        <article class="stat-card">
+          <span>当前页工单</span>
+          <strong>{{ tickets|length }}</strong>
+          <small>每页 {{ pagination.page_size }} 条</small>
+        </article>
+        <article class="stat-card">
+          <span>当前页待处理</span>
+          <strong>{{ pending.count }}</strong>
+          <small>需要分配或跟进</small>
+        </article>
+        <article class="stat-card">
+          <span>当前页处理中</span>
+          <strong>{{ processing.count }}</strong>
+          <small>总部已接手</small>
+        </article>
+        <article class="stat-card stat-alert">
+          <span>当天必须处理</span>
+          <strong>{{ today.count }}</strong>
+          <small>优先查看</small>
+        </article>
+        <article class="stat-card">
+          <span>当前页已完成</span>
+          <strong>{{ completed.count }}</strong>
+          <small>已闭环</small>
+        </article>
+      </div>
+    </section>
+
+    <section class="filter-card">
+      <div class="section-heading admin-section-heading">
+        <h2>筛选条件</h2>
+        <p>按门店、状态、日期和关键词快速定位工单。</p>
+      </div>
+      <form class="filter-bar" method="get" action="/admin">
+        <label>
+          <span>门店</span>
+          <select name="store_name">
+            <option value="">全部</option>
+            {% for store in stores %}
+            <option value="{{ store }}" {% if filters.get('store_name') == store %}selected{% endif %}>{{ store }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>
+          <span>需求类型</span>
+          <select name="request_type">
+            <option value="">全部</option>
+            {% for item in request_types %}
+            <option value="{{ item }}" {% if filters.get('request_type') == item %}selected{% endif %}>{{ item }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>
+          <span>紧急程度</span>
+          <select name="urgency">
+            <option value="">全部</option>
+            {% for item in urgency_levels %}
+            <option value="{{ item }}" {% if filters.get('urgency') == item %}selected{% endif %}>{{ item }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>
+          <span>状态</span>
+          <select name="status">
+            <option value="">全部</option>
+            {% for item in statuses %}
+            <option value="{{ item }}" {% if filters.get('status') == item %}selected{% endif %}>{{ item }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>
+          <span>处理人</span>
+          <select name="assigned_to">
+            <option value="">全部</option>
+            {% for item in handlers %}
+            <option value="{{ item }}" {% if filters.get('assigned_to') == item %}selected{% endif %}>{{ item }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <div class="date-range">
+          <label>
+            <span>开始日期</span>
+            <input type="date" name="date_start" value="{{ filters.get('date_start', '') }}">
+          </label>
+          <label>
+            <span>结束日期</span>
+            <input type="date" name="date_end" value="{{ filters.get('date_end', '') }}">
+          </label>
+        </div>
+        <label class="filter-keyword">
+          <span>关键词</span>
+          <input type="search" name="keyword" value="{{ filters.get('keyword', '') }}" placeholder="工单号、商品、说明、处理人">
+        </label>
+        <label>
+          <span>排序</span>
+          <select name="sort">
+            <option value="newest" {% if sort == 'newest' %}selected{% endif %}>提交时间倒序</option>
+            <option value="urgency" {% if sort == 'urgency' %}selected{% endif %}>紧急程度优先</option>
+            <option value="status" {% if sort == 'status' %}selected{% endif %}>状态优先</option>
+          </select>
+        </label>
+        <div class="filter-actions">
+          <button class="primary-button compact" type="submit">筛选</button>
+          <a class="ghost-button compact" href="/admin">重置</a>
+        </div>
+      </form>
+    </section>
 
     <section class="table-wrap">
       <table class="ticket-table">
@@ -121,8 +182,11 @@
             <td>{{ ticket.product_name or '' }}</td>
             <td>{{ ticket.sku_barcode or '' }}</td>
             <td>{{ ticket.quantity if ticket.quantity is not none else '' }}</td>
-            <td class="summary-cell" title="{{ ticket.description }}">{{ ticket.description_summary }}</td>
-            <td>图片 {{ ticket.image_count or 0 }} / 文件 {{ ticket.file_count or 0 }}</td>
+            <td class="summary-cell table-summary" title="{{ ticket.description }}">{{ ticket.description_summary }}</td>
+            <td title="图片 {{ ticket.image_count or 0 }} / 文件 {{ ticket.file_count or 0 }}">
+              <span class="attachment-badge">图片 {{ ticket.image_count or 0 }}</span>
+              <span class="attachment-badge">文件 {{ ticket.file_count or 0 }}</span>
+            </td>
             <td><span class="badge status-{{ ticket.status }}">{{ ticket.status }}</span></td>
             <td>{{ ticket.assigned_to or '' }}</td>
             <td>{{ ticket.closed_at or '' }}</td>
@@ -130,7 +194,10 @@
           </tr>
           {% else %}
           <tr>
-            <td class="empty-cell" colspan="16">暂无工单</td>
+            <td class="empty-cell" colspan="16">
+              <strong>当前条件下暂无工单</strong>
+              <span>可以调整筛选条件，或等待门店提交新的需求。</span>
+            </td>
           </tr>
           {% endfor %}
         </tbody>

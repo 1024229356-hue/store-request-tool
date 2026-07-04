@@ -3,117 +3,160 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>门店需求提报</title>
-  <link rel="stylesheet" href="/static/style.css">
+  <title>止痒门店需求提报</title>
+  <link rel="stylesheet" href="/static/style.css?v=ui20260704">
 </head>
 <body class="page-submit">
   <main class="mobile-shell">
-    <section class="page-header">
+    <section class="page-header submit-hero">
       <p class="eyebrow">门店需求工单</p>
-      <h1>需求提报</h1>
-      <p class="subtle">请把问题描述清楚，图片和文件可按需上传，提交前都可以从待上传列表中删除。</p>
+      <h1>止痒门店需求提报</h1>
+      <p class="header-copy">请尽量一次性补充完整信息，便于总部快速处理</p>
+      <div class="header-tags" aria-label="工单流程">
+        <span>门店工单</span>
+        <span>总部处理</span>
+        <span>状态留痕</span>
+      </div>
     </section>
 
     {% if error %}
     <div class="alert alert-error">{{ error }}</div>
     {% endif %}
 
-    <form class="form-panel" method="post" action="/submit" enctype="multipart/form-data">
-      <label>
-        <span>门店 <strong>*</strong></span>
-        <select name="store_name" required>
-          <option value="">请选择门店</option>
-          {% for store in stores %}
-          <option value="{{ store }}" {% if values.get('store_name') == store %}selected{% endif %}>{{ store }}</option>
-          {% endfor %}
-        </select>
-      </label>
+    <form class="form-stack" method="post" action="/submit" enctype="multipart/form-data">
+      <section class="form-card">
+        <div class="section-heading">
+          <h2>基础信息</h2>
+          <p>确认门店、提报人和处理优先级，便于总部快速分配。</p>
+        </div>
+        <div class="grid-two">
+          <label>
+            <span>门店 <strong>*</strong></span>
+            <select name="store_name" required>
+              <option value="">请选择门店</option>
+              {% for store in stores %}
+              <option value="{{ store }}" {% if values.get('store_name') == store %}selected{% endif %}>{{ store }}</option>
+              {% endfor %}
+            </select>
+          </label>
 
-      <label>
-        <span>提报人 <strong>*</strong></span>
-        <input name="submitter" type="text" value="{{ values.get('submitter', '') }}" required>
-      </label>
+          <label>
+            <span>提报人 <strong>*</strong></span>
+            <input name="submitter" type="text" value="{{ values.get('submitter', '') }}" placeholder="请输入姓名或岗位" required>
+          </label>
 
-      <label>
-        <span>需求类型 <strong>*</strong></span>
-        <select name="request_type" required>
-          <option value="">请选择需求类型</option>
-          {% for item in request_types %}
-          <option value="{{ item }}" {% if values.get('request_type') == item %}selected{% endif %}>{{ item }}</option>
-          {% endfor %}
-        </select>
-      </label>
+          <label>
+            <span>需求类型 <strong>*</strong></span>
+            <select name="request_type" required>
+              <option value="">请选择需求类型</option>
+              {% for item in request_types %}
+              <option value="{{ item }}" {% if values.get('request_type') == item %}selected{% endif %}>{{ item }}</option>
+              {% endfor %}
+            </select>
+          </label>
 
-      <label>
-        <span>紧急程度 <strong>*</strong></span>
-        <select name="urgency" required>
-          <option value="">请选择紧急程度</option>
-          {% for item in urgency_levels %}
-          <option value="{{ item }}" {% if values.get('urgency') == item %}selected{% endif %}>{{ item }}</option>
-          {% endfor %}
-        </select>
-      </label>
+          <label>
+            <span>紧急程度 <strong>*</strong></span>
+            <select name="urgency" required>
+              <option value="">请选择紧急程度</option>
+              {% for item in urgency_levels %}
+              <option value="{{ item }}" {% if values.get('urgency') == item %}selected{% endif %}>{{ item }}</option>
+              {% endfor %}
+            </select>
+          </label>
+        </div>
+      </section>
 
-      <div class="grid-two">
+      <section class="form-card">
+        <div class="section-heading">
+          <h2>商品信息</h2>
+          <p>如需求与商品相关，请补充品牌、商品名和条码，减少来回确认。</p>
+        </div>
+        <div class="grid-two">
+          <label>
+            <span>品牌</span>
+            <input name="brand" type="text" value="{{ values.get('brand', '') }}" list="brand-options" placeholder="可输入或选择品牌">
+            <datalist id="brand-options">
+              {% for brand in brands %}
+              <option value="{{ brand }}"></option>
+              {% endfor %}
+            </datalist>
+          </label>
+          <label>
+            <span>商品名称</span>
+            <input name="product_name" type="text" value="{{ values.get('product_name', '') }}" placeholder="例如：止痒舒缓喷雾">
+          </label>
+        </div>
+
+        <div class="grid-two">
+          <label>
+            <span>规格条码</span>
+            <input name="sku_barcode" type="text" value="{{ values.get('sku_barcode', '') }}" placeholder="可填写规格、条码或 SKU">
+          </label>
+          <label>
+            <span>数量</span>
+            <input name="quantity" type="number" inputmode="numeric" min="0" step="1" value="{{ values.get('quantity', '') }}" placeholder="需要处理的数量">
+          </label>
+        </div>
+      </section>
+
+      <section class="form-card">
+        <div class="section-heading">
+          <h2>问题说明</h2>
+          <p>尽量写清现场情况、影响范围和希望总部协助的动作。</p>
+        </div>
         <label>
-          <span>品牌</span>
-          <input name="brand" type="text" value="{{ values.get('brand', '') }}" list="brand-options">
-          <datalist id="brand-options">
-            {% for brand in brands %}
-            <option value="{{ brand }}"></option>
-            {% endfor %}
-          </datalist>
+          <span>问题说明 <strong>*</strong></span>
+          <textarea name="description" rows="6" placeholder="请描述发生了什么、涉及哪些商品或系统页面、希望如何处理" required>{{ values.get('description', '') }}</textarea>
         </label>
         <label>
-          <span>商品名称</span>
-          <input name="product_name" type="text" value="{{ values.get('product_name', '') }}">
+          <span>期望完成时间</span>
+          <input name="expected_finish_date" type="date" value="{{ values.get('expected_finish_date', '') }}">
         </label>
+      </section>
+
+      <section class="form-card">
+        <div class="section-heading">
+          <h2>附件上传</h2>
+          <p>图片适合现场截图或陈列照片，文件适合清单、表格和说明材料。</p>
+        </div>
+
+        <div class="upload-card">
+          <div>
+            <h3>图片上传</h3>
+            <p class="field-hint">支持 {{ image_accept }}，最多 {{ max_image_count }} 张，单张不超过 {{ max_image_mb }}MB。</p>
+          </div>
+          <label class="file-control">
+            <span>选择图片</span>
+            <input name="images" type="file" accept="{{ image_accept }}" multiple data-image-input>
+          </label>
+          <div class="upload-tools">
+            <button class="ghost-button compact upload-clear" type="button" data-clear-images>清空图片</button>
+          </div>
+          <div class="upload-preview image-preview" data-image-preview></div>
+        </div>
+
+        <div class="upload-card">
+          <div>
+            <h3>文件上传</h3>
+            <p class="field-hint">支持 PDF、Word、Excel、CSV、TXT、ZIP、RAR 等文件，最多 {{ max_file_count }} 个，单个不超过 {{ max_file_mb }}MB，总大小不超过 {{ max_total_file_upload_mb }}MB。</p>
+          </div>
+          <label class="file-control">
+            <span>选择文件</span>
+            <input name="files" type="file" accept="{{ file_accept }}" multiple data-file-input>
+          </label>
+          <div class="upload-tools">
+            <button class="ghost-button compact upload-clear" type="button" data-clear-files>清空文件</button>
+          </div>
+          <div class="upload-preview file-preview" data-file-preview></div>
+        </div>
+      </section>
+
+      <div class="submit-action-bar">
+        <button class="primary-button" type="submit">提交需求</button>
       </div>
-
-      <div class="grid-two">
-        <label>
-          <span>规格条码</span>
-          <input name="sku_barcode" type="text" value="{{ values.get('sku_barcode', '') }}">
-        </label>
-        <label>
-          <span>数量</span>
-          <input name="quantity" type="number" inputmode="numeric" min="0" step="1" value="{{ values.get('quantity', '') }}">
-        </label>
-      </div>
-
-      <label>
-        <span>问题说明 <strong>*</strong></span>
-        <textarea name="description" rows="5" required>{{ values.get('description', '') }}</textarea>
-      </label>
-
-      <label>
-        <span>图片上传</span>
-        <input name="images" type="file" accept="{{ image_accept }}" multiple data-image-input>
-      </label>
-      <p class="field-hint">支持 {{ image_accept }}，单张不超过 {{ max_image_mb }}MB。</p>
-      <div class="upload-tools">
-        <button class="ghost-button compact upload-clear" type="button" data-clear-images>清空图片</button>
-      </div>
-      <div class="upload-preview image-preview" data-image-preview></div>
-
-      <label>
-        <span>文件上传</span>
-        <input name="files" type="file" accept="{{ file_accept }}" multiple data-file-input>
-      </label>
-      <p class="field-hint">支持 PDF、Word、Excel、CSV、TXT、ZIP、RAR 等文件，具体格式来自 config/system.json。最多 {{ max_file_count }} 个文件，单个不超过 {{ max_file_mb }}MB，总大小不超过 {{ max_total_file_upload_mb }}MB。</p>
-      <div class="upload-tools">
-        <button class="ghost-button compact upload-clear" type="button" data-clear-files>清空文件</button>
-      </div>
-      <div class="upload-preview file-preview" data-file-preview></div>
-
-      <label>
-        <span>期望完成时间</span>
-        <input name="expected_finish_date" type="date" value="{{ values.get('expected_finish_date', '') }}">
-      </label>
-
-      <button class="primary-button" type="submit">提交需求</button>
     </form>
   </main>
-  <script src="/static/app.js?v=20260704"></script>
+  <script src="/static/app.js?v=ui20260704"></script>
 </body>
 </html>

@@ -4,13 +4,17 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>工单详情</title>
-  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/style.css?v=ui20260704">
 </head>
 <body class="page-admin">
   <header class="admin-topbar">
     <div>
       <p class="eyebrow">工单详情</p>
       <h1>{{ ticket.ticket_no }}</h1>
+      <div class="detail-header-badges">
+        <span class="badge status-{{ ticket.status }}">{{ ticket.status }}</span>
+        <span class="badge urgency-{{ ticket.urgency }}">{{ ticket.urgency }}</span>
+      </div>
     </div>
     <a class="ghost-button" href="/admin">返回列表</a>
   </header>
@@ -24,23 +28,40 @@
       <div class="detail-main">
         <section class="detail-section">
           <h2>提交信息</h2>
-          <dl class="detail-grid">
-            <div><dt>工单号</dt><dd>{{ ticket.ticket_no }}</dd></div>
-            <div><dt>提交时间</dt><dd>{{ ticket.created_at }}</dd></div>
-            <div><dt>最后更新时间</dt><dd>{{ ticket.updated_at }}</dd></div>
-            <div><dt>完成时间</dt><dd>{{ ticket.closed_at or '-' }}</dd></div>
-            <div><dt>门店</dt><dd>{{ ticket.store_name }}</dd></div>
-            <div><dt>提报人</dt><dd>{{ ticket.submitter }}</dd></div>
-            <div><dt>需求类型</dt><dd>{{ ticket.request_type }}</dd></div>
-            <div><dt>紧急程度</dt><dd><span class="badge urgency-{{ ticket.urgency }}">{{ ticket.urgency }}</span></dd></div>
-            <div><dt>品牌</dt><dd>{{ ticket.brand or '-' }}</dd></div>
-            <div><dt>商品名称</dt><dd>{{ ticket.product_name or '-' }}</dd></div>
-            <div><dt>规格条码</dt><dd>{{ ticket.sku_barcode or '-' }}</dd></div>
-            <div><dt>数量</dt><dd>{{ ticket.quantity if ticket.quantity is not none else '-' }}</dd></div>
-            <div><dt>期望完成时间</dt><dd>{{ ticket.expected_finish_date or '-' }}</dd></div>
-            <div><dt>当前状态</dt><dd><span class="badge status-{{ ticket.status }}">{{ ticket.status }}</span></dd></div>
-            <div><dt>处理人</dt><dd>{{ ticket.assigned_to or '-' }}</dd></div>
-          </dl>
+          <div class="detail-groups">
+            <section class="info-group">
+              <h3>基础信息</h3>
+              <dl class="detail-grid">
+                <div><dt>工单号</dt><dd>{{ ticket.ticket_no }}</dd></div>
+                <div><dt>门店</dt><dd>{{ ticket.store_name }}</dd></div>
+                <div><dt>提报人</dt><dd>{{ ticket.submitter }}</dd></div>
+                <div><dt>需求类型</dt><dd>{{ ticket.request_type }}</dd></div>
+                <div><dt>紧急程度</dt><dd><span class="badge urgency-{{ ticket.urgency }}">{{ ticket.urgency }}</span></dd></div>
+                <div><dt>当前状态</dt><dd><span class="badge status-{{ ticket.status }}">{{ ticket.status }}</span></dd></div>
+              </dl>
+            </section>
+
+            <section class="info-group">
+              <h3>商品信息</h3>
+              <dl class="detail-grid">
+                <div><dt>品牌</dt><dd>{{ ticket.brand or '-' }}</dd></div>
+                <div><dt>商品名称</dt><dd>{{ ticket.product_name or '-' }}</dd></div>
+                <div><dt>规格条码</dt><dd>{{ ticket.sku_barcode or '-' }}</dd></div>
+                <div><dt>数量</dt><dd>{{ ticket.quantity if ticket.quantity is not none else '-' }}</dd></div>
+              </dl>
+            </section>
+
+            <section class="info-group">
+              <h3>时间信息</h3>
+              <dl class="detail-grid">
+                <div><dt>提交时间</dt><dd>{{ ticket.created_at }}</dd></div>
+                <div><dt>期望完成时间</dt><dd>{{ ticket.expected_finish_date or '-' }}</dd></div>
+                <div><dt>最后更新时间</dt><dd>{{ ticket.updated_at }}</dd></div>
+                <div><dt>完成时间</dt><dd>{{ ticket.closed_at or '-' }}</dd></div>
+                <div><dt>处理人</dt><dd>{{ ticket.assigned_to or '-' }}</dd></div>
+              </dl>
+            </section>
+          </div>
         </section>
 
         <section class="detail-section">
@@ -56,13 +77,16 @@
               <a href="{{ image.protected_url }}" target="_blank">
                 <img src="{{ image.protected_url }}" alt="工单图片" onerror="this.closest('.image-card').classList.add('missing'); this.remove();">
               </a>
-              <span>{{ image.image_path }}</span>
-              <form method="post" action="/admin/ticket/{{ ticket.id }}/image/{{ image.id }}/delete">
-                <button class="danger-button compact" type="submit">删除附件</button>
-              </form>
+              <span>{{ image.filename }}</span>
+              <div class="image-actions">
+                <a class="ghost-button compact" href="{{ image.protected_url }}" target="_blank">查看图片</a>
+                <form method="post" action="/admin/ticket/{{ ticket.id }}/image/{{ image.id }}/delete">
+                  <button class="danger-button compact" type="submit">删除附件</button>
+                </form>
+              </div>
             </div>
             {% else %}
-            <p class="subtle">未上传图片。</p>
+            <p class="empty-note">未上传图片，门店没有提供现场截图或照片。</p>
             {% endfor %}
           </div>
         </section>
@@ -77,21 +101,22 @@
                 <span>{{ file.size_label }} · {{ file.uploaded_at }}</span>
               </div>
               <div class="file-actions">
-                <a class="ghost-button compact" href="{{ file.download_url }}">下载</a>
+                <a class="ghost-button compact" href="{{ file.download_url }}">下载文件</a>
                 <form method="post" action="/admin/ticket/{{ ticket.id }}/file/{{ file.id }}/delete">
                   <button class="danger-button compact" type="submit">删除文件</button>
                 </form>
               </div>
             </div>
             {% else %}
-            <p class="subtle">未上传文件附件。</p>
+            <p class="empty-note">未上传文件附件，暂无清单或补充材料。</p>
             {% endfor %}
           </div>
         </section>
       </div>
 
       <aside class="handler-panel">
-        <h2>总部处理</h2>
+        <h2>总部处理面板</h2>
+        <p class="panel-note">状态改为已完成会记录完成时间，请确认处理结果后保存。</p>
         <form method="post" action="/admin/ticket/{{ ticket.id }}">
           <label>
             <span>状态</span>
@@ -121,38 +146,25 @@
 
     <section class="detail-section log-section">
       <h2>处理日志</h2>
-      <table class="log-table">
-        <thead>
-          <tr>
-            <th>时间</th>
-            <th>操作</th>
-            <th>操作人</th>
-            <th>原状态</th>
-            <th>新状态</th>
-            <th>原处理人</th>
-            <th>新处理人</th>
-            <th>备注</th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for log in logs %}
-          <tr>
-            <td>{{ log.created_at }}</td>
-            <td>{{ log.action or '-' }}</td>
-            <td>{{ log.operator or '-' }}</td>
-            <td>{{ log.old_status or '-' }}</td>
-            <td>{{ log.new_status or '-' }}</td>
-            <td>{{ log.old_assigned_to or '-' }}</td>
-            <td>{{ log.new_assigned_to or '-' }}</td>
-            <td>{{ log.note or '-' }}</td>
-          </tr>
-          {% else %}
-          <tr>
-            <td class="empty-cell" colspan="8">暂无处理日志</td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
+      <div class="timeline-log">
+        {% for log in logs %}
+        <article class="timeline-item">
+          <div class="timeline-dot"></div>
+          <div class="timeline-content">
+            <div class="timeline-topline">
+              <strong>{{ log.action or '状态更新' }}</strong>
+              <span>{{ log.created_at }}</span>
+            </div>
+            <p>操作人：{{ log.operator or '-' }}</p>
+            <p>状态：{{ log.old_status or '-' }} → {{ log.new_status or '-' }}</p>
+            <p>处理人：{{ log.old_assigned_to or '-' }} → {{ log.new_assigned_to or '-' }}</p>
+            <p>备注：{{ log.note or '-' }}</p>
+          </div>
+        </article>
+        {% else %}
+        <p class="empty-note">暂无处理日志，首次保存处理结果后会在这里留痕。</p>
+        {% endfor %}
+      </div>
     </section>
   </main>
 </body>

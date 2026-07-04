@@ -5,6 +5,7 @@ document.addEventListener("DOMContentLoaded", () => {
   const fileInput = document.querySelector("[data-file-input]");
   const filePreview = document.querySelector("[data-file-preview]");
   const clearFilesButton = document.querySelector("[data-clear-files]");
+  const copyTicketButtons = document.querySelectorAll("[data-copy-ticket]");
 
   let selectedImages = [];
   let selectedFiles = [];
@@ -56,6 +57,37 @@ document.addEventListener("DOMContentLoaded", () => {
     meta.appendChild(size);
 
     return meta;
+  }
+
+  function setTemporaryButtonText(button, text) {
+    const originalText = button.dataset.originalText || button.textContent;
+    button.dataset.originalText = originalText;
+    button.textContent = text;
+    window.setTimeout(() => {
+      button.textContent = originalText;
+    }, 1600);
+  }
+
+  async function copyText(text) {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.setAttribute("readonly", "");
+    textarea.style.position = "fixed";
+    textarea.style.left = "-9999px";
+    textarea.style.top = "0";
+    document.body.appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+    try {
+      return document.execCommand("copy");
+    } finally {
+      document.body.removeChild(textarea);
+    }
   }
 
   function renderImages() {
@@ -142,4 +174,19 @@ document.addEventListener("DOMContentLoaded", () => {
       filePreview.innerHTML = "";
     });
   }
+
+  copyTicketButtons.forEach((button) => {
+    button.addEventListener("click", async () => {
+      const ticketNo = button.dataset.copyTicket || "";
+      if (!ticketNo) {
+        return;
+      }
+      try {
+        const copied = await copyText(ticketNo);
+        setTemporaryButtonText(button, copied ? "已复制" : "请手动复制");
+      } catch (_error) {
+        setTemporaryButtonText(button, "请手动复制");
+      }
+    });
+  });
 });

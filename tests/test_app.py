@@ -204,6 +204,12 @@ def test_submit_page_exposes_image_and_file_upload_inputs(tmp_path, monkeypatch)
     submit_page = client.get("/submit")
 
     assert submit_page.status_code == 200
+    assert "止痒门店需求提报" in submit_page.text
+    assert "请尽量一次性补充完整信息" in submit_page.text
+    assert "基础信息" in submit_page.text
+    assert "商品信息" in submit_page.text
+    assert "问题说明" in submit_page.text
+    assert "附件上传" in submit_page.text
     assert 'name="images"' in submit_page.text
     assert "data-image-input" in submit_page.text
     assert "data-image-preview" in submit_page.text
@@ -214,7 +220,25 @@ def test_submit_page_exposes_image_and_file_upload_inputs(tmp_path, monkeypatch)
     assert "data-file-preview" in submit_page.text
     assert "data-clear-files" in submit_page.text
     assert "文件上传" in submit_page.text
-    assert '/static/app.js?v=20260704' in submit_page.text
+    assert '/static/style.css?v=ui20260704' in submit_page.text
+    assert '/static/app.js?v=ui20260704' in submit_page.text
+
+
+def test_submit_success_page_highlights_ticket_number_and_copy_action(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch)
+
+    response = submit_ticket(client)
+
+    assert response.status_code == 200
+    assert "提交成功" in response.text
+    assert "请截图保存工单号" in response.text
+    assert "success-ticket-no" in response.text
+    assert "复制工单号" in response.text
+    assert "data-copy-ticket" in response.text
+    assert "继续提交" in response.text
+    assert "返回提报页" in response.text
+    assert '/static/style.css?v=ui20260704' in response.text
+    assert '/static/app.js?v=ui20260704' in response.text
 
 
 def test_upload_script_uses_independent_state_and_clear_selectors():
@@ -228,6 +252,46 @@ def test_upload_script_uses_independent_state_and_clear_selectors():
     assert "event.preventDefault()" in script
     assert "event.stopPropagation()" in script
     assert "new DataTransfer()" in script
+    assert "[data-copy-ticket]" in script
+    assert "navigator.clipboard" in script
+
+
+def test_admin_page_renders_polished_header_stats_and_table_badges(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch)
+    submit_ticket(client, urgency="当天必须处理", description="今天必须处理的陈列问题")
+    submit_ticket(client, urgency="普通", description="普通补货需求")
+
+    admin_page = client.get("/admin", auth=ADMIN_AUTH)
+
+    assert admin_page.status_code == 200
+    assert "止痒工单后台" in admin_page.text
+    assert "统一查看、筛选、处理门店需求" in admin_page.text
+    assert "统计概览" in admin_page.text
+    assert "当前筛选结果" in admin_page.text
+    assert "当前页待处理" in admin_page.text
+    assert "当天必须处理" in admin_page.text
+    assert "筛选条件" in admin_page.text
+    assert "attachment-badge" in admin_page.text
+    assert "table-summary" in admin_page.text
+
+
+def test_detail_page_renders_grouped_layout_and_handler_hint(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch)
+    response = submit_ticket_with_image_and_file(client)
+    assert response.status_code == 200
+
+    detail_page = client.get("/admin/ticket/1", auth=ADMIN_AUTH)
+
+    assert detail_page.status_code == 200
+    assert "基础信息" in detail_page.text
+    assert "商品信息" in detail_page.text
+    assert "时间信息" in detail_page.text
+    assert "总部处理面板" in detail_page.text
+    assert "状态改为已完成会记录完成时间" in detail_page.text
+    assert "查看图片" in detail_page.text
+    assert "下载文件" in detail_page.text
+    assert "timeline-log" in detail_page.text
+    assert '/static/style.css?v=ui20260704' in detail_page.text
 
 
 def test_admin_users_allows_multiple_accounts_and_logs_actual_operator(tmp_path, monkeypatch):
