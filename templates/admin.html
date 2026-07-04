@@ -166,11 +166,11 @@
       <tr>
         <td><a class="table-link ticket-no-link" href="{{ ticket.detail_url }}">{{ ticket.ticket_no }}</a></td>
         <td>{{ ticket.created_at }}</td>
-        <td>{{ ticket.store_name }}</td>
+        <td title="{{ ticket.store_name }}"><div class="multi-value-text">{{ ticket.store_name }}</div></td>
         <td>{{ ticket.submitter }}</td>
         <td>{{ ticket.request_type }}</td>
         <td><span class="badge status-badge urgency-{{ ticket.urgency }}">{{ ticket.urgency }}</span></td>
-        <td>{{ ticket.brand or '' }}</td>
+        <td title="{{ ticket.brand or '' }}"><div class="multi-value-text">{{ ticket.brand or '' }}</div></td>
         <td>{{ ticket.product_name or '' }}</td>
         <td>{{ ticket.sku_barcode or '' }}</td>
         <td>{{ ticket.quantity if ticket.quantity is not none else '' }}</td>

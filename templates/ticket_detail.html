@@ -60,7 +60,16 @@
           <h3>基础信息</h3>
           <dl class="detail-grid">
             <div><dt>工单号</dt><dd>{{ ticket.ticket_no }}</dd></div>
-            <div><dt>门店</dt><dd>{{ ticket.store_name }}</dd></div>
+            <div>
+              <dt>门店</dt>
+              <dd>
+                <div class="tag-list">
+                  {% for store in ticket.store_names %}
+                  <span class="tag-chip">{{ store }}</span>
+                  {% endfor %}
+                </div>
+              </dd>
+            </div>
             <div><dt>提报人</dt><dd>{{ ticket.submitter }}</dd></div>
             <div><dt>需求类型</dt><dd>{{ ticket.request_type }}</dd></div>
             <div><dt>紧急程度</dt><dd><span class="badge status-badge urgency-{{ ticket.urgency }}">{{ ticket.urgency }}</span></dd></div>
@@ -71,7 +80,20 @@
         <section class="info-group">
           <h3>商品信息</h3>
           <dl class="detail-grid">
-            <div><dt>品牌</dt><dd>{{ ticket.brand or '-' }}</dd></div>
+            <div>
+              <dt>品牌</dt>
+              <dd>
+                {% if ticket.brand_names %}
+                <div class="tag-list">
+                  {% for brand in ticket.brand_names %}
+                  <span class="tag-chip">{{ brand }}</span>
+                  {% endfor %}
+                </div>
+                {% else %}
+                -
+                {% endif %}
+              </dd>
+            </div>
             <div><dt>商品名称</dt><dd>{{ ticket.product_name or '-' }}</dd></div>
             <div><dt>规格条码</dt><dd>{{ ticket.sku_barcode or '-' }}</dd></div>
             <div><dt>数量</dt><dd>{{ ticket.quantity if ticket.quantity is not none else '-' }}</dd></div>

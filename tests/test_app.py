@@ -304,6 +304,148 @@ def test_upload_script_uses_independent_state_and_clear_selectors():
     assert "[data-extra-file-input]" in script
 
 
+def test_submit_page_exposes_multi_store_and_multi_brand_choices(tmp_path, monkeypatch):
+    client, _ = build_client(
+        tmp_path,
+        monkeypatch,
+        config_overrides={"brands.json": ["止痒", "雨过山", "logaloga"]},
+    )
+
+    submit_page = client.get("/submit")
+
+    assert submit_page.status_code == 200
+    assert 'name="store_names"' in submit_page.text
+    assert 'type="checkbox"' in submit_page.text
+    assert "可选择一个或多个门店。" in submit_page.text
+    assert 'name="brands"' in submit_page.text
+    assert 'name="brand_extra"' in submit_page.text
+    assert "未在列表中的品牌，可手动输入" in submit_page.text
+    assert "choice-grid" in submit_page.text
+    assert "choice-chip" in submit_page.text
+
+
+def test_submit_multi_store_multi_brand_persists_relations_queries_and_export(tmp_path, monkeypatch):
+    client, _ = build_client(
+        tmp_path,
+        monkeypatch,
+        config_overrides={"brands.json": ["止痒", "雨过山", "logaloga"]},
+    )
+    response = client.post(
+        "/submit",
+        data={
+            "store_names": ["南京门东店", "南昌万寿宫店"],
+            "submitter": "多选测试",
+            "request_type": "缺货需求",
+            "urgency": "加急",
+            "brands": ["止痒", "雨过山"],
+            "brand_extra": "logaloga，止痒；手动品牌",
+            "product_name": "多门店商品",
+            "sku_barcode": "SKU-MULTI",
+            "quantity": "8",
+            "description": "多门店多品牌自动化测试工单",
+            "expected_finish_date": "2026-07-04",
+        },
+    )
+    assert response.status_code == 200
+
+    tickets = rows_for(tmp_path, "tickets")
+    assert len(tickets) == 1
+    assert tickets[0]["store_name"] == "南京门东店、南昌万寿宫店"
+    assert tickets[0]["brand"] == "止痒、雨过山、logaloga、手动品牌"
+    ticket_stores = rows_for(tmp_path, "ticket_stores")
+    ticket_brands = rows_for(tmp_path, "ticket_brands")
+    assert [row["store_name"] for row in ticket_stores] == ["南京门东店", "南昌万寿宫店"]
+    assert [row["brand"] for row in ticket_brands] == ["止痒", "雨过山", "logaloga", "手动品牌"]
+
+    logged_in_client(client)
+    admin_filter = client.get("/admin?store_name=南昌万寿宫店")
+    assert admin_filter.status_code == 200
+    assert "多门店多品牌自动化测试工单" in admin_filter.text
+    assert "南京门东店、南昌万寿宫店" in admin_filter.text
+    assert "止痒、雨过山、logaloga、手动品牌" in admin_filter.text
+
+    dashboard = client.get("/admin/dashboard")
+    assert dashboard.status_code == 200
+    assert "南京门东店" in dashboard.text
+    assert "南昌万寿宫店" in dashboard.text
+
+    query_nanjing = client.get("/query?store_name=南京门东店")
+    assert query_nanjing.status_code == 200
+    assert "多门店多品牌自动化测试工单" in query_nanjing.text
+    query_nanchang = client.get("/query?store_name=南昌万寿宫店")
+    assert query_nanchang.status_code == 200
+    assert "多门店多品牌自动化测试工单" in query_nanchang.text
+
+    detail_allowed = client.get("/query/ticket/1?store_name=南昌万寿宫店")
+    assert detail_allowed.status_code == 200
+    assert "tag-chip" in detail_allowed.text
+    assert "南京门东店" in detail_allowed.text
+    assert "南昌万寿宫店" in detail_allowed.text
+    assert "止痒" in detail_allowed.text
+    assert "雨过山" in detail_allowed.text
+    assert "logaloga" in detail_allowed.text
+    assert "手动品牌" in detail_allowed.text
+    detail_forbidden = client.get("/query/ticket/1?store_name=山城巷店")
+    assert detail_forbidden.status_code == 404
+
+    export_response = client.get("/admin/export?store_name=南昌万寿宫店")
+    assert export_response.status_code == 200
+    workbook = load_workbook(BytesIO(export_response.content))
+    sheet = workbook.active
+    assert sheet["C2"].value == "南京门东店、南昌万寿宫店"
+    assert sheet["G2"].value == "止痒、雨过山、logaloga、手动品牌"
+
+
+def test_multi_store_and_brand_validation_errors(tmp_path, monkeypatch):
+    rules = {
+        "建单需求": {
+            "required_fields": ["brand", "product_name", "quantity"],
+            "require_any_attachment": False,
+        }
+    }
+    client, _ = build_client(tmp_path, monkeypatch, config_overrides={"request_type_rules.json": rules})
+
+    missing_store = client.post(
+        "/submit",
+        data={
+            "submitter": "测试",
+            "request_type": "系统问题",
+            "urgency": "普通",
+            "description": "没有选择门店",
+        },
+    )
+    assert missing_store.status_code == 400
+    assert "请至少选择一个门店。" in missing_store.text
+
+    invalid_store = client.post(
+        "/submit",
+        data={
+            "store_names": ["不存在门店"],
+            "submitter": "测试",
+            "request_type": "系统问题",
+            "urgency": "普通",
+            "description": "无效门店",
+        },
+    )
+    assert invalid_store.status_code == 400
+    assert "请选择有效门店。" in invalid_store.text
+
+    missing_brand = client.post(
+        "/submit",
+        data={
+            "store_names": ["南京门东店"],
+            "submitter": "测试",
+            "request_type": "建单需求",
+            "urgency": "普通",
+            "product_name": "规则商品",
+            "quantity": "1",
+            "description": "品牌必填规则",
+        },
+    )
+    assert missing_brand.status_code == 400
+    assert "建单需求必须至少选择或填写一个品牌。" in missing_brand.text
+
+
 def test_cookie_login_logout_switch_account_and_operator_log(tmp_path, monkeypatch):
     client, _ = build_client(
         tmp_path,
@@ -1063,13 +1205,19 @@ def test_legacy_database_is_migrated_without_losing_existing_rows(tmp_path, monk
         tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()}
         ticket_count = connection.execute("SELECT COUNT(*) FROM tickets").fetchone()[0]
         image_count = connection.execute("SELECT COUNT(*) FROM ticket_images").fetchone()[0]
+        migrated_stores = connection.execute("SELECT ticket_id, store_name FROM ticket_stores ORDER BY id").fetchall()
+        migrated_brands = connection.execute("SELECT ticket_id, brand FROM ticket_brands ORDER BY id").fetchall()
 
     assert "assigned_to" in ticket_columns
     assert "closed_at" in ticket_columns
     assert "ticket_logs" in tables
     assert "ticket_files" in tables
+    assert "ticket_stores" in tables
+    assert "ticket_brands" in tables
     assert ticket_count == 1
     assert image_count == 1
+    assert migrated_stores == [(1, "南京门东店")]
+    assert migrated_brands == []
 
     assert_login_success(login_admin(client))
     admin_page = client.get("/admin")
@@ -1397,7 +1545,7 @@ def test_request_type_rules_validate_fields_attachments_and_missing_config(tmp_p
 
     missing_brand = submit_ticket_with_file(client, request_type="建单需求", brand="", product_name="商品", quantity="1")
     assert missing_brand.status_code == 400
-    assert "建单需求必须填写品牌。" in missing_brand.text
+    assert "建单需求必须至少选择或填写一个品牌。" in missing_brand.text
 
     missing_attachment = submit_ticket(client, request_type="建单需求", brand="品牌", product_name="商品", quantity="1")
     assert missing_attachment.status_code == 400

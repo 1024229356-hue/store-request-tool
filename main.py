@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from io import BytesIO
 from pathlib import Path
+import re
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import quote, urlencode, urlsplit
 
@@ -472,6 +473,76 @@ def add_column_if_missing(
         connection.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}")
 
 
+MULTI_VALUE_SPLIT_RE = re.compile(r"[,\uFF0C\u3001;\uFF1B]+")
+
+
+def unique_clean_values(values: Iterable[object]) -> List[str]:
+    cleaned: List[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = str(value or "").strip()
+        if not text or text in seen:
+            continue
+        cleaned.append(text)
+        seen.add(text)
+    return cleaned
+
+
+def split_multi_value_text(value: object) -> List[str]:
+    return unique_clean_values(MULTI_VALUE_SPLIT_RE.split(str(value or "")))
+
+
+def join_display_values(values: Iterable[object]) -> str:
+    return "、".join(unique_clean_values(values))
+
+
+def normalize_store_names(raw_store_names: Optional[List[str]], legacy_store_name: str = "") -> List[str]:
+    candidates: List[object] = []
+    for item in raw_store_names or []:
+        candidates.extend(split_multi_value_text(item))
+    if not candidates and legacy_store_name.strip():
+        candidates.extend(split_multi_value_text(legacy_store_name))
+    return unique_clean_values(candidates)
+
+
+def normalize_brand_names(
+    raw_brands: Optional[List[str]],
+    brand_extra: str = "",
+    legacy_brand: str = "",
+) -> List[str]:
+    candidates: List[object] = []
+    for item in raw_brands or []:
+        candidates.extend(split_multi_value_text(item))
+    candidates.extend(split_multi_value_text(brand_extra))
+    if not candidates and legacy_brand.strip():
+        candidates.extend(split_multi_value_text(legacy_brand))
+    return unique_clean_values(candidates)
+
+
+def backfill_ticket_relations(connection: sqlite3.Connection) -> None:
+    timestamp = now_text()
+    rows = connection.execute("SELECT id, store_name, brand, created_at FROM tickets").fetchall()
+    for row in rows:
+        ticket_id = int(row["id"])
+        created_at = str(row["created_at"] or timestamp)
+        for store_name in split_multi_value_text(row["store_name"]):
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO ticket_stores (ticket_id, store_name, created_at)
+                VALUES (?, ?, ?)
+                """,
+                (ticket_id, store_name, created_at),
+            )
+        for brand in split_multi_value_text(row["brand"]):
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO ticket_brands (ticket_id, brand, created_at)
+                VALUES (?, ?, ?)
+                """,
+                (ticket_id, brand, created_at),
+            )
+
+
 def init_db() -> None:
     ensure_directories()
     with get_connection() as connection:
@@ -501,6 +572,30 @@ def init_db() -> None:
         )
         add_column_if_missing(connection, "tickets", "assigned_to", "TEXT")
         add_column_if_missing(connection, "tickets", "closed_at", "TEXT")
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ticket_stores (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticket_id INTEGER NOT NULL,
+                store_name TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(ticket_id, store_name),
+                FOREIGN KEY (ticket_id) REFERENCES tickets(id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ticket_brands (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticket_id INTEGER NOT NULL,
+                brand TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(ticket_id, brand),
+                FOREIGN KEY (ticket_id) REFERENCES tickets(id) ON DELETE CASCADE
+            )
+            """
+        )
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS ticket_images (
@@ -602,6 +697,10 @@ def init_db() -> None:
         connection.execute("CREATE INDEX IF NOT EXISTS idx_tickets_created_at ON tickets(created_at)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_tickets_status ON tickets(status)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_tickets_assigned_to ON tickets(assigned_to)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_ticket_stores_store_name ON ticket_stores(store_name)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_ticket_stores_ticket_id ON ticket_stores(ticket_id)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_ticket_brands_brand ON ticket_brands(brand)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_ticket_brands_ticket_id ON ticket_brands(ticket_id)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_ticket_images_ticket_id ON ticket_images(ticket_id)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_ticket_files_ticket_id ON ticket_files(ticket_id)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_ticket_logs_ticket_id ON ticket_logs(ticket_id)")
@@ -609,6 +708,7 @@ def init_db() -> None:
         connection.execute("CREATE INDEX IF NOT EXISTS idx_notification_events_created_at ON notification_events(created_at)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_notification_events_ticket_id ON notification_events(ticket_id)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_notification_reads_username ON notification_reads(username)")
+        backfill_ticket_relations(connection)
 
 
 def clean_string_list(value: object, default: List[str], allow_empty: bool = False) -> List[str]:
@@ -899,11 +999,48 @@ def due_status_class(label: str) -> str:
 
 
 def annotate_ticket_runtime(ticket: Dict[str, object]) -> Dict[str, object]:
+    ticket.setdefault("store_names", split_multi_value_text(ticket.get("store_name")))
+    ticket.setdefault("brand_names", split_multi_value_text(ticket.get("brand")))
     label = due_status_label(ticket)
     ticket["due_status"] = label
     ticket["due_status_class"] = due_status_class(label)
     ticket["description_summary"] = compact_text(str(ticket.get("description") or ""))
     return ticket
+
+
+def relation_map_for_tickets(ticket_ids: List[int], table_name: str, value_column: str) -> Dict[int, List[str]]:
+    if not ticket_ids:
+        return {}
+    placeholders = ",".join("?" for _ in ticket_ids)
+    mapping: Dict[int, List[str]] = {ticket_id: [] for ticket_id in ticket_ids}
+    with get_connection() as connection:
+        rows = connection.execute(
+            f"""
+            SELECT ticket_id, {value_column} AS value
+            FROM {table_name}
+            WHERE ticket_id IN ({placeholders})
+            ORDER BY id
+            """,
+            ticket_ids,
+        ).fetchall()
+    for row in rows:
+        ticket_id = int(row["ticket_id"])
+        value = str(row["value"] or "").strip()
+        if value:
+            mapping.setdefault(ticket_id, []).append(value)
+    return mapping
+
+
+def attach_ticket_relations(tickets: List[Dict[str, object]]) -> List[Dict[str, object]]:
+    ticket_ids = [int(ticket["id"]) for ticket in tickets if ticket.get("id") is not None]
+    store_map = relation_map_for_tickets(ticket_ids, "ticket_stores", "store_name")
+    brand_map = relation_map_for_tickets(ticket_ids, "ticket_brands", "brand")
+    for ticket in tickets:
+        ticket_id = int(ticket["id"])
+        ticket["store_names"] = unique_clean_values(store_map.get(ticket_id, [])) or split_multi_value_text(ticket.get("store_name"))
+        ticket["brand_names"] = unique_clean_values(brand_map.get(ticket_id, [])) or split_multi_value_text(ticket.get("brand"))
+        annotate_ticket_runtime(ticket)
+    return tickets
 
 
 def build_query_params(filters: Dict[str, str], sort: str, page: Optional[int] = None) -> str:
@@ -916,7 +1053,7 @@ def build_query_params(filters: Dict[str, str], sort: str, page: Optional[int] =
 
 
 def validate_submission(
-    store_name: str,
+    store_names: List[str],
     submitter: str,
     request_type: str,
     urgency: str,
@@ -926,7 +1063,10 @@ def validate_submission(
     request_types: Iterable[str],
     urgency_levels: Iterable[str],
 ) -> Optional[str]:
-    if not store_name or store_name not in stores:
+    valid_stores = set(stores)
+    if not store_names:
+        return "请至少选择一个门店。"
+    if any(store_name not in valid_stores for store_name in store_names):
         return "请选择有效门店。"
     if not submitter.strip():
         return "请填写提报人。"
@@ -943,7 +1083,7 @@ def validate_submission(
 
 def validate_request_type_rule(
     request_type: str,
-    values: Dict[str, str],
+    values: Dict[str, object],
     prepared_images: List[Tuple[str, bytes]],
     prepared_files: List[PreparedFile],
 ) -> Optional[str]:
@@ -952,6 +1092,8 @@ def validate_request_type_rule(
         return None
     for field in rule.get("required_fields", []):
         if not str(values.get(str(field), "")).strip():
+            if str(field) == "brand":
+                return f"{request_type}必须至少选择或填写一个品牌。"
             return f"{request_type}必须填写{REQUEST_RULE_FIELD_LABELS.get(str(field), str(field))}。"
     if rule.get("require_image") and not prepared_images:
         return f"{request_type}必须上传至少一张图片。"
@@ -1147,6 +1289,22 @@ def create_ticket_with_images(
                     raise
 
                 ticket_id = int(cursor.lastrowid)
+                for store_name in ticket_data.get("store_names", []):
+                    connection.execute(
+                        """
+                        INSERT OR IGNORE INTO ticket_stores (ticket_id, store_name, created_at)
+                        VALUES (?, ?, ?)
+                        """,
+                        (ticket_id, store_name, timestamp),
+                    )
+                for brand in ticket_data.get("brands", []):
+                    connection.execute(
+                        """
+                        INSERT OR IGNORE INTO ticket_brands (ticket_id, brand, created_at)
+                        VALUES (?, ?, ?)
+                        """,
+                        (ticket_id, brand, timestamp),
+                    )
                 image_paths, saved_image_files = save_images(ticket_no, prepared_images)
                 saved_files.extend(saved_image_files)
                 for image_path in image_paths:
@@ -1199,7 +1357,6 @@ def build_ticket_where(filters: Dict[str, str]) -> Tuple[str, List[str]]:
 
     exact_fields = {
         "ticket_no": "ticket_no",
-        "store_name": "store_name",
         "submitter": "submitter",
         "request_type": "request_type",
         "urgency": "urgency",
@@ -1211,6 +1368,20 @@ def build_ticket_where(filters: Dict[str, str]) -> Tuple[str, List[str]]:
         if value:
             clauses.append(f"{column_name} = ?")
             params.append(value)
+
+    store_name = filters.get("store_name", "").strip()
+    if store_name:
+        clauses.append(
+            """
+            EXISTS (
+                SELECT 1
+                FROM ticket_stores
+                WHERE ticket_stores.ticket_id = tickets.id
+                  AND ticket_stores.store_name = ?
+            )
+            """
+        )
+        params.append(store_name)
 
     date_start = filters.get("date_start", "").strip()
     if date_start:
@@ -1364,9 +1535,7 @@ def fetch_tickets(
             """,
             query_params,
         ).fetchall()
-    tickets = [dict(row) for row in rows]
-    for ticket in tickets:
-        annotate_ticket_runtime(ticket)
+    tickets = attach_ticket_relations([dict(row) for row in rows])
     due_filter = filters.get("due_status", "").strip()
     if due_filter:
         tickets = [ticket for ticket in tickets if ticket.get("due_status") == due_filter]
@@ -1410,7 +1579,10 @@ def fetch_ticket_page(filters: Dict[str, str], sort: str, config: AppConfig, pag
 def fetch_ticket(ticket_id: int) -> Optional[Dict[str, object]]:
     with get_connection() as connection:
         row = connection.execute("SELECT * FROM tickets WHERE id = ?", (ticket_id,)).fetchone()
-    return annotate_ticket_runtime(dict(row)) if row else None
+    if not row:
+        return None
+    tickets = attach_ticket_relations([dict(row)])
+    return tickets[0] if tickets else None
 
 
 def fetch_store_ticket(ticket_id: int, store_name: str) -> Optional[Dict[str, object]]:
@@ -1419,10 +1591,25 @@ def fetch_store_ticket(ticket_id: int, store_name: str) -> Optional[Dict[str, ob
         return None
     with get_connection() as connection:
         row = connection.execute(
-            "SELECT * FROM tickets WHERE id = ? AND store_name = ?",
+            """
+            SELECT tickets.*
+            FROM tickets
+            WHERE tickets.id = ?
+              AND EXISTS (
+                  SELECT 1
+                  FROM ticket_stores
+                  WHERE ticket_stores.ticket_id = tickets.id
+                    AND ticket_stores.store_name = ?
+              )
+            """,
             (ticket_id, clean_store_name),
         ).fetchone()
-    return annotate_ticket_runtime(dict(row)) if row else None
+    if not row:
+        return None
+    tickets = attach_ticket_relations([dict(row)])
+    ticket = tickets[0]
+    ticket["query_store_name"] = clean_store_name
+    return ticket
 
 
 def fetch_store_ticket_supplements(ticket_id: int) -> List[Dict[str, object]]:
@@ -1814,7 +2001,7 @@ def create_store_supplement(
 ) -> int:
     ticket_id = int(ticket["id"])
     ticket_no = str(ticket["ticket_no"])
-    store_name = str(ticket["store_name"])
+    store_name = str(ticket.get("query_store_name") or ticket.get("store_name") or "").strip()
     old_status = str(ticket.get("status") or "")
     old_assigned_to = str(ticket.get("assigned_to") or "")
     timestamp = now_text()
@@ -1847,7 +2034,15 @@ def create_store_supplement(
             current = connection.execute("SELECT * FROM tickets WHERE id = ?", (ticket_id,)).fetchone()
             if not current:
                 raise HTTPException(status_code=404, detail="工单不存在")
-            if str(current["store_name"]) != store_name:
+            store_match = connection.execute(
+                """
+                SELECT 1
+                FROM ticket_stores
+                WHERE ticket_id = ? AND store_name = ?
+                """,
+                (ticket_id, store_name),
+            ).fetchone()
+            if not store_match:
                 raise HTTPException(status_code=403, detail="门店不匹配")
             cursor = connection.execute(
                 """
@@ -1980,7 +2175,11 @@ def fetch_dashboard_stats(filters: Dict[str, str]) -> Dict[str, object]:
     today_prefix = datetime.now().date().isoformat()
     status_counter: Counter[str] = Counter(str(ticket.get("status") or "未填写") for ticket in tickets)
     type_counter: Counter[str] = Counter(str(ticket.get("request_type") or "未填写") for ticket in tickets)
-    store_counter: Counter[str] = Counter(str(ticket.get("store_name") or "未填写") for ticket in tickets)
+    store_counter: Counter[str] = Counter()
+    for ticket in tickets:
+        store_names = ticket.get("store_names") or split_multi_value_text(ticket.get("store_name"))
+        for store_name in store_names or ["未填写"]:
+            store_counter[str(store_name or "未填写")] += 1
     handler_counter: Counter[str] = Counter(str(ticket.get("assigned_to") or "未指定") or "未指定" for ticket in tickets)
     urgency_counter: Counter[str] = Counter(str(ticket.get("urgency") or "未填写") for ticket in tickets)
     today_new_count = sum(1 for ticket in tickets if str(ticket.get("created_at") or "").startswith(today_prefix))
@@ -2145,7 +2344,7 @@ def create_app() -> FastAPI:
         request: Request,
         status_code: int = 200,
         error: str = "",
-        values: Optional[Dict[str, str]] = None,
+        values: Optional[Dict[str, object]] = None,
     ) -> HTMLResponse:
         config = load_app_config()
         return templates.TemplateResponse(
@@ -2409,6 +2608,9 @@ def create_app() -> FastAPI:
     @app.post("/submit", response_class=HTMLResponse)
     async def submit_ticket(
         request: Request,
+        store_names: Optional[List[str]] = Form(None),
+        brands: Optional[List[str]] = Form(None),
+        brand_extra: str = Form(""),
         store_name: str = Form(""),
         submitter: str = Form(""),
         request_type: str = Form(""),
@@ -2423,13 +2625,19 @@ def create_app() -> FastAPI:
         files: Optional[List[UploadFile]] = File(None),
     ) -> HTMLResponse:
         config = load_app_config()
-        stores = config.stores
+        normalized_stores = normalize_store_names(store_names, store_name)
+        normalized_brands = normalize_brand_names(brands, brand_extra, brand)
+        store_display = join_display_values(normalized_stores)
+        brand_display = join_display_values(normalized_brands)
         form_values = {
             "store_name": store_name,
+            "store_names": normalized_stores,
             "submitter": submitter,
             "request_type": request_type,
             "urgency": urgency,
             "brand": brand,
+            "brands": normalized_brands,
+            "brand_extra": brand_extra,
             "product_name": product_name,
             "sku_barcode": sku_barcode,
             "quantity": quantity,
@@ -2437,13 +2645,13 @@ def create_app() -> FastAPI:
             "expected_finish_date": expected_finish_date,
         }
         error = validate_submission(
-            store_name,
+            normalized_stores,
             submitter,
             request_type,
             urgency,
             quantity,
             description,
-            stores,
+            config.stores,
             config.request_types,
             config.urgency_levels,
         )
@@ -2456,7 +2664,9 @@ def create_app() -> FastAPI:
         except ValueError as exc:
             return render_submit_form(request, status_code=400, error=str(exc), values=form_values)
 
-        rule_error = validate_request_type_rule(request_type, form_values, prepared_images, prepared_files)
+        rule_values = dict(form_values)
+        rule_values["brand"] = brand_display
+        rule_error = validate_request_type_rule(request_type, rule_values, prepared_images, prepared_files)
         if rule_error:
             return render_submit_form(request, status_code=400, error=rule_error, values=form_values)
 
@@ -2466,11 +2676,13 @@ def create_app() -> FastAPI:
             ticket_id, ticket_no = create_ticket_with_images(
                 {
                     "created_at": timestamp,
-                    "store_name": store_name.strip(),
+                    "store_name": store_display,
+                    "store_names": normalized_stores,
                     "submitter": submitter.strip(),
                     "request_type": request_type,
                     "urgency": urgency,
-                    "brand": brand.strip(),
+                    "brand": brand_display,
+                    "brands": normalized_brands,
                     "product_name": product_name.strip(),
                     "sku_barcode": sku_barcode.strip(),
                     "quantity": quantity_value,

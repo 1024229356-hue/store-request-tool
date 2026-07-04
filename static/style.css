@@ -282,6 +282,73 @@ label span {
   font-weight: 800;
 }
 
+.field-block {
+  min-width: 0;
+  margin-bottom: 14px;
+}
+
+.field-label {
+  display: block;
+  margin-bottom: 6px;
+  color: #27374a;
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.full-span {
+  grid-column: 1 / -1;
+}
+
+.choice-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.brand-choice-grid {
+  margin-bottom: 10px;
+}
+
+.choice-chip {
+  display: inline-flex;
+  margin: 0;
+  cursor: pointer;
+}
+
+.choice-chip input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.choice-chip span {
+  display: inline-flex;
+  align-items: center;
+  min-height: 36px;
+  margin: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: #fff;
+  color: var(--text);
+  padding: 0 12px;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.choice-chip input:checked + span,
+.selected-chip {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+  color: var(--primary-hover);
+  box-shadow: 0 0 0 3px rgba(36, 92, 143, 0.12);
+}
+
+.choice-chip input:focus-visible + span {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(36, 92, 143, 0.16);
+}
+
 input,
 select,
 textarea {
@@ -1395,6 +1462,14 @@ a:focus-visible {
   line-height: 1.5;
 }
 
+.multi-value-text {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-height: 1.5;
+}
+
 .attachment-counts {
   display: flex;
   flex-wrap: wrap;
@@ -1419,6 +1494,25 @@ a:focus-visible {
   background: #fff;
   padding: 2px 8px;
   color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.tag-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.tag-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel-soft);
+  color: var(--text);
+  padding: 2px 8px;
   font-size: 12px;
   font-weight: 800;
 }

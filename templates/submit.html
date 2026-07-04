@@ -34,15 +34,19 @@
       <p>确认门店、提报人和处理优先级，便于总部快速分配。</p>
     </div>
     <div class="grid-two">
-      <label>
-        <span>门店 <strong>*</strong></span>
-        <select name="store_name" required>
-          <option value="">请选择门店</option>
+      <div class="field-block full-span">
+        <span class="field-label">门店 <strong>*</strong></span>
+        <p class="field-hint">可选择一个或多个门店。</p>
+        <div class="choice-grid">
+          {% set selected_stores = values.get('store_names', []) %}
           {% for store in stores %}
-          <option value="{{ store }}" {% if values.get('store_name') == store %}selected{% endif %}>{{ store }}</option>
+          <label class="choice-chip">
+            <input type="checkbox" name="store_names" value="{{ store }}" {% if store in selected_stores or values.get('store_name') == store %}checked{% endif %}>
+            <span>{{ store }}</span>
+          </label>
           {% endfor %}
-        </select>
-      </label>
+        </div>
+      </div>
 
       <label>
         <span>提报人 <strong>*</strong></span>
@@ -78,15 +82,24 @@
       <p>如需求与商品相关，请补充品牌、商品名和条码，减少来回确认。</p>
     </div>
     <div class="grid-two">
-      <label>
-        <span>品牌</span>
-        <input name="brand" type="text" value="{{ values.get('brand', '') }}" list="brand-options" placeholder="可输入或选择品牌">
-        <datalist id="brand-options">
+      <div class="field-block full-span">
+        <span class="field-label">品牌</span>
+        <p class="field-hint">可选择一个或多个品牌，未在列表中的品牌可手动输入。</p>
+        {% set selected_brands = values.get('brands', []) %}
+        {% if brands %}
+        <div class="choice-grid brand-choice-grid">
           {% for brand in brands %}
-          <option value="{{ brand }}"></option>
+          <label class="choice-chip">
+            <input type="checkbox" name="brands" value="{{ brand }}" {% if brand in selected_brands or values.get('brand') == brand %}checked{% endif %}>
+            <span>{{ brand }}</span>
+          </label>
           {% endfor %}
-        </datalist>
-      </label>
+        </div>
+        {% else %}
+        <p class="empty-note">暂无候选品牌，可在下方手动输入。</p>
+        {% endif %}
+        <input name="brand_extra" type="text" value="{{ values.get('brand_extra', '') }}" placeholder="未在列表中的品牌，可手动输入，多个品牌用逗号分隔">
+      </div>
       <label>
         <span>商品名称</span>
         <input name="product_name" type="text" value="{{ values.get('product_name', '') }}" placeholder="例如：止痒舒缓喷雾">
