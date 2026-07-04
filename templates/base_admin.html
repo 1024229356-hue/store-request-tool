@@ -10,7 +10,10 @@
   <div class="admin-layout" data-current-menu="{{ current_menu | default('') }}">
     <aside class="sidebar" aria-label="后台导航">
       <a class="sidebar-brand" href="/admin/dashboard">
-        <span class="sidebar-logo">止</span>
+        <span class="sidebar-logo">
+          <img src="/static/img/zhiyang-logo.png" alt="止痒商店 logo" onerror="this.style.display='none'">
+          <span class="sidebar-logo-fallback">止</span>
+        </span>
         <span>
           <strong>止痒 ERP</strong>
           <small>门店工单与运营协同</small>
@@ -27,9 +30,6 @@
         <a class="sidebar-link" href="/query">
           <span>门店查询</span>
         </a>
-        <a class="sidebar-link" href="/admin/export">
-          <span>数据导出</span>
-        </a>
         <a class="sidebar-link {% if current_menu == 'settings' %}active{% endif %}" href="/admin/settings">
           <span>配置管理</span>
         </a>
@@ -43,6 +43,7 @@
 
       <div class="sidebar-user">
         <span>当前账号：{{ admin_user }}</span>
+        <small>权限：系统管理员</small>
         <form method="post" action="/admin/logout">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <button type="submit">切换账号</button>
@@ -65,34 +66,41 @@
           {% block header_meta %}{% endblock %}
         </div>
         <div class="topbar-actions">
-          {% block topbar_actions %}{% endblock %}
-          <span class="admin-user">当前账号：{{ admin_user }}</span>
-          <div class="notification-root" data-notification-root data-csrf-token="{{ csrf_token }}">
-            <button class="ghost-button compact notification-button" type="button" data-notification-toggle>
-              消息 <span class="notification-badge" data-notification-count hidden>0</span>
-            </button>
-            <div class="notification-panel" data-notification-panel hidden>
-              <div class="notification-panel-head">
-                <strong>消息提醒</strong>
-                <div class="notification-panel-actions">
-                  <button class="ghost-button compact" type="button" data-notification-enable-desktop hidden>开启桌面提醒</button>
-                  <button class="ghost-button compact" type="button" data-notification-read-all>全部已读</button>
+          <div class="topbar-primary-actions">
+            {% block topbar_actions %}{% endblock %}
+          </div>
+          <div class="topbar-account-actions">
+            <div class="notification-root" data-notification-root data-csrf-token="{{ csrf_token }}">
+              <button class="ghost-button compact notification-button" type="button" data-notification-toggle>
+                消息 <span class="notification-badge" data-notification-count hidden>0</span>
+              </button>
+              <div class="notification-panel" data-notification-panel hidden>
+                <div class="notification-panel-head">
+                  <strong>消息提醒</strong>
+                  <div class="notification-panel-actions">
+                    <button class="ghost-button compact" type="button" data-notification-enable-desktop hidden>开启桌面提醒</button>
+                    <button class="ghost-button compact" type="button" data-notification-read-all>全部已读</button>
+                  </div>
+                </div>
+                <div class="notification-list" data-notification-list>
+                  <p class="empty-note">暂无消息。</p>
                 </div>
               </div>
-              <div class="notification-list" data-notification-list>
-                <p class="empty-note">暂无消息。</p>
-              </div>
+              <div class="notification-toast-area" data-notification-toasts></div>
             </div>
-            <div class="notification-toast-area" data-notification-toasts></div>
+            <div class="admin-user-card">
+              <span>当前账号：{{ admin_user }}</span>
+              <small class="admin-user-role">权限：系统管理员</small>
+            </div>
+            <form class="account-action-form" method="post" action="/admin/logout">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <button class="ghost-button compact" type="submit">切换账号</button>
+            </form>
+            <form class="account-action-form" method="post" action="/admin/logout">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <button class="ghost-button compact" type="submit">退出登录</button>
+            </form>
           </div>
-          <form class="account-action-form" method="post" action="/admin/logout">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <button class="ghost-button compact" type="submit">切换账号</button>
-          </form>
-          <form class="account-action-form" method="post" action="/admin/logout">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <button class="ghost-button compact" type="submit">退出登录</button>
-          </form>
         </div>
       </header>
 

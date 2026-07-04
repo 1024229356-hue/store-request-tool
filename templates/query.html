@@ -1,152 +1,155 @@
-<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>门店工单查询</title>
-  <link rel="stylesheet" href="/static/style.css?v=ui20260704">
-</head>
-<body class="page-submit">
-  <main class="query-shell">
-    <section class="page-header submit-hero">
-      <p class="eyebrow">止痒轻量 ERP</p>
-      <h1>门店工单查询</h1>
-      <p class="header-copy">选择门店即可查看最近工单，不强制填写工单号。</p>
-      <div class="header-actions">
-        <a class="ghost-button compact" href="/submit">提交新工单</a>
-      </div>
-    </section>
+{% set public_title = '门店工单查询' %}
+{% set public_section = '门店工单查询' %}
+{% extends "base_public.html" %}
 
-    {% if error %}
-    <div class="alert alert-error">{{ error }}</div>
+{% block main_class %}query-shell{% endblock %}
+
+{% block public_actions %}
+<a class="ghost-button compact" href="/submit">提交新工单</a>
+<a class="ghost-button compact" href="/admin/dashboard">返回业务总览</a>
+<a class="ghost-button compact" href="/admin">返回工单管理</a>
+{% endblock %}
+
+{% block content %}
+<section class="page-header submit-hero">
+  <p class="eyebrow">止痒 ERP / 门店工单查询</p>
+  <h1>门店工单查询</h1>
+  <p class="header-copy">选择门店即可查看最近工单，不强制填写工单号。</p>
+  <div class="header-actions">
+    <a class="ghost-button compact" href="/submit">提交新工单</a>
+    <a class="ghost-button compact" href="/admin/dashboard">返回业务总览</a>
+    <a class="ghost-button compact" href="/admin">返回工单管理</a>
+  </div>
+</section>
+
+{% if error %}
+<div class="alert alert-error">{{ error }}</div>
+{% endif %}
+
+<section class="filter-card">
+  <form class="filter-bar query-filter" method="get" action="/query">
+    <label>
+      <span>门店 <strong>*</strong></span>
+      <select name="store_name" required>
+        <option value="">请选择门店</option>
+        {% for store in stores %}
+        <option value="{{ store }}" {% if filters.get('store_name') == store %}selected{% endif %}>{{ store }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>
+      <span>工单号</span>
+      <input name="ticket_no" type="text" value="{{ filters.get('ticket_no', '') }}" placeholder="可选">
+    </label>
+    <label>
+      <span>提报人</span>
+      <input name="submitter" type="text" value="{{ filters.get('submitter', '') }}" placeholder="可选">
+    </label>
+    <label>
+      <span>状态</span>
+      <select name="status">
+        <option value="">全部</option>
+        {% for item in statuses %}
+        <option value="{{ item }}" {% if filters.get('status') == item %}selected{% endif %}>{{ item }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <div class="date-range">
+      <label>
+        <span>开始日期</span>
+        <input type="date" name="date_start" value="{{ filters.get('date_start', '') }}">
+      </label>
+      <label>
+        <span>结束日期</span>
+        <input type="date" name="date_end" value="{{ filters.get('date_end', '') }}">
+      </label>
+    </div>
+    <label class="filter-keyword">
+      <span>关键词</span>
+      <input type="search" name="keyword" value="{{ filters.get('keyword', '') }}" placeholder="商品、问题说明、处理备注">
+    </label>
+    <div class="filter-actions">
+      <button class="primary-button compact" type="submit">查询</button>
+      <a class="ghost-button compact" href="/query">重置</a>
+    </div>
+  </form>
+</section>
+
+{% if searched %}
+<section class="table-wrap query-results">
+  <table class="ticket-table query-table">
+    <thead>
+      <tr>
+        <th>工单号</th>
+        <th>提交时间</th>
+        <th>需求类型</th>
+        <th>紧急程度</th>
+        <th>商品名称</th>
+        <th>问题说明摘要</th>
+        <th>当前状态</th>
+        <th>处理人</th>
+        <th>处理备注</th>
+        <th>最后更新时间</th>
+        <th>是否超时</th>
+        <th>附件数量</th>
+        <th>操作</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for ticket in tickets %}
+      <tr>
+        <td>{{ ticket.ticket_no }}</td>
+        <td>{{ ticket.created_at }}</td>
+        <td>{{ ticket.request_type }}</td>
+        <td><span class="badge urgency-{{ ticket.urgency }}">{{ ticket.urgency }}</span></td>
+        <td>{{ ticket.product_name or '' }}</td>
+        <td class="summary-cell" title="{{ ticket.description }}">
+          <div class="summary-text">{{ ticket.description_summary }}</div>
+        </td>
+        <td><span class="badge status-{{ ticket.status }}">{{ ticket.status }}</span></td>
+        <td>{{ ticket.assigned_to or '' }}</td>
+        <td>{{ ticket.handler_note or '' }}</td>
+        <td>{{ ticket.updated_at }}</td>
+        <td><span class="badge due-{{ ticket.due_status_class }}">{{ ticket.due_status }}</span></td>
+        <td>
+          <div class="attachment-counts">
+            <span class="attachment-badge">图片 {{ ticket.image_count or 0 }}</span>
+            <span class="attachment-badge">文件 {{ ticket.file_count or 0 }}</span>
+          </div>
+        </td>
+        <td>
+          <div class="row-actions">
+            <a class="primary-button compact" href="{{ ticket.detail_url }}">查看详情</a>
+            <a class="ghost-button compact" href="{{ ticket.supplement_url }}">补充资料</a>
+          </div>
+        </td>
+      </tr>
+      {% else %}
+      <tr>
+        <td class="empty-cell" colspan="13">
+          <strong>当前门店暂无符合条件的工单。</strong>
+          <span>可以调整查询条件，或提交新的需求。</span>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<nav class="pagination-bar" aria-label="门店查询分页">
+  <div>当前第 {{ pagination.current_page }} 页 / 共 {{ pagination.total_pages }} 页 / 共 {{ pagination.total_count }} 条工单</div>
+  <div class="pagination-actions">
+    {% if pagination.has_prev %}
+    <a class="ghost-button compact" href="{{ prev_page_url }}">上一页</a>
+    {% else %}
+    <span class="ghost-button compact disabled">上一页</span>
     {% endif %}
-
-    <section class="filter-card">
-      <form class="filter-bar query-filter" method="get" action="/query">
-        <label>
-          <span>门店 <strong>*</strong></span>
-          <select name="store_name" required>
-            <option value="">请选择门店</option>
-            {% for store in stores %}
-            <option value="{{ store }}" {% if filters.get('store_name') == store %}selected{% endif %}>{{ store }}</option>
-            {% endfor %}
-          </select>
-        </label>
-        <label>
-          <span>工单号</span>
-          <input name="ticket_no" type="text" value="{{ filters.get('ticket_no', '') }}" placeholder="可选">
-        </label>
-        <label>
-          <span>提报人</span>
-          <input name="submitter" type="text" value="{{ filters.get('submitter', '') }}" placeholder="可选">
-        </label>
-        <label>
-          <span>状态</span>
-          <select name="status">
-            <option value="">全部</option>
-            {% for item in statuses %}
-            <option value="{{ item }}" {% if filters.get('status') == item %}selected{% endif %}>{{ item }}</option>
-            {% endfor %}
-          </select>
-        </label>
-        <div class="date-range">
-          <label>
-            <span>开始日期</span>
-            <input type="date" name="date_start" value="{{ filters.get('date_start', '') }}">
-          </label>
-          <label>
-            <span>结束日期</span>
-            <input type="date" name="date_end" value="{{ filters.get('date_end', '') }}">
-          </label>
-        </div>
-        <label class="filter-keyword">
-          <span>关键词</span>
-          <input type="search" name="keyword" value="{{ filters.get('keyword', '') }}" placeholder="商品、问题说明、处理备注">
-        </label>
-        <div class="filter-actions">
-          <button class="primary-button compact" type="submit">查询</button>
-          <a class="ghost-button compact" href="/query">重置</a>
-        </div>
-      </form>
-    </section>
-
-    {% if searched %}
-    <section class="table-wrap query-results">
-      <table class="ticket-table query-table">
-        <thead>
-          <tr>
-            <th>工单号</th>
-            <th>提交时间</th>
-            <th>需求类型</th>
-            <th>紧急程度</th>
-            <th>商品名称</th>
-            <th>问题说明摘要</th>
-            <th>当前状态</th>
-            <th>处理人</th>
-            <th>处理备注</th>
-            <th>最后更新时间</th>
-            <th>是否超时</th>
-            <th>附件数量</th>
-            <th>操作</th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for ticket in tickets %}
-          <tr>
-            <td>{{ ticket.ticket_no }}</td>
-            <td>{{ ticket.created_at }}</td>
-            <td>{{ ticket.request_type }}</td>
-            <td><span class="badge urgency-{{ ticket.urgency }}">{{ ticket.urgency }}</span></td>
-            <td>{{ ticket.product_name or '' }}</td>
-            <td class="summary-cell" title="{{ ticket.description }}">
-              <div class="summary-text">{{ ticket.description_summary }}</div>
-            </td>
-            <td><span class="badge status-{{ ticket.status }}">{{ ticket.status }}</span></td>
-            <td>{{ ticket.assigned_to or '' }}</td>
-            <td>{{ ticket.handler_note or '' }}</td>
-            <td>{{ ticket.updated_at }}</td>
-            <td><span class="badge due-{{ ticket.due_status_class }}">{{ ticket.due_status }}</span></td>
-            <td>
-              <div class="attachment-counts">
-                <span class="attachment-badge">图片 {{ ticket.image_count or 0 }}</span>
-                <span class="attachment-badge">文件 {{ ticket.file_count or 0 }}</span>
-              </div>
-            </td>
-            <td>
-              <div class="row-actions">
-                <a class="primary-button compact" href="{{ ticket.detail_url }}">查看详情</a>
-                <a class="ghost-button compact" href="{{ ticket.supplement_url }}">补充资料</a>
-              </div>
-            </td>
-          </tr>
-          {% else %}
-          <tr>
-            <td class="empty-cell" colspan="13">
-              <strong>当前门店暂无符合条件的工单。</strong>
-              <span>可以调整查询条件，或返回提报页提交新的需求。</span>
-            </td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-    </section>
-
-    <nav class="pagination-bar" aria-label="门店查询分页">
-      <div>当前第 {{ pagination.current_page }} 页 / 共 {{ pagination.total_pages }} 页 / 共 {{ pagination.total_count }} 条工单</div>
-      <div class="pagination-actions">
-        {% if pagination.has_prev %}
-        <a class="ghost-button compact" href="{{ prev_page_url }}">上一页</a>
-        {% else %}
-        <span class="ghost-button compact disabled">上一页</span>
-        {% endif %}
-        {% if pagination.has_next %}
-        <a class="ghost-button compact" href="{{ next_page_url }}">下一页</a>
-        {% else %}
-        <span class="ghost-button compact disabled">下一页</span>
-        {% endif %}
-      </div>
-    </nav>
+    {% if pagination.has_next %}
+    <a class="ghost-button compact" href="{{ next_page_url }}">下一页</a>
+    {% else %}
+    <span class="ghost-button compact disabled">下一页</span>
     {% endif %}
-  </main>
-</body>
-</html>
+  </div>
+</nav>
+{% endif %}
+{% endblock %}

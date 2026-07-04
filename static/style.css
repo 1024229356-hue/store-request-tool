@@ -106,6 +106,71 @@ strong {
   background: var(--bg-soft);
 }
 
+.public-topbar {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 68px;
+  border-bottom: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.95);
+  padding: 12px 18px;
+  backdrop-filter: blur(12px);
+}
+
+.public-brand {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  gap: 10px;
+  color: var(--text);
+  text-decoration: none;
+}
+
+.public-brand-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 38px;
+  width: 38px;
+  height: 38px;
+  border-radius: var(--radius-lg);
+  background: #fff;
+  border: 1px solid var(--line);
+  color: var(--primary);
+  font-weight: 900;
+  box-shadow: var(--shadow-soft);
+}
+
+.public-brand strong,
+.public-brand small {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.public-brand strong {
+  color: var(--text);
+  font-size: 16px;
+}
+
+.public-brand small {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.public-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .mobile-shell {
   width: min(100%, var(--page-max));
   margin: 0 auto;
@@ -604,15 +669,37 @@ a:focus-visible {
 }
 
 .sidebar-logo {
+  position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   width: 40px;
   height: 40px;
+  overflow: hidden;
   border-radius: var(--radius-lg);
-  background: linear-gradient(135deg, #2f80ed, #16a34a);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: #fff;
   color: #fff;
   font-weight: 900;
+}
+
+.sidebar-logo img {
+  position: relative;
+  z-index: 1;
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #fff;
+}
+
+.sidebar-logo-fallback {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: linear-gradient(135deg, #2f80ed, #16a34a);
+  color: #fff;
 }
 
 .sidebar-brand strong,
@@ -675,6 +762,12 @@ a:focus-visible {
   font-weight: 800;
 }
 
+.sidebar-user small {
+  color: var(--sidebar-muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
 .sidebar-user form {
   margin: 0;
 }
@@ -730,8 +823,50 @@ a:focus-visible {
   gap: 8px;
 }
 
+.topbar-primary-actions,
+.topbar-account-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.topbar-account-actions {
+  padding-left: 8px;
+  border-left: 1px solid var(--line);
+}
+
 .topbar-actions form {
   margin: 0;
+}
+
+.admin-user-card {
+  display: grid;
+  gap: 2px;
+  min-height: 40px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel-soft);
+  padding: 5px 11px;
+}
+
+.admin-user-card span,
+.admin-user-card small {
+  display: block;
+  white-space: nowrap;
+}
+
+.admin-user-card span {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.admin-user-role {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
 }
 
 .work-card {
@@ -2071,6 +2206,16 @@ dd {
     justify-content: flex-start;
   }
 
+  .topbar-primary-actions,
+  .topbar-account-actions {
+    justify-content: flex-start;
+  }
+
+  .topbar-account-actions {
+    padding-left: 0;
+    border-left: 0;
+  }
+
   .dashboard-hero,
   .dashboard-main-grid,
   .detail-summary-card {
@@ -2171,6 +2316,25 @@ dd {
     padding: var(--mobile-gap) 10px 86px;
   }
 
+  .public-topbar {
+    position: static;
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 10px;
+    padding: 12px 10px;
+  }
+
+  .public-brand,
+  .public-actions {
+    width: 100%;
+  }
+
+  .public-actions .ghost-button,
+  .public-actions .primary-button,
+  .public-actions .secondary-button {
+    flex: 1 1 140px;
+  }
+
   .page-header,
   .form-card,
   .success-panel,
@@ -2230,11 +2394,28 @@ dd {
   }
 
   .topbar-actions,
+  .topbar-primary-actions,
+  .topbar-account-actions,
+  .topbar-primary-actions .ghost-button,
+  .topbar-primary-actions .quick-action-button,
+  .topbar-account-actions .ghost-button,
+  .topbar-account-actions .quick-action-button,
+  .topbar-account-actions form,
+  .topbar-account-actions button,
   .topbar-actions .ghost-button,
   .topbar-actions .quick-action-button,
   .topbar-actions form,
   .topbar-actions button {
     width: 100%;
+  }
+
+  .admin-user-card {
+    width: 100%;
+  }
+
+  .admin-user-card span,
+  .admin-user-card small {
+    white-space: normal;
   }
 
   .dashboard-hero {

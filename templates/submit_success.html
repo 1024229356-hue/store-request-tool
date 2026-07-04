@@ -1,31 +1,29 @@
-<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>提交成功</title>
-  <link rel="stylesheet" href="/static/style.css?v=ui20260704">
-</head>
-<body class="page-submit">
-  <main class="mobile-shell">
-    <section class="success-panel">
-      <div class="success-mark">成功</div>
-      <p class="eyebrow">提交成功</p>
-      <h1>需求已提交</h1>
-      <p class="subtle">请截图保存工单号，后续可用于查询处理进度。</p>
-      <div class="ticket-confirm-box" aria-label="工单号">
-        <span>工单号</span>
-        <strong class="success-ticket-no">{{ ticket_no }}</strong>
-      </div>
-      <button class="secondary-button copy-ticket-button" type="button" data-copy-ticket="{{ ticket_no }}">复制工单号</button>
-      <p class="subtle">如发现提交内容或附件错误，请联系总部后台处理，不要重复提交多次。</p>
-      <div class="success-actions">
-        <a class="primary-button" href="/submit">继续提交</a>
-        <a class="secondary-button" href="/query">查询工单</a>
-        <a class="ghost-button" href="/submit">返回提报页</a>
-      </div>
-    </section>
-  </main>
-  <script src="/static/app.js?v=ui20260704"></script>
-</body>
-</html>
+{% set public_title = '提交成功' %}
+{% set public_section = '门店工单' %}
+{% extends "base_public.html" %}
+
+{% block public_actions %}
+<a class="ghost-button compact" href="/submit">继续提交</a>
+<a class="ghost-button compact" href="/query">查询工单</a>
+<a class="ghost-button compact" href="/admin/dashboard">后台入口</a>
+{% endblock %}
+
+{% block content %}
+<section class="success-panel">
+  <div class="success-mark">成功</div>
+  <p class="eyebrow">提交成功</p>
+  <h1>需求已提交</h1>
+  <p class="subtle">已提交成功，请截图保存工单号。后续可通过门店查询查看处理进度。</p>
+  <div class="ticket-confirm-box" aria-label="工单号">
+    <span>工单号</span>
+    <strong class="success-ticket-no">{{ ticket_no }}</strong>
+  </div>
+  <button class="secondary-button copy-ticket-button" type="button" data-copy-ticket="{{ ticket_no }}">复制工单号</button>
+  <p class="subtle">如发现提交内容或附件错误，请联系总部后台处理，不要重复提交多次。</p>
+  <div class="success-actions">
+    <a class="primary-button" href="/submit">继续提交</a>
+    <a class="secondary-button" href="/query">查询工单</a>
+    <a class="ghost-button" href="/admin/dashboard">后台入口</a>
+  </div>
+</section>
+{% endblock %}

@@ -1,13 +1,14 @@
-<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>门店补充资料</title>
-  <link rel="stylesheet" href="/static/style.css?v=ui20260704">
-</head>
-<body class="page-submit">
-  <main class="mobile-shell">
+{% set public_title = '门店补充资料' %}
+{% set public_section = '门店补充资料' %}
+{% extends "base_public.html" %}
+
+{% block public_actions %}
+<a class="ghost-button compact" href="{{ detail_url }}">返回工单详情</a>
+<a class="ghost-button compact" href="{{ query_url }}">返回查询结果</a>
+<a class="ghost-button compact" href="/query">返回门店查询</a>
+{% endblock %}
+
+{% block content %}
     <section class="page-header submit-hero">
       <p class="eyebrow">门店工单</p>
       <h1>门店补充资料</h1>
@@ -102,7 +103,4 @@
       </div>
     </form>
     {% endif %}
-  </main>
-  <script src="/static/app.js?v=ui20260704"></script>
-</body>
-</html>
+{% endblock %}

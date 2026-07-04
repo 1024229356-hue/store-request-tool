@@ -279,8 +279,10 @@ def test_submit_success_page_highlights_ticket_number_and_copy_action(tmp_path, 
     assert "success-ticket-no" in response.text
     assert "复制工单号" in response.text
     assert "data-copy-ticket" in response.text
+    assert "已提交成功，请截图保存工单号。后续可通过门店查询查看处理进度。" in response.text
+    assert "查询工单" in response.text
     assert "继续提交" in response.text
-    assert "返回提报页" in response.text
+    assert "后台入口" in response.text
     assert '/static/style.css?v=ui20260704' in response.text
     assert '/static/app.js?v=ui20260704' in response.text
 
@@ -1467,18 +1469,24 @@ def test_lightweight_erp_admin_layout_navigation_and_placeholder_pages(tmp_path,
     admin_page = client.get("/admin")
     assert admin_page.status_code == 200
     assert 'class="admin-layout"' in admin_page.text
+    assert "/static/img/zhiyang-logo.png" in admin_page.text
     assert "止痒 ERP" in admin_page.text
     assert "工单管理" in admin_page.text
     assert "data-current-menu=\"tickets\"" in admin_page.text
+    assert "数据导出" not in admin_page.text
+    assert "导出 Excel" in admin_page.text
+    assert "权限：系统管理员" in admin_page.text
 
     dashboard = client.get("/admin/dashboard")
     assert dashboard.status_code == 200
+    assert "/static/img/zhiyang-logo.png" in dashboard.text
     assert "止痒运营协同总览" in dashboard.text
     assert "dashboard-hero" in dashboard.text
     assert "最近工单动态" in dashboard.text
 
-    for label in ("业务总览", "工单管理", "门店查询", "数据导出", "配置管理", "账号设置", "系统设置"):
+    for label in ("业务总览", "工单管理", "门店查询", "配置管理", "账号设置", "系统设置"):
         assert label in dashboard.text
+    assert "数据导出" not in dashboard.text
 
     for path, title in (
         ("/admin/settings", "配置管理"),
@@ -1499,6 +1507,43 @@ def test_lightweight_erp_admin_layout_navigation_and_placeholder_pages(tmp_path,
     export_response = client.get("/admin/export")
     assert export_response.status_code == 200
     assert export_response.content.startswith(b"PK")
+
+
+def test_navigation_branding_export_links_and_public_topbar(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch)
+    submit_ticket(client, store_name="南京门东店", request_type="缺货需求", status="待处理")
+    logged_in_client(client)
+
+    filtered_admin = client.get("/admin?store_name=南京门东店&status=待处理&due_status=未设置&keyword=自动化")
+    assert filtered_admin.status_code == 200
+    assert "导出 Excel" in filtered_admin.text
+    assert "store_name=%E5%8D%97%E4%BA%AC%E9%97%A8%E4%B8%9C%E5%BA%97" in filtered_admin.text
+    assert "status=%E5%BE%85%E5%A4%84%E7%90%86" in filtered_admin.text
+    assert "due_status=%E6%9C%AA%E8%AE%BE%E7%BD%AE" in filtered_admin.text
+    assert "keyword=%E8%87%AA%E5%8A%A8%E5%8C%96" in filtered_admin.text
+
+    query_page = client.get("/query")
+    assert query_page.status_code == 200
+    assert "public-topbar" in query_page.text
+    assert "提交新工单" in query_page.text
+    assert "返回业务总览" in query_page.text
+    assert "返回工单管理" in query_page.text
+    assert "门店工单查询" in query_page.text
+
+    submit_page = client.get("/submit")
+    assert submit_page.status_code == 200
+    assert "public-topbar" in submit_page.text
+    assert "查询工单" in submit_page.text
+    assert "返回业务总览" in submit_page.text
+    assert "返回工单管理" in submit_page.text
+    assert "门店需求提报" in submit_page.text
+
+    detail_page = client.get("/query/ticket/1?store_name=南京门东店")
+    assert detail_page.status_code == 200
+    assert "public-topbar" in detail_page.text
+    assert "返回查询结果" in detail_page.text
+    assert "提交新工单" in detail_page.text
+    assert "返回门店查询" in detail_page.text
 
 
 def test_session_security_secure_cookie_expiry_csrf_and_env_example(tmp_path, monkeypatch):
