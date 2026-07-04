@@ -1394,7 +1394,11 @@ a:focus-visible {
 }
 
 .embedded-table {
-  min-width: 1320px;
+  min-width: 1560px;
+}
+
+.embedded-table td {
+  vertical-align: middle;
 }
 
 .inline-upload-form {
@@ -1406,7 +1410,7 @@ a:focus-visible {
 }
 
 .inline-upload-form input[type="file"] {
-  width: 180px;
+  width: 190px;
 }
 
 .embedded-page-shell {

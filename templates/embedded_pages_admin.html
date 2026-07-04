@@ -1,5 +1,5 @@
 {% set page_title = '嵌入页面管理' %}
-{% set page_subtitle = '上传或替换后台嵌入 HTML，刷新页面即可读取服务器最新版本。' %}
+{% set page_subtitle = '上传或替换后台嵌入 HTML / ZIP 资源包，刷新页面即可读取服务器最新版本。' %}
 {% set page_eyebrow = '扩展页面' %}
 {% set current_menu = 'embedded-pages' %}
 {% extends "base_admin.html" %}
@@ -12,7 +12,7 @@
 <section class="admin-section work-card embedded-admin-section">
   <div class="section-heading">
     <h2>新增嵌入页面</h2>
-    <p>HTML 文件会保存到运行数据目录，不进入 GitHub。page_key 只能使用小写字母、数字和短横线。</p>
+    <p>小型页面可上传单个 HTML；大型页面建议上传 ZIP 资源包，ZIP 根目录必须包含 index.html，可包含 assets 图片、CSS、JS。</p>
   </div>
   <form class="embedded-form" method="post" action="/admin/embedded-pages" enctype="multipart/form-data">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -29,9 +29,9 @@
       <input name="nav_label" type="text" placeholder="经营日报" required>
     </label>
     <label>
-      <span>HTML 文件</span>
-      <input name="html_file" type="file" accept=".html" required>
-      <small class="inline-hint">仅支持 .html，最大 {{ max_embedded_html_mb }}MB。</small>
+      <span>HTML / ZIP 文件</span>
+      <input name="html_file" type="file" accept=".html,.zip" required>
+      <small class="inline-hint">单 HTML 最大 {{ max_embedded_html_mb }}MB；ZIP 最大 {{ max_embedded_zip_mb }}MB，根目录必须包含 index.html。</small>
     </label>
     <label class="inline-check">
       <input name="enabled" type="checkbox" value="1" checked>
@@ -44,7 +44,7 @@
 <section class="admin-section work-card embedded-admin-section">
   <div class="section-heading">
     <h2>页面列表</h2>
-    <p>替换 HTML 后 iframe 地址会带新版本参数，后台用户刷新即可看到新版。</p>
+    <p>替换 HTML 或 ZIP 后 iframe 地址会带新版本参数，后台用户刷新即可看到新版。请只上传可信 HTML/ZIP。</p>
   </div>
   <div class="table-wrap">
     <table class="ticket-table erp-table embedded-table">
@@ -53,6 +53,10 @@
           <th>page_key</th>
           <th>页面标题</th>
           <th>导航名称</th>
+          <th>存储类型</th>
+          <th>文件大小</th>
+          <th>入口文件</th>
+          <th>文件状态</th>
           <th>状态</th>
           <th>最近更新时间</th>
           <th>更新人</th>
@@ -67,6 +71,10 @@
           <td>{{ page.page_key }}</td>
           <td>{{ page.title }}</td>
           <td>{{ page.nav_label }}</td>
+          <td>{{ page.storage_label }}</td>
+          <td>{{ page.file_size_label }}</td>
+          <td>{{ page.entry_file }}</td>
+          <td>{{ page.file_exists_label }}</td>
           <td>{{ '启用' if page.enabled else '停用' }}</td>
           <td>{{ page.updated_at }}</td>
           <td>{{ page.updated_by or '-' }}</td>
@@ -80,7 +88,7 @@
           <td>
             <form class="inline-upload-form" method="post" action="/admin/embedded-pages/{{ page.page_key }}/replace" enctype="multipart/form-data">
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-              <input name="html_file" type="file" accept=".html" required>
+              <input name="html_file" type="file" accept=".html,.zip" required>
               <button class="ghost-button compact" type="submit">替换文件</button>
             </form>
           </td>
@@ -94,7 +102,7 @@
         </tr>
         {% else %}
         <tr>
-          <td class="empty-cell" colspan="9">
+          <td class="empty-cell" colspan="13">
             <strong>暂无嵌入页面</strong>
             <span>新增页面后会出现在这里，启用状态下也会进入左侧扩展页面导航。</span>
           </td>

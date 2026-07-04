@@ -4,6 +4,7 @@ import json
 import re
 import sqlite3
 import sys
+import zipfile
 from datetime import date, timedelta
 from io import BytesIO
 from pathlib import Path
@@ -41,7 +42,8 @@ DEFAULT_TEST_CONFIG = {
         "max_file_mb": 20,
         "max_file_count": 5,
         "max_total_file_upload_mb": 50,
-        "max_embedded_html_mb": 5,
+        "max_embedded_html_mb": 20,
+        "max_embedded_zip_mb": 100,
     },
 }
 
@@ -241,6 +243,14 @@ def admin_post(client, url, data=None, **kwargs):
 def basic_auth_headers(username=ADMIN_AUTH[0], password=ADMIN_AUTH[1]):
     credentials = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
     return {"Authorization": f"Basic {credentials}"}
+
+
+def make_zip_bytes(entries):
+    output = BytesIO()
+    with zipfile.ZipFile(output, "w") as archive:
+        for name, content in entries.items():
+            archive.writestr(name, content)
+    return output.getvalue()
 
 
 def test_submit_page_exposes_image_and_file_upload_inputs(tmp_path, monkeypatch):
@@ -1394,6 +1404,7 @@ def test_legacy_database_is_migrated_without_losing_existing_rows(tmp_path, monk
 
     with sqlite3.connect(db_path) as connection:
         ticket_columns = {row[1] for row in connection.execute("PRAGMA table_info(tickets)").fetchall()}
+        embedded_columns = {row[1] for row in connection.execute("PRAGMA table_info(embedded_pages)").fetchall()}
         tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()}
         ticket_count = connection.execute("SELECT COUNT(*) FROM tickets").fetchone()[0]
         image_count = connection.execute("SELECT COUNT(*) FROM ticket_images").fetchone()[0]
@@ -1410,6 +1421,7 @@ def test_legacy_database_is_migrated_without_losing_existing_rows(tmp_path, monk
     assert "ticket_comments" in tables
     assert "ticket_tasks" in tables
     assert "embedded_pages" in tables
+    assert {"storage_type", "entry_file", "file_size"}.issubset(embedded_columns)
     assert ticket_count == 1
     assert image_count == 1
     assert migrated_stores == [(1, "南京门东店")]
@@ -1918,8 +1930,12 @@ def test_runtime_embedded_page_upload_replace_navigation_and_content(tmp_path, m
     assert "嵌入页面管理" in page.text
     assert 'name="page_key"' in page.text
     assert 'name="html_file"' in page.text
+    assert 'accept=".html,.zip"' in page.text
+    assert "ZIP" in page.text
+    assert "100MB" in page.text
 
     csrf_token = csrf_token_for(client, "/admin/embedded-pages")
+    html_content = b"<h1>V1 report</h1>"
     create = client.post(
         "/admin/embedded-pages",
         data={
@@ -1929,7 +1945,7 @@ def test_runtime_embedded_page_upload_replace_navigation_and_content(tmp_path, m
             "nav_label": "经营日报",
             "enabled": "1",
         },
-        files={"html_file": ("daily.html", b"<h1>V1 report</h1>", "text/html")},
+        files={"html_file": ("daily.html", html_content, "text/html")},
         follow_redirects=False,
     )
     assert create.status_code == 303
@@ -1940,12 +1956,20 @@ def test_runtime_embedded_page_upload_replace_navigation_and_content(tmp_path, m
     assert pages[0]["page_key"] == "daily-report"
     assert pages[0]["title"] == "每日经营日报"
     assert pages[0]["nav_label"] == "经营日报"
-    assert pages[0]["filename"] == "daily-report.html"
+    assert pages[0]["filename"] == "daily-report/index.html"
+    assert pages[0]["storage_type"] == "html"
+    assert pages[0]["entry_file"] == "index.html"
+    assert pages[0]["file_size"] == len(html_content)
     assert pages[0]["enabled"] == 1
     assert pages[0]["updated_by"] == ADMIN_AUTH[0]
-    embedded_file = tmp_path / "embedded_pages" / "daily-report.html"
+    embedded_file = tmp_path / "embedded_pages" / "daily-report" / "index.html"
     assert embedded_file.is_file()
     assert embedded_file.read_text(encoding="utf-8") == "<h1>V1 report</h1>"
+
+    list_page = client.get("/admin/embedded-pages")
+    assert "HTML" in list_page.text
+    assert "index.html" in list_page.text
+    assert "存在" in list_page.text
 
     dashboard = client.get("/admin/dashboard")
     assert dashboard.status_code == 200
@@ -1956,33 +1980,56 @@ def test_runtime_embedded_page_upload_replace_navigation_and_content(tmp_path, m
     embed_page = client.get("/admin/embed/daily-report")
     assert embed_page.status_code == 200
     assert "每日经营日报" in embed_page.text
-    assert "/admin/embed-content/daily-report?v=20260704100000" in embed_page.text
+    assert "/admin/embed-content/daily-report/index.html?v=20260704100000" in embed_page.text
     assert "embedded-frame" in embed_page.text
 
-    content = client.get("/admin/embed-content/daily-report")
+    content = client.get("/admin/embed-content/daily-report/index.html")
     assert content.status_code == 200
     assert content.text == "<h1>V1 report</h1>"
     assert content.headers["x-frame-options"] == "SAMEORIGIN"
     assert content.headers["x-content-type-options"] == "nosniff"
+    assert content.headers["content-type"].startswith("text/html")
 
     fresh_client = TestClient(main.app)
-    denied_content = fresh_client.get("/admin/embed-content/daily-report", follow_redirects=False)
+    denied_content = fresh_client.get("/admin/embed-content/daily-report/index.html", follow_redirects=False)
     assert denied_content.status_code != 200
 
     monkeypatch.setattr(main, "now_text", lambda: "2026-07-04 10:05:00")
+    zip_content = make_zip_bytes(
+        {
+            "index.html": '<link rel="stylesheet" href="assets/style.css"><h1>V2 package</h1>',
+            "assets/style.css": "body { color: #c00; }",
+            "assets/chart.js": "window.embeddedReportReady = true;",
+        }
+    )
     replace = client.post(
         "/admin/embedded-pages/daily-report/replace",
         data={"csrf_token": csrf_token},
-        files={"html_file": ("daily.html", b"<h1>V2 report</h1>", "text/html")},
+        files={"html_file": ("daily.zip", zip_content, "application/zip")},
         follow_redirects=False,
     )
     assert replace.status_code == 303
     updated_pages = rows_for(tmp_path, "embedded_pages")
     assert updated_pages[0]["updated_at"] == "2026-07-04 10:05:00"
-    assert embedded_file.read_text(encoding="utf-8") == "<h1>V2 report</h1>"
+    assert updated_pages[0]["storage_type"] == "zip"
+    assert updated_pages[0]["entry_file"] == "index.html"
+    assert updated_pages[0]["file_size"] == len(zip_content)
+    assert "V2 package" in embedded_file.read_text(encoding="utf-8")
+    assert (tmp_path / "embedded_pages" / "daily-report" / "assets" / "style.css").is_file()
     updated_embed = client.get("/admin/embed/daily-report")
-    assert "/admin/embed-content/daily-report?v=20260704100500" in updated_embed.text
-    assert client.get("/admin/embed-content/daily-report").text == "<h1>V2 report</h1>"
+    assert "/admin/embed-content/daily-report/index.html?v=20260704100500" in updated_embed.text
+    assert "V2 package" in client.get("/admin/embed-content/daily-report/index.html").text
+    css = client.get("/admin/embed-content/daily-report/assets/style.css")
+    assert css.status_code == 200
+    assert css.text == "body { color: #c00; }"
+    assert css.headers["content-type"].startswith("text/css")
+    script = client.get("/admin/embed-content/daily-report/assets/chart.js")
+    assert script.status_code == 200
+    assert script.headers["content-type"].startswith("application/javascript")
+    replaced_list = client.get("/admin/embedded-pages")
+    assert "ZIP" in replaced_list.text
+    assert "index.html" in replaced_list.text
+    assert "存在" in replaced_list.text
 
     disable = client.post(
         "/admin/embedded-pages/daily-report/toggle",
@@ -2031,7 +2078,7 @@ def test_embedded_page_upload_validation_and_backup_rules(tmp_path, monkeypatch)
         files={"html_file": ("report.txt", b"plain", "text/plain")},
     )
     assert non_html.status_code == 400
-    assert "只允许上传 .html 文件。" in non_html.text
+    assert "只允许上传 .html 或 .zip 文件。" in non_html.text
 
     empty_html = client.post(
         "/admin/embedded-pages",
@@ -2067,6 +2114,40 @@ def test_embedded_page_upload_validation_and_backup_rules(tmp_path, monkeypatch)
     gitignore = (PROJECT_DIR / ".gitignore").read_text(encoding="utf-8")
     assert "data/embedded_pages" in backup_script
     assert "data/embedded_pages/" in gitignore
+
+
+def test_embedded_zip_upload_security_validation(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch)
+    logged_in_client(client)
+    csrf_token = csrf_token_for(client, "/admin/embedded-pages")
+
+    def upload_zip(page_key, entries):
+        return client.post(
+            "/admin/embedded-pages",
+            data={
+                "csrf_token": csrf_token,
+                "page_key": page_key,
+                "title": "ZIP package",
+                "nav_label": "ZIP",
+                "enabled": "1",
+            },
+            files={"html_file": (f"{page_key}.zip", make_zip_bytes(entries), "application/zip")},
+        )
+
+    no_index = upload_zip("missing-index", {"assets/style.css": "body {}"})
+    assert no_index.status_code == 400
+    assert "index.html" in no_index.text
+
+    traversal = upload_zip("bad-path", {"index.html": "<h1>ok</h1>", "../evil.txt": "bad"})
+    assert traversal.status_code == 400
+    assert "ZIP 文件路径不安全" in traversal.text
+
+    blocked_extension = upload_zip("bad-ext", {"index.html": "<h1>ok</h1>", "assets/tool.exe": "bad"})
+    assert blocked_extension.status_code == 400
+    assert "exe" in blocked_extension.text
+
+    assert rows_for(tmp_path, "embedded_pages") == []
+    assert not (tmp_path / "embedded_pages").exists()
 
 
 def test_session_security_secure_cookie_expiry_csrf_and_env_example(tmp_path, monkeypatch):
@@ -2240,7 +2321,7 @@ def test_nginx_https_example_and_navigation_files_are_present(tmp_path, monkeypa
     assert "listen 443 ssl" in content
     assert "server_name request.example.com" in content
     assert "proxy_pass http://127.0.0.1:8701" in content
-    assert "client_max_body_size 100M" in content
+    assert "client_max_body_size 120M" in content
     assert "X-Frame-Options" in content
     assert "certbot" in content
 

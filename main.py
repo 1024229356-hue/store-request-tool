@@ -2,15 +2,18 @@ import base64
 import hashlib
 import hmac
 import json
+import mimetypes
 import os
 import secrets
+import shutil
 import sqlite3
 import uuid
+import zipfile
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from io import BytesIO
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import quote, urlencode, urlsplit
@@ -59,13 +62,32 @@ DEFAULT_SYSTEM = {
     "max_file_mb": 20,
     "max_file_count": 5,
     "max_total_file_upload_mb": 50,
-    "max_embedded_html_mb": 5,
+    "max_embedded_html_mb": 20,
+    "max_embedded_zip_mb": 100,
     "store_query_default_days": 30,
     "store_query_page_size": 20,
     "supplement_status_after_store_update": "待处理",
 }
 COMPLETED_STATUS = "已完成"
 BLOCKED_FILE_EXTENSIONS = {"exe", "bat", "cmd", "js", "py", "sh", "php", "jar", "msi"}
+EMBEDDED_BLOCKED_EXTENSIONS = {"exe", "bat", "cmd", "sh", "py", "php", "jar", "msi"}
+EMBEDDED_ALLOWED_EXTENSIONS = {
+    "html",
+    "css",
+    "js",
+    "png",
+    "jpg",
+    "jpeg",
+    "webp",
+    "gif",
+    "svg",
+    "json",
+    "csv",
+    "txt",
+    "pdf",
+    "xlsx",
+    "docx",
+}
 IMAGE_FORMAT_EXTENSIONS = {
     "JPEG": {"jpg", "jpeg"},
     "PNG": {"png"},
@@ -95,6 +117,7 @@ class AppConfig:
     max_file_count: int
     max_total_file_upload_mb: int
     max_embedded_html_mb: int
+    max_embedded_zip_mb: int
     store_query_default_days: int
     store_query_page_size: int
     supplement_status_after_store_update: str
@@ -119,11 +142,23 @@ class AppConfig:
     def max_embedded_html_bytes(self) -> int:
         return self.max_embedded_html_mb * 1024 * 1024
 
+    @property
+    def max_embedded_zip_bytes(self) -> int:
+        return self.max_embedded_zip_mb * 1024 * 1024
+
 
 @dataclass(frozen=True)
 class PreparedFile:
     original_filename: str
     file_ext: str
+    file_size: int
+    content: bytes
+
+
+@dataclass(frozen=True)
+class PreparedEmbeddedUpload:
+    storage_type: str
+    entry_file: str
     file_size: int
     content: bytes
 
@@ -768,6 +803,9 @@ def init_db() -> None:
                 title TEXT NOT NULL,
                 nav_label TEXT NOT NULL,
                 filename TEXT NOT NULL,
+                storage_type TEXT NOT NULL DEFAULT 'html',
+                entry_file TEXT NOT NULL DEFAULT 'index.html',
+                file_size INTEGER NOT NULL DEFAULT 0,
                 enabled INTEGER NOT NULL DEFAULT 1,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
@@ -795,6 +833,9 @@ def init_db() -> None:
         connection.execute("CREATE INDEX IF NOT EXISTS idx_notification_events_ticket_id ON notification_events(ticket_id)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_notification_reads_username ON notification_reads(username)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_embedded_pages_enabled ON embedded_pages(enabled)")
+        add_column_if_missing(connection, "embedded_pages", "storage_type", "TEXT NOT NULL DEFAULT 'html'")
+        add_column_if_missing(connection, "embedded_pages", "entry_file", "TEXT NOT NULL DEFAULT 'index.html'")
+        add_column_if_missing(connection, "embedded_pages", "file_size", "INTEGER NOT NULL DEFAULT 0")
         backfill_ticket_relations(connection)
 
 
@@ -857,6 +898,7 @@ def load_system_config(statuses: List[str]) -> Dict[str, object]:
         "max_file_count",
         "max_total_file_upload_mb",
         "max_embedded_html_mb",
+        "max_embedded_zip_mb",
         "store_query_default_days",
         "store_query_page_size",
     ):
@@ -916,6 +958,7 @@ def load_app_config() -> AppConfig:
         max_file_count=int(system["max_file_count"]),
         max_total_file_upload_mb=int(system["max_total_file_upload_mb"]),
         max_embedded_html_mb=int(system["max_embedded_html_mb"]),
+        max_embedded_zip_mb=int(system["max_embedded_zip_mb"]),
         store_query_default_days=int(system["store_query_default_days"]),
         store_query_page_size=int(system["store_query_page_size"]),
         supplement_status_after_store_update=str(system["supplement_status_after_store_update"]),
@@ -1896,7 +1939,18 @@ def fetch_ticket_tasks(ticket_id: int) -> List[Dict[str, object]]:
 
 
 def embedded_html_filename(page_key: str) -> str:
+    return f"{page_key}/index.html"
+
+
+def legacy_embedded_html_filename(page_key: str) -> str:
     return f"{page_key}.html"
+
+
+def embedded_page_dir(page_key: str) -> Optional[Path]:
+    clean_key = page_key.strip()
+    if not is_valid_embedded_page_key(clean_key):
+        return None
+    return get_embedded_pages_dir() / clean_key
 
 
 def embedded_html_path(filename: str) -> Optional[Path]:
@@ -1906,11 +1960,117 @@ def embedded_html_path(filename: str) -> Optional[Path]:
     base_dir = get_embedded_pages_dir()
     target = base_dir / clean_filename
     try:
-        if target.resolve().parent != base_dir.resolve():
-            return None
-    except OSError:
+        target.resolve().relative_to(base_dir.resolve())
+    except (OSError, ValueError):
         return None
     return target
+
+
+def legacy_embedded_html_path(page_key: str, filename: object = "") -> Optional[Path]:
+    clean_key = page_key.strip()
+    if not is_valid_embedded_page_key(clean_key):
+        return None
+    candidate = str(filename or legacy_embedded_html_filename(clean_key)).strip()
+    if "/" in candidate.replace("\\", "/"):
+        candidate = legacy_embedded_html_filename(clean_key)
+    return embedded_html_path(candidate)
+
+
+def embedded_file_size_label(size: object) -> str:
+    try:
+        value = int(size or 0)
+    except (TypeError, ValueError):
+        value = 0
+    if value < 1024:
+        return f"{value} B"
+    if value < 1024 * 1024:
+        return f"{value / 1024:.1f} KB"
+    return f"{value / (1024 * 1024):.1f} MB"
+
+
+def normalize_embedded_storage_type(value: object) -> str:
+    storage_type = str(value or "html").strip().lower()
+    return "zip" if storage_type == "zip" else "html"
+
+
+def embedded_storage_label(storage_type: object) -> str:
+    return "ZIP" if normalize_embedded_storage_type(storage_type) == "zip" else "HTML"
+
+
+def safe_embedded_resource_path(resource_path: object) -> Optional[str]:
+    clean_path = str(resource_path or "").strip()
+    if not clean_path:
+        return None
+    if "\\" in clean_path or clean_path.startswith("/"):
+        return None
+    parts = clean_path.split("/")
+    if any(part in {"", ".", ".."} for part in parts):
+        return None
+    posix_path = PurePosixPath(clean_path)
+    if posix_path.is_absolute():
+        return None
+    return "/".join(parts)
+
+
+def resolve_embedded_resource(page: Dict[str, object], resource_path: object = "index.html") -> Optional[Path]:
+    page_key = str(page.get("page_key") or "").strip()
+    entry_file = safe_embedded_resource_path(page.get("entry_file") or "index.html") or "index.html"
+    clean_resource = safe_embedded_resource_path(resource_path or entry_file)
+    if not clean_resource:
+        return None
+
+    page_dir = embedded_page_dir(page_key)
+    if page_dir and page_dir.is_dir():
+        root = page_dir.resolve()
+        target = (root / clean_resource).resolve()
+        try:
+            target.relative_to(root)
+        except ValueError:
+            return None
+        return target if target.is_file() else None
+
+    if clean_resource == entry_file:
+        legacy_target = legacy_embedded_html_path(page_key, page.get("filename"))
+        if legacy_target and legacy_target.is_file():
+            return legacy_target
+    return None
+
+
+def embedded_page_file_exists(page: Dict[str, object]) -> bool:
+    return resolve_embedded_resource(page, page.get("entry_file") or "index.html") is not None
+
+
+def embedded_media_type(path: Path) -> str:
+    extension = path.suffix.lower().lstrip(".")
+    overrides = {
+        "html": "text/html",
+        "css": "text/css",
+        "js": "application/javascript",
+        "svg": "image/svg+xml",
+        "json": "application/json",
+        "csv": "text/csv",
+        "txt": "text/plain",
+        "pdf": "application/pdf",
+        "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    }
+    if extension in overrides:
+        return overrides[extension]
+    guessed, _encoding = mimetypes.guess_type(path.name)
+    return guessed or "application/octet-stream"
+
+
+def enrich_embedded_page(page: Dict[str, object]) -> Dict[str, object]:
+    page["is_enabled"] = int(page.get("enabled") or 0) == 1
+    page["version"] = embedded_page_version(page.get("updated_at"))
+    page["storage_type"] = normalize_embedded_storage_type(page.get("storage_type"))
+    page["storage_label"] = embedded_storage_label(page.get("storage_type"))
+    page["entry_file"] = str(page.get("entry_file") or "index.html")
+    page["file_size"] = int(page.get("file_size") or 0)
+    page["file_size_label"] = embedded_file_size_label(page.get("file_size"))
+    page["file_exists"] = embedded_page_file_exists(page)
+    page["file_exists_label"] = "存在" if page["file_exists"] else "缺失"
+    return page
 
 
 def fetch_embedded_pages(enabled_only: bool = False) -> List[Dict[str, object]]:
@@ -1922,8 +2082,8 @@ def fetch_embedded_pages(enabled_only: bool = False) -> List[Dict[str, object]]:
     with get_connection() as connection:
         rows = connection.execute(
             f"""
-            SELECT id, page_key, title, nav_label, filename, enabled,
-                   created_at, updated_at, updated_by
+            SELECT id, page_key, title, nav_label, filename, storage_type,
+                   entry_file, file_size, enabled, created_at, updated_at, updated_by
             FROM embedded_pages
             {where_sql}
             ORDER BY nav_label ASC, id ASC
@@ -1932,8 +2092,7 @@ def fetch_embedded_pages(enabled_only: bool = False) -> List[Dict[str, object]]:
         ).fetchall()
     pages = [dict(row) for row in rows]
     for page in pages:
-        page["is_enabled"] = int(page.get("enabled") or 0) == 1
-        page["version"] = embedded_page_version(page.get("updated_at"))
+        enrich_embedded_page(page)
     return pages
 
 
@@ -1952,8 +2111,8 @@ def fetch_embedded_page(page_key: str, enabled_only: bool = False) -> Optional[D
     with get_connection() as connection:
         row = connection.execute(
             f"""
-            SELECT id, page_key, title, nav_label, filename, enabled,
-                   created_at, updated_at, updated_by
+            SELECT id, page_key, title, nav_label, filename, storage_type,
+                   entry_file, file_size, enabled, created_at, updated_at, updated_by
             FROM embedded_pages
             WHERE {" AND ".join(clauses)}
             """,
@@ -1961,24 +2120,69 @@ def fetch_embedded_page(page_key: str, enabled_only: bool = False) -> Optional[D
         ).fetchone()
     if not row:
         return None
-    page = dict(row)
-    page["is_enabled"] = int(page.get("enabled") or 0) == 1
-    page["version"] = embedded_page_version(page.get("updated_at"))
-    return page
+    return enrich_embedded_page(dict(row))
 
 
-async def prepare_embedded_html_file(html_file: Optional[UploadFile], config: AppConfig) -> bytes:
+def validate_embedded_zip_member(filename: str) -> Optional[str]:
+    raw_name = str(filename or "").strip()
+    if not raw_name:
+        raise ValueError("ZIP 文件路径不安全：存在空文件名。")
+    if "\\" in raw_name or raw_name.startswith("/"):
+        raise ValueError("ZIP 文件路径不安全：不能包含绝对路径、反斜杠或路径穿越。")
+    is_directory = raw_name.endswith("/")
+    clean_name = raw_name[:-1] if is_directory else raw_name
+    if not clean_name:
+        raise ValueError("ZIP 文件路径不安全：存在空文件名。")
+    parts = clean_name.split("/")
+    if any(part in {"", ".", ".."} for part in parts):
+        raise ValueError("ZIP 文件路径不安全：不能包含绝对路径、反斜杠或路径穿越。")
+    if PurePosixPath(clean_name).is_absolute():
+        raise ValueError("ZIP 文件路径不安全：不能包含绝对路径、反斜杠或路径穿越。")
+    if is_directory:
+        return None
+    leaf = parts[-1]
+    extension = leaf.rsplit(".", 1)[-1].lower() if "." in leaf else ""
+    if extension in EMBEDDED_BLOCKED_EXTENSIONS:
+        raise ValueError(f"ZIP 内不允许包含 .{extension} 文件。")
+    if extension not in EMBEDDED_ALLOWED_EXTENSIONS:
+        raise ValueError(f"ZIP 内文件类型 .{extension or '无后缀'} 不受支持。")
+    return "/".join(parts)
+
+
+def validate_embedded_zip_content(content: bytes) -> None:
+    try:
+        with zipfile.ZipFile(BytesIO(content)) as archive:
+            safe_files: List[str] = []
+            for info in archive.infolist():
+                member_path = validate_embedded_zip_member(info.filename)
+                if member_path:
+                    safe_files.append(member_path)
+            if "index.html" not in safe_files:
+                raise ValueError("ZIP 根目录必须包含 index.html。")
+    except zipfile.BadZipFile as exc:
+        raise ValueError("ZIP 文件无法读取，请重新打包后上传。") from exc
+
+
+async def prepare_embedded_upload_file(html_file: Optional[UploadFile], config: AppConfig) -> PreparedEmbeddedUpload:
     if not html_file or not html_file.filename:
-        raise ValueError("请选择要上传的 HTML 文件。")
+        raise ValueError("请选择要上传的 HTML 或 ZIP 文件。")
     filename = safe_uploaded_name(html_file.filename)
-    if not filename.lower().endswith(".html"):
-        raise ValueError("只允许上传 .html 文件。")
+    lower_filename = filename.lower()
     content = await html_file.read()
-    if len(content) > config.max_embedded_html_bytes:
-        raise ValueError(f"HTML 文件不能超过 {config.max_embedded_html_mb}MB。")
-    if not content.strip():
-        raise ValueError("HTML 文件内容不能为空。")
-    return content
+    if lower_filename.endswith(".html"):
+        if len(content) > config.max_embedded_html_bytes:
+            raise ValueError(f"HTML 文件不能超过 {config.max_embedded_html_mb}MB。")
+        if not content.strip():
+            raise ValueError("HTML 文件内容不能为空。")
+        return PreparedEmbeddedUpload("html", "index.html", len(content), content)
+    if lower_filename.endswith(".zip"):
+        if len(content) > config.max_embedded_zip_bytes:
+            raise ValueError(f"ZIP 文件不能超过 {config.max_embedded_zip_mb}MB。")
+        if not content:
+            raise ValueError("ZIP 文件内容不能为空。")
+        validate_embedded_zip_content(content)
+        return PreparedEmbeddedUpload("zip", "index.html", len(content), content)
+    raise ValueError("只允许上传 .html 或 .zip 文件。")
 
 
 def validate_embedded_page_form(page_key: str, title: str, nav_label: str) -> Tuple[str, str, str]:
@@ -1994,13 +2198,50 @@ def validate_embedded_page_form(page_key: str, title: str, nav_label: str) -> Tu
     return clean_key, clean_title, clean_nav_label
 
 
-def write_embedded_html_file(filename: str, content: bytes) -> Path:
-    target = embedded_html_path(filename)
-    if not target:
-        raise ValueError("HTML 文件路径不正确。")
-    get_embedded_pages_dir().mkdir(parents=True, exist_ok=True)
-    target.write_bytes(content)
-    return target
+def write_embedded_upload_to_temp_dir(target_dir: Path, upload: PreparedEmbeddedUpload) -> None:
+    target_dir.mkdir(parents=True, exist_ok=True)
+    if upload.storage_type == "html":
+        (target_dir / "index.html").write_bytes(upload.content)
+        return
+    with zipfile.ZipFile(BytesIO(upload.content)) as archive:
+        for info in archive.infolist():
+            member_path = validate_embedded_zip_member(info.filename)
+            if not member_path:
+                continue
+            target = (target_dir / member_path).resolve()
+            try:
+                target.relative_to(target_dir.resolve())
+            except ValueError as exc:
+                raise ValueError("ZIP 文件路径不安全：不能包含绝对路径、反斜杠或路径穿越。") from exc
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(archive.read(info))
+
+
+def replace_embedded_page_directory(page_key: str, upload: PreparedEmbeddedUpload) -> Path:
+    page_dir = embedded_page_dir(page_key)
+    if not page_dir:
+        raise ValueError("嵌入页面目录不正确。")
+    base_dir = get_embedded_pages_dir()
+    base_dir.mkdir(parents=True, exist_ok=True)
+    token = uuid.uuid4().hex
+    temp_dir = base_dir / f".{page_key}.tmp-{token}"
+    backup_dir = base_dir / f".{page_key}.bak-{token}"
+    backup_created = False
+    try:
+        write_embedded_upload_to_temp_dir(temp_dir, upload)
+        if page_dir.exists():
+            page_dir.rename(backup_dir)
+            backup_created = True
+        temp_dir.rename(page_dir)
+        if backup_created and backup_dir.exists():
+            shutil.rmtree(backup_dir)
+        return page_dir / upload.entry_file
+    except Exception:
+        if temp_dir.exists():
+            shutil.rmtree(temp_dir, ignore_errors=True)
+        if backup_created and backup_dir.exists() and not page_dir.exists():
+            backup_dir.rename(page_dir)
+        raise
 
 
 def create_embedded_page(
@@ -2008,7 +2249,7 @@ def create_embedded_page(
     title: str,
     nav_label: str,
     enabled: bool,
-    html_content: bytes,
+    upload: PreparedEmbeddedUpload,
     updated_by: str,
 ) -> int:
     clean_key, clean_title, clean_nav_label = validate_embedded_page_form(page_key, title, nav_label)
@@ -2018,24 +2259,25 @@ def create_embedded_page(
         existing = connection.execute("SELECT id FROM embedded_pages WHERE page_key = ?", (clean_key,)).fetchone()
         if existing:
             raise ValueError("page_key 已存在，请使用替换文件。")
-    target = embedded_html_path(filename)
-    target_existed = bool(target and target.exists())
-    target = write_embedded_html_file(filename, html_content)
+    target = replace_embedded_page_directory(clean_key, upload)
     try:
         with get_connection() as connection:
             cursor = connection.execute(
                 """
                 INSERT INTO embedded_pages (
-                    page_key, title, nav_label, filename, enabled,
-                    created_at, updated_at, updated_by
+                    page_key, title, nav_label, filename, storage_type, entry_file,
+                    file_size, enabled, created_at, updated_at, updated_by
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     clean_key,
                     clean_title,
                     clean_nav_label,
                     filename,
+                    upload.storage_type,
+                    upload.entry_file,
+                    upload.file_size,
                     1 if enabled else 0,
                     timestamp,
                     timestamp,
@@ -2045,28 +2287,37 @@ def create_embedded_page(
             return int(cursor.lastrowid)
     except Exception:
         try:
-            if not target_existed:
-                target.unlink(missing_ok=True)
+            if target.exists():
+                shutil.rmtree(target.parent, ignore_errors=True)
         except OSError:
             pass
         raise
 
 
-def replace_embedded_page_file(page_key: str, html_content: bytes, updated_by: str) -> None:
+def replace_embedded_page_file(page_key: str, upload: PreparedEmbeddedUpload, updated_by: str) -> None:
     page = fetch_embedded_page(page_key)
     if not page:
         raise HTTPException(status_code=404, detail="嵌入页面不存在")
-    filename = str(page.get("filename") or "")
-    write_embedded_html_file(filename, html_content)
+    clean_key = str(page.get("page_key") or page_key).strip()
+    replace_embedded_page_directory(clean_key, upload)
     timestamp = now_text()
     with get_connection() as connection:
         connection.execute(
             """
             UPDATE embedded_pages
-            SET updated_at = ?, updated_by = ?
+            SET filename = ?, storage_type = ?, entry_file = ?, file_size = ?,
+                updated_at = ?, updated_by = ?
             WHERE page_key = ?
             """,
-            (timestamp, updated_by, page_key.strip()),
+            (
+                embedded_html_filename(clean_key),
+                upload.storage_type,
+                upload.entry_file,
+                upload.file_size,
+                timestamp,
+                updated_by,
+                clean_key,
+            ),
         )
 
 
@@ -3054,6 +3305,7 @@ def create_app() -> FastAPI:
                 "pages": fetch_embedded_pages(),
                 "error": error,
                 "max_embedded_html_mb": config.max_embedded_html_mb,
+                "max_embedded_zip_mb": config.max_embedded_zip_mb,
                 "admin_user": admin,
                 "csrf_token": current_csrf_token(request),
             },
@@ -3704,13 +3956,13 @@ def create_app() -> FastAPI:
         require_admin_csrf(request, csrf_token)
         config = load_app_config()
         try:
-            html_content = await prepare_embedded_html_file(html_file, config)
+            upload = await prepare_embedded_upload_file(html_file, config)
             create_embedded_page(
                 page_key,
                 title,
                 nav_label,
                 enabled in {"1", "true", "on", "yes"},
-                html_content,
+                upload,
                 admin,
             )
         except ValueError as exc:
@@ -3728,8 +3980,8 @@ def create_app() -> FastAPI:
         require_admin_csrf(request, csrf_token)
         config = load_app_config()
         try:
-            html_content = await prepare_embedded_html_file(html_file, config)
-            replace_embedded_page_file(page_key, html_content, admin)
+            upload = await prepare_embedded_upload_file(html_file, config)
+            replace_embedded_page_file(page_key, upload, admin)
         except ValueError as exc:
             return render_embedded_pages_admin(request, admin, error=str(exc), status_code=400)
         return RedirectResponse(url="/admin/embedded-pages", status_code=303)
@@ -3746,21 +3998,33 @@ def create_app() -> FastAPI:
         set_embedded_page_enabled(page_key, enabled in {"1", "true", "on", "yes"}, admin)
         return RedirectResponse(url="/admin/embedded-pages", status_code=303)
 
-    @app.get("/admin/embed-content/{page_key}", response_class=HTMLResponse)
-    def embedded_page_content(page_key: str, _admin: str = Depends(require_admin)) -> HTMLResponse:
+    def embedded_page_content_response(page_key: str, resource_path: str, _admin: str) -> FileResponse:
         page = fetch_embedded_page(page_key, enabled_only=True)
         if not page:
             raise HTTPException(status_code=404, detail="嵌入页面不存在或未启用")
-        target = embedded_html_path(str(page.get("filename") or ""))
-        if not target or not target.is_file():
-            raise HTTPException(status_code=404, detail="HTML 文件不存在")
-        return HTMLResponse(
-            target.read_text(encoding="utf-8"),
+        target = resolve_embedded_resource(page, resource_path)
+        if not target:
+            raise HTTPException(status_code=404, detail="嵌入页面文件不存在")
+        return FileResponse(
+            target,
+            media_type=embedded_media_type(target),
             headers={
                 "X-Frame-Options": "SAMEORIGIN",
                 "X-Content-Type-Options": "nosniff",
             },
         )
+
+    @app.get("/admin/embed-content/{page_key}", response_class=FileResponse)
+    def embedded_page_content_index(page_key: str, admin: str = Depends(require_admin)) -> FileResponse:
+        return embedded_page_content_response(page_key, "index.html", admin)
+
+    @app.get("/admin/embed-content/{page_key}/{resource_path:path}", response_class=FileResponse)
+    def embedded_page_content(
+        page_key: str,
+        resource_path: str,
+        admin: str = Depends(require_admin),
+    ) -> FileResponse:
+        return embedded_page_content_response(page_key, resource_path, admin)
 
     @app.get("/admin/embed/{page_key}", response_class=HTMLResponse)
     def embedded_page_view(
@@ -3771,7 +4035,8 @@ def create_app() -> FastAPI:
         page = fetch_embedded_page(page_key, enabled_only=True)
         if not page:
             raise HTTPException(status_code=404, detail="嵌入页面不存在或未启用")
-        content_url = f"/admin/embed-content/{page['page_key']}?{urlencode({'v': page['version']})}"
+        entry_file = safe_embedded_resource_path(page.get("entry_file") or "index.html") or "index.html"
+        content_url = f"/admin/embed-content/{page['page_key']}/{entry_file}?{urlencode({'v': page['version']})}"
         return templates.TemplateResponse(
             request,
             "embedded_page.html",

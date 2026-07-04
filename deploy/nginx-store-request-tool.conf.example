@@ -20,7 +20,9 @@ server {
     ssl_certificate /etc/letsencrypt/live/request.example.com/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/request.example.com/privkey.pem;
 
-    client_max_body_size 100M;
+    # Keep this larger than the biggest HTML/ZIP upload. For the default
+    # 100MB embedded ZIP limit, use at least 120M or 150M.
+    client_max_body_size 120M;
 
     add_header X-Frame-Options "SAMEORIGIN" always;
     add_header X-Content-Type-Options "nosniff" always;
