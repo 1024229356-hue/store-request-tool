@@ -1203,6 +1203,7 @@ def test_store_query_filters_by_store_paginates_and_hides_protected_links(tmp_pa
     assert "page=2" in page.text
     assert "/admin/files" not in page.text
     assert "/admin/uploads" not in page.text
+    assert "查看详情" in page.text
     assert "补充资料" in page.text
 
     keyword_page = client.get("/query?store_name=南京门东店&keyword=南京商品1")
@@ -1215,6 +1216,92 @@ def test_store_query_filters_by_store_paginates_and_hides_protected_links(tmp_pa
 
     empty_page = client.get("/query?store_name=山城巷店")
     assert "当前门店暂无符合条件的工单。" in empty_page.text
+
+
+def test_store_ticket_detail_flow_safety_and_return_url(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch)
+    response = submit_ticket_with_image_and_file(
+        client,
+        store_name="南京门东店",
+        description="这是一条门店完整详情问题说明",
+        product_name="详情页测试商品",
+        expected_finish_date=(date.today() + timedelta(days=1)).isoformat(),
+    )
+    assert response.status_code == 200
+
+    logged_in_client(client)
+    admin_post(
+        client,
+        "/admin/ticket/1",
+        data={"status": "待门店补充", "assigned_to": "总部商品", "handler_note": "请补充门店详情证明"},
+        follow_redirects=False,
+    )
+
+    query_path = "/query?store_name=南京门东店&keyword=详情页测试商品"
+    query_page = client.get(query_path)
+    assert query_page.status_code == 200
+    assert "查看详情" in query_page.text
+    assert "/query/ticket/1" in query_page.text
+    assert "return_url=" in query_page.text
+
+    detail_url = (
+        "/query/ticket/1?"
+        + f"store_name={quote('南京门东店')}&return_url={quote(query_path, safe='')}"
+    )
+    detail_page = client.get(detail_url)
+    assert detail_page.status_code == 200
+    assert "门店工单详情" in detail_page.text
+    assert "REQ-" in detail_page.text
+    assert "待门店补充" in detail_page.text
+    assert "请补充门店详情证明" in detail_page.text
+    assert "这是一条门店完整详情问题说明" in detail_page.text
+    assert "时效状态" in detail_page.text
+    assert "补充资料" in detail_page.text
+    assert "图片数量" in detail_page.text
+    assert "文件数量" in detail_page.text
+    assert "暂无补充资料记录。" in detail_page.text
+    assert "/admin/uploads" not in detail_page.text
+    assert "/admin/files" not in detail_page.text
+    assert "删除" not in detail_page.text
+    assert "保存处理结果" not in detail_page.text
+    assert 'name="status"' not in detail_page.text
+
+    missing_store = client.get("/query/ticket/1")
+    assert missing_store.status_code == 400
+    assert "请选择门店后查看工单详情" in missing_store.text
+
+    mismatch = client.get("/query/ticket/1?store_name=南昌万寿宫店")
+    assert mismatch.status_code == 404
+    assert "未找到该门店对应工单" in mismatch.text
+
+    unsafe_return = client.get("/query/ticket/1?store_name=南京门东店&return_url=https%3A%2F%2Fevil.example%2Fquery")
+    assert unsafe_return.status_code == 200
+    assert "evil.example" not in unsafe_return.text
+
+    supplement = client.post(
+        "/query/ticket/1/supplement",
+        data={
+            "store_name": "南京门东店",
+            "submitter": "小李",
+            "note": "补充了现场陈列照片说明",
+            "return_url": "/query/ticket/1?store_name=南京门东店",
+        },
+    )
+    assert supplement.status_code == 200
+    assert "返回工单详情" in supplement.text
+    assert "返回查询结果" in supplement.text
+
+    detail_after_supplement = client.get("/query/ticket/1?store_name=南京门东店")
+    assert detail_after_supplement.status_code == 200
+    assert "补充了现场陈列照片说明" in detail_after_supplement.text
+    assert "小李" in detail_after_supplement.text
+
+    admin_detail = client.get("/admin/ticket/1")
+    assert admin_detail.status_code == 200
+    assert "请补充门店详情证明" in admin_detail.text
+    export_response = client.get("/admin/export")
+    assert export_response.status_code == 200
+    assert export_response.content.startswith(b"PK")
 
 
 def test_store_supplement_records_sources_logs_and_status_transition(tmp_path, monkeypatch):

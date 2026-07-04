@@ -329,6 +329,18 @@ def safe_admin_return_url(value: str) -> str:
     return value
 
 
+def safe_query_return_url(value: str) -> str:
+    value = (value or "").strip()
+    if not value:
+        return "/query"
+    parsed = urlsplit(value)
+    if parsed.scheme or parsed.netloc or value.startswith("//"):
+        return "/query"
+    if parsed.path != "/query" and not parsed.path.startswith("/query/"):
+        return "/query"
+    return value
+
+
 def request_path_with_query(request: Request) -> str:
     return request.url.path + (f"?{request.url.query}" if request.url.query else "")
 
@@ -340,6 +352,38 @@ def build_ticket_detail_url(ticket_id: int, return_url: str = "", **flags: str) 
         params["return_url"] = safe_return_url
     query = urlencode(params)
     return f"/admin/ticket/{ticket_id}" + (f"?{query}" if query else "")
+
+
+def build_store_query_url(store_name: str) -> str:
+    clean_store_name = store_name.strip()
+    if not clean_store_name:
+        return "/query"
+    return "/query?" + urlencode({"store_name": clean_store_name})
+
+
+def store_query_list_return_url(store_name: str, return_url: str = "") -> str:
+    if not return_url.strip():
+        return build_store_query_url(store_name)
+    safe_return_url = safe_query_return_url(return_url)
+    if urlsplit(safe_return_url).path == "/query":
+        return safe_return_url
+    return build_store_query_url(store_name)
+
+
+def build_store_ticket_detail_url(ticket_id: int, store_name: str, return_url: str = "") -> str:
+    params = {"store_name": store_name.strip()}
+    safe_return_url = safe_query_return_url(return_url)
+    if safe_return_url != "/query":
+        params["return_url"] = safe_return_url
+    return f"/query/ticket/{ticket_id}?" + urlencode(params)
+
+
+def build_store_ticket_supplement_url(ticket_id: int, store_name: str, return_url: str = "") -> str:
+    params = {"store_name": store_name.strip()}
+    safe_return_url = safe_query_return_url(return_url)
+    if safe_return_url != "/query":
+        params["return_url"] = safe_return_url
+    return f"/query/ticket/{ticket_id}/supplement?" + urlencode(params)
 
 
 def login_redirect_location(request: Request) -> str:
@@ -1362,6 +1406,73 @@ def fetch_ticket(ticket_id: int) -> Optional[Dict[str, object]]:
     return annotate_ticket_runtime(dict(row)) if row else None
 
 
+def fetch_store_ticket(ticket_id: int, store_name: str) -> Optional[Dict[str, object]]:
+    clean_store_name = store_name.strip()
+    if not clean_store_name:
+        return None
+    with get_connection() as connection:
+        row = connection.execute(
+            "SELECT * FROM tickets WHERE id = ? AND store_name = ?",
+            (ticket_id, clean_store_name),
+        ).fetchone()
+    return annotate_ticket_runtime(dict(row)) if row else None
+
+
+def fetch_store_ticket_supplements(ticket_id: int) -> List[Dict[str, object]]:
+    with get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT id, ticket_id, store_name, submitter, note, image_count, file_count, created_at
+            FROM ticket_supplements
+            WHERE ticket_id = ?
+            ORDER BY created_at DESC, id DESC
+            """,
+            (ticket_id,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def fetch_store_visible_logs(ticket_id: int) -> List[Dict[str, object]]:
+    with get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT id, ticket_id, action, old_status, new_status, note, created_at
+            FROM ticket_logs
+            WHERE ticket_id = ?
+              AND action IN ('update', '门店补充资料')
+            ORDER BY created_at DESC, id DESC
+            """,
+            (ticket_id,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def fetch_ticket_attachment_counts(ticket_id: int) -> Dict[str, object]:
+    with get_connection() as connection:
+        image_row = connection.execute(
+            "SELECT COUNT(*) AS total FROM ticket_images WHERE ticket_id = ?",
+            (ticket_id,),
+        ).fetchone()
+        file_row = connection.execute(
+            "SELECT COUNT(*) AS total FROM ticket_files WHERE ticket_id = ?",
+            (ticket_id,),
+        ).fetchone()
+        supplement_row = connection.execute(
+            """
+            SELECT COUNT(*) AS total, MAX(created_at) AS latest_created_at
+            FROM ticket_supplements
+            WHERE ticket_id = ?
+            """,
+            (ticket_id,),
+        ).fetchone()
+    return {
+        "image_count": int(image_row["total"] or 0),
+        "file_count": int(file_row["total"] or 0),
+        "supplement_count": int(supplement_row["total"] or 0),
+        "latest_supplement_at": supplement_row["latest_created_at"] or "",
+    }
+
+
 def fetch_ticket_images(ticket_id: int) -> List[Dict[str, object]]:
     with get_connection() as connection:
         rows = connection.execute(
@@ -2135,13 +2246,15 @@ def create_app() -> FastAPI:
         request: Request,
         ticket: Dict[str, object],
         store_name: str,
+        return_url: str = "",
         error: str = "",
         success: bool = False,
         status_code: int = 200,
     ) -> HTMLResponse:
         config = load_app_config()
-        query_url = "/query?" + urlencode({"store_name": store_name})
-        supplement_url = f"/query/ticket/{ticket['id']}/supplement?" + urlencode({"store_name": store_name})
+        query_url = store_query_list_return_url(store_name, return_url)
+        detail_url = build_store_ticket_detail_url(int(ticket["id"]), store_name, query_url)
+        supplement_url = build_store_ticket_supplement_url(int(ticket["id"]), store_name, query_url)
         return templates.TemplateResponse(
             request,
             "supplement.html",
@@ -2152,7 +2265,9 @@ def create_app() -> FastAPI:
                 "error": error,
                 "success": success,
                 "query_url": query_url,
+                "detail_url": detail_url,
                 "supplement_url": supplement_url,
+                "return_url": query_url,
                 "image_accept": ",".join(f".{extension}" for extension in config.allowed_image_extensions),
                 "file_accept": ",".join(f".{extension}" for extension in config.allowed_file_extensions),
                 "max_image_count": config.max_image_count,
@@ -2160,6 +2275,37 @@ def create_app() -> FastAPI:
                 "max_file_count": config.max_file_count,
                 "max_file_mb": config.max_file_mb,
                 "max_total_file_upload_mb": config.max_total_file_upload_mb,
+            },
+            status_code=status_code,
+        )
+
+    def render_store_ticket_detail(
+        request: Request,
+        ticket: Dict[str, object],
+        store_name: str,
+        return_url: str = "",
+        status_code: int = 200,
+    ) -> HTMLResponse:
+        query_url = store_query_list_return_url(store_name, return_url)
+        detail_url = build_store_ticket_detail_url(int(ticket["id"]), store_name, query_url)
+        supplement_url = build_store_ticket_supplement_url(int(ticket["id"]), store_name, query_url)
+        supplements = fetch_store_ticket_supplements(int(ticket["id"]))
+        return templates.TemplateResponse(
+            request,
+            "query_detail.html",
+            {
+                "request": request,
+                "ticket": ticket,
+                "store_name": store_name,
+                "query_url": query_url,
+                "detail_url": detail_url,
+                "supplement_url": supplement_url,
+                "attachment_counts": fetch_ticket_attachment_counts(int(ticket["id"])),
+                "supplements": supplements,
+                "logs": fetch_store_visible_logs(int(ticket["id"])),
+                "needs_store_supplement": str(ticket.get("status") or "") == "待门店补充",
+                "handler_note": str(ticket.get("handler_note") or "").strip(),
+                "error": "",
             },
             status_code=status_code,
         )
@@ -2357,8 +2503,10 @@ def create_app() -> FastAPI:
                 status_code=400,
             )
         tickets, pagination = fetch_store_query_page(filters, config, page)
+        return_url = safe_query_return_url(request_path_with_query(request))
         for ticket in tickets:
-            ticket["supplement_url"] = f"/query/ticket/{ticket['id']}/supplement?" + urlencode({"store_name": filters["store_name"]})
+            ticket["detail_url"] = build_store_ticket_detail_url(int(ticket["id"]), filters["store_name"], return_url)
+            ticket["supplement_url"] = build_store_ticket_supplement_url(int(ticket["id"]), filters["store_name"], return_url)
         return render_query_page(request, filters=filters, tickets=tickets, pagination=pagination, searched=True)
 
     @app.post("/query")
@@ -2383,15 +2531,33 @@ def create_app() -> FastAPI:
         query = build_public_query_params(params)
         return RedirectResponse(url="/query" + (f"?{query}" if query else ""), status_code=303)
 
-    @app.get("/query/ticket/{ticket_id}/supplement", response_class=HTMLResponse)
-    def supplement_page(request: Request, ticket_id: int, store_name: str = Query("")) -> HTMLResponse:
-        ticket = fetch_ticket(ticket_id)
-        if not ticket:
-            raise HTTPException(status_code=404, detail="工单不存在")
+    @app.get("/query/ticket/{ticket_id}", response_class=HTMLResponse)
+    def store_ticket_detail(
+        request: Request,
+        ticket_id: int,
+        store_name: str = Query(""),
+        return_url: str = Query(""),
+    ) -> HTMLResponse:
         clean_store_name = store_name.strip()
-        if clean_store_name != str(ticket.get("store_name") or ""):
+        if not clean_store_name:
+            return HTMLResponse("请选择门店后查看工单详情。", status_code=400)
+        ticket = fetch_store_ticket(ticket_id, clean_store_name)
+        if not ticket:
+            raise HTTPException(status_code=404, detail="未找到该门店对应工单")
+        return render_store_ticket_detail(request, ticket, clean_store_name, return_url=return_url)
+
+    @app.get("/query/ticket/{ticket_id}/supplement", response_class=HTMLResponse)
+    def supplement_page(
+        request: Request,
+        ticket_id: int,
+        store_name: str = Query(""),
+        return_url: str = Query(""),
+    ) -> HTMLResponse:
+        clean_store_name = store_name.strip()
+        ticket = fetch_store_ticket(ticket_id, clean_store_name)
+        if not ticket:
             raise HTTPException(status_code=403, detail="门店不匹配")
-        return render_supplement_page(request, ticket, clean_store_name)
+        return render_supplement_page(request, ticket, clean_store_name, return_url=return_url)
 
     @app.post("/query/ticket/{ticket_id}/supplement", response_class=HTMLResponse)
     async def submit_supplement(
@@ -2400,29 +2566,43 @@ def create_app() -> FastAPI:
         store_name: str = Form(""),
         submitter: str = Form(""),
         note: str = Form(""),
+        return_url: str = Form(""),
         images: Optional[List[UploadFile]] = File(None),
         files: Optional[List[UploadFile]] = File(None),
     ) -> HTMLResponse:
-        ticket = fetch_ticket(ticket_id)
-        if not ticket:
-            raise HTTPException(status_code=404, detail="工单不存在")
         clean_store_name = store_name.strip()
-        if clean_store_name != str(ticket.get("store_name") or ""):
+        ticket = fetch_store_ticket(ticket_id, clean_store_name)
+        if not ticket:
             raise HTTPException(status_code=403, detail="门店不匹配")
         clean_submitter = submitter.strip()
         if not clean_submitter:
-            return render_supplement_page(request, ticket, clean_store_name, error="请填写补充人。", status_code=400)
+            return render_supplement_page(
+                request,
+                ticket,
+                clean_store_name,
+                return_url=return_url,
+                error="请填写补充人。",
+                status_code=400,
+            )
         config = load_app_config()
         try:
             prepared_images = await prepare_images(images, config)
             prepared_files = await prepare_files(files, config)
         except ValueError as exc:
-            return render_supplement_page(request, ticket, clean_store_name, error=str(exc), status_code=400)
+            return render_supplement_page(
+                request,
+                ticket,
+                clean_store_name,
+                return_url=return_url,
+                error=str(exc),
+                status_code=400,
+            )
         if not note.strip() and not prepared_images and not prepared_files:
             return render_supplement_page(
                 request,
                 ticket,
                 clean_store_name,
+                return_url=return_url,
                 error="请填写补充说明或上传附件。",
                 status_code=400,
             )
@@ -2434,9 +2614,16 @@ def create_app() -> FastAPI:
             except Exception:
                 pass
         except OSError:
-            return render_supplement_page(request, ticket, clean_store_name, error="附件保存失败，请稍后重试。", status_code=500)
-        updated_ticket = fetch_ticket(ticket_id) or ticket
-        return render_supplement_page(request, updated_ticket, clean_store_name, success=True)
+            return render_supplement_page(
+                request,
+                ticket,
+                clean_store_name,
+                return_url=return_url,
+                error="附件保存失败，请稍后重试。",
+                status_code=500,
+            )
+        updated_ticket = fetch_store_ticket(ticket_id, clean_store_name) or ticket
+        return render_supplement_page(request, updated_ticket, clean_store_name, return_url=return_url, success=True)
 
     @app.get("/admin", response_class=HTMLResponse)
     def admin_page(

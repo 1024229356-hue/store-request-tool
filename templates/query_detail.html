@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>门店工单详情</title>
+  <link rel="stylesheet" href="/static/style.css?v=ui20260704">
+</head>
+<body class="page-submit">
+  <main class="mobile-shell store-detail-shell">
+    <section class="page-header submit-hero store-detail-hero">
+      <p class="eyebrow">门店工单详情</p>
+      <h1>{{ ticket.ticket_no }}</h1>
+      <p class="header-copy">门店：{{ store_name }}，当前进度和总部处理备注如下。</p>
+      <div class="detail-header-badges">
+        <span class="badge status-{{ ticket.status }}">{{ ticket.status }}</span>
+        <span class="badge urgency-{{ ticket.urgency }}">{{ ticket.urgency }}</span>
+        <span class="badge due-{{ ticket.due_status_class }}">{{ ticket.due_status }}</span>
+      </div>
+      <div class="header-actions">
+        <a class="ghost-button compact" href="{{ query_url }}">返回查询结果</a>
+        <a class="primary-button compact" href="{{ supplement_url }}">补充资料</a>
+      </div>
+    </section>
+
+    <section class="form-card highlight-card">
+      <div class="section-heading">
+        <h2>总部处理结果</h2>
+        <p>当前状态和总部备注会随处理进度更新。</p>
+      </div>
+      <dl class="detail-grid">
+        <div><dt>当前状态</dt><dd><span class="badge status-{{ ticket.status }}">{{ ticket.status }}</span></dd></div>
+        <div><dt>处理人</dt><dd>{{ ticket.assigned_to or '暂未分配' }}</dd></div>
+        <div><dt>完成时间</dt><dd>{{ ticket.closed_at or '暂未完成' }}</dd></div>
+      </dl>
+      <div class="note-box">
+        <span>处理备注</span>
+        <p>{{ handler_note or '总部暂未填写处理备注。' }}</p>
+      </div>
+    </section>
+
+    <section class="form-card">
+      <div class="section-heading">
+        <h2>进度概览</h2>
+      </div>
+      <dl class="detail-grid">
+        <div><dt>当前状态</dt><dd>{{ ticket.status }}</dd></div>
+        <div><dt>处理人</dt><dd>{{ ticket.assigned_to or '暂未分配' }}</dd></div>
+        <div><dt>提交时间</dt><dd>{{ ticket.created_at }}</dd></div>
+        <div><dt>期望完成时间</dt><dd>{{ ticket.expected_finish_date or '未设置' }}</dd></div>
+        <div><dt>最后更新时间</dt><dd>{{ ticket.updated_at }}</dd></div>
+        <div><dt>完成时间</dt><dd>{{ ticket.closed_at or '暂未完成' }}</dd></div>
+        <div><dt>时效状态</dt><dd><span class="badge due-{{ ticket.due_status_class }}">{{ ticket.due_status }}</span></dd></div>
+        <div><dt>是否需要门店补充</dt><dd>{{ '是' if needs_store_supplement else '否' }}</dd></div>
+      </dl>
+    </section>
+
+    <section class="form-card">
+      <div class="section-heading">
+        <h2>提交信息</h2>
+      </div>
+      <dl class="detail-grid">
+        <div><dt>门店</dt><dd>{{ ticket.store_name }}</dd></div>
+        <div><dt>提报人</dt><dd>{{ ticket.submitter }}</dd></div>
+        <div><dt>需求类型</dt><dd>{{ ticket.request_type }}</dd></div>
+        <div><dt>品牌</dt><dd>{{ ticket.brand or '' }}</dd></div>
+        <div><dt>商品名称</dt><dd>{{ ticket.product_name or '' }}</dd></div>
+        <div><dt>规格条码</dt><dd>{{ ticket.sku_barcode or '' }}</dd></div>
+        <div><dt>数量</dt><dd>{{ ticket.quantity or '' }}</dd></div>
+      </dl>
+      <div class="note-box plain-note">
+        <span>问题说明</span>
+        <p>{{ ticket.description }}</p>
+      </div>
+    </section>
+
+    <section class="form-card">
+      <div class="section-heading">
+        <h2>附件概览</h2>
+        <p>门店端仅展示附件数量，具体附件处理请联系总部。</p>
+      </div>
+      <dl class="detail-grid">
+        <div><dt>图片数量</dt><dd>{{ attachment_counts.image_count }}</dd></div>
+        <div><dt>文件数量</dt><dd>{{ attachment_counts.file_count }}</dd></div>
+        <div><dt>门店补充次数</dt><dd>{{ attachment_counts.supplement_count }}</dd></div>
+        <div><dt>最近补充时间</dt><dd>{{ attachment_counts.latest_supplement_at or '暂无' }}</dd></div>
+      </dl>
+    </section>
+
+    <section class="form-card">
+      <div class="section-heading">
+        <h2>补充记录</h2>
+      </div>
+      {% if supplements %}
+      <div class="record-list">
+        {% for item in supplements %}
+        <article class="record-item">
+          <div class="record-topline">
+            <strong>{{ item.created_at }}</strong>
+            <span>{{ item.submitter }}</span>
+          </div>
+          <p>{{ item.note or '未填写补充说明。' }}</p>
+          <div class="attachment-counts">
+            <span class="attachment-badge">新增图片 {{ item.image_count or 0 }}</span>
+            <span class="attachment-badge">新增文件 {{ item.file_count or 0 }}</span>
+          </div>
+        </article>
+        {% endfor %}
+      </div>
+      {% else %}
+      <p class="empty-note">暂无补充资料记录。</p>
+      {% endif %}
+    </section>
+
+    <section class="form-card">
+      <div class="section-heading">
+        <h2>处理日志</h2>
+      </div>
+      <div class="timeline-log store-timeline">
+        <article class="timeline-item">
+          <div class="timeline-dot"></div>
+          <div class="timeline-content">
+            <div class="timeline-topline">
+              <strong>提交工单</strong>
+              <span>{{ ticket.created_at }}</span>
+            </div>
+            <p>{{ ticket.submitter }} 提交了 {{ ticket.request_type }}。</p>
+          </div>
+        </article>
+        {% for log in logs %}
+        <article class="timeline-item">
+          <div class="timeline-dot"></div>
+          <div class="timeline-content">
+            <div class="timeline-topline">
+              <strong>{{ '状态变更' if log.action == 'update' else log.action }}</strong>
+              <span>{{ log.created_at }}</span>
+            </div>
+            {% if log.old_status or log.new_status %}
+            <p>状态：{{ log.old_status or '未设置' }} → {{ log.new_status or '未设置' }}</p>
+            {% endif %}
+            {% if log.note %}
+            <p>{{ log.note }}</p>
+            {% endif %}
+          </div>
+        </article>
+        {% endfor %}
+      </div>
+    </section>
+  </main>
+</body>
+</html>

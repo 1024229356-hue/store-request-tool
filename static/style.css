@@ -531,6 +531,14 @@ a:focus-visible {
   padding: 22px 14px 42px;
 }
 
+.store-detail-shell {
+  width: min(100%, 980px);
+}
+
+.store-detail-hero h1 {
+  overflow-wrap: anywhere;
+}
+
 .page-login {
   display: grid;
   align-items: start;
@@ -988,6 +996,13 @@ a:focus-visible {
   max-width: 118px;
 }
 
+.row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 180px;
+}
+
 .attachment-badge {
   display: inline-flex;
   align-items: center;
@@ -1185,6 +1200,78 @@ a:focus-visible {
   border-radius: var(--radius-sm);
   background: #fff;
   padding: 10px;
+}
+
+.highlight-card {
+  border-color: #bad0e5;
+  box-shadow: var(--shadow-card);
+}
+
+.note-box {
+  margin-top: 12px;
+  border: 1px solid #bad0e5;
+  border-radius: var(--radius-lg);
+  background: #f4f8fc;
+  padding: 14px;
+}
+
+.note-box span {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--primary-hover);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.note-box p {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.plain-note {
+  border-color: var(--line);
+  background: var(--panel-soft);
+}
+
+.store-detail-shell .attachment-counts {
+  max-width: none;
+  gap: 8px;
+}
+
+.record-list {
+  display: grid;
+  gap: 10px;
+}
+
+.record-item {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--panel-soft);
+  padding: 12px;
+}
+
+.record-topline {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.record-topline strong {
+  color: var(--text);
+}
+
+.record-topline span,
+.record-item p {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.record-item p {
+  margin-bottom: 8px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 dt {

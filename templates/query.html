@@ -112,7 +112,12 @@
                 <span class="attachment-badge">文件 {{ ticket.file_count or 0 }}</span>
               </div>
             </td>
-            <td><a class="ghost-button compact" href="{{ ticket.supplement_url }}">补充资料</a></td>
+            <td>
+              <div class="row-actions">
+                <a class="primary-button compact" href="{{ ticket.detail_url }}">查看详情</a>
+                <a class="ghost-button compact" href="{{ ticket.supplement_url }}">补充资料</a>
+              </div>
+            </td>
           </tr>
           {% else %}
           <tr>
