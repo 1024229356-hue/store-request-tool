@@ -520,6 +520,34 @@ def init_db() -> None:
             )
             """
         )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS notification_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_type TEXT NOT NULL,
+                ticket_id INTEGER,
+                ticket_no TEXT,
+                store_name TEXT,
+                title TEXT NOT NULL,
+                content TEXT,
+                severity TEXT NOT NULL DEFAULT 'info',
+                created_by TEXT,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS notification_reads (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_id INTEGER NOT NULL,
+                username TEXT NOT NULL,
+                read_at TEXT NOT NULL,
+                UNIQUE(event_id, username),
+                FOREIGN KEY (event_id) REFERENCES notification_events(id) ON DELETE CASCADE
+            )
+            """
+        )
         connection.execute("CREATE INDEX IF NOT EXISTS idx_tickets_created_at ON tickets(created_at)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_tickets_status ON tickets(status)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_tickets_assigned_to ON tickets(assigned_to)")
@@ -527,6 +555,9 @@ def init_db() -> None:
         connection.execute("CREATE INDEX IF NOT EXISTS idx_ticket_files_ticket_id ON ticket_files(ticket_id)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_ticket_logs_ticket_id ON ticket_logs(ticket_id)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_ticket_supplements_ticket_id ON ticket_supplements(ticket_id)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_notification_events_created_at ON notification_events(created_at)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_notification_events_ticket_id ON notification_events(ticket_id)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_notification_reads_username ON notification_reads(username)")
 
 
 def clean_string_list(value: object, default: List[str], allow_empty: bool = False) -> List[str]:
@@ -1482,6 +1513,179 @@ def add_ticket_attachments(
     return image_count, file_count
 
 
+def notification_severity_for_urgency(urgency: str) -> str:
+    if urgency == "当天必须处理":
+        return "urgent"
+    if urgency == "加急":
+        return "warning"
+    return "info"
+
+
+def create_notification_event(
+    event_type: str,
+    ticket_id: Optional[int],
+    ticket_no: str,
+    store_name: str,
+    title: str,
+    content: str,
+    severity: str = "info",
+    created_by: str = "",
+) -> int:
+    severity_value = severity if severity in {"info", "warning", "urgent"} else "info"
+    with get_connection() as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO notification_events (
+                event_type, ticket_id, ticket_no, store_name, title, content,
+                severity, created_by, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event_type,
+                ticket_id,
+                ticket_no,
+                store_name,
+                title,
+                content,
+                severity_value,
+                created_by,
+                now_text(),
+            ),
+        )
+        return int(cursor.lastrowid)
+
+
+def create_new_ticket_notification(ticket: Dict[str, object]) -> None:
+    create_notification_event(
+        event_type="new_ticket",
+        ticket_id=int(ticket["id"]),
+        ticket_no=str(ticket.get("ticket_no") or ""),
+        store_name=str(ticket.get("store_name") or ""),
+        title="新工单",
+        content=f"{ticket.get('store_name')} 提交了 {ticket.get('request_type')} 工单",
+        severity=notification_severity_for_urgency(str(ticket.get("urgency") or "")),
+        created_by=f"门店:{ticket.get('submitter') or ''}",
+    )
+
+
+def create_store_supplement_notification(ticket: Dict[str, object], submitter: str) -> None:
+    create_notification_event(
+        event_type="store_supplement",
+        ticket_id=int(ticket["id"]),
+        ticket_no=str(ticket.get("ticket_no") or ""),
+        store_name=str(ticket.get("store_name") or ""),
+        title="门店补充资料",
+        content=f"{ticket.get('store_name')} 为工单 {ticket.get('ticket_no')} 补充了资料",
+        severity="warning",
+        created_by=f"门店:{submitter}",
+    )
+
+
+def create_need_store_supplement_notification(ticket: Dict[str, object], operator: str) -> None:
+    create_notification_event(
+        event_type="need_store_supplement",
+        ticket_id=int(ticket["id"]),
+        ticket_no=str(ticket.get("ticket_no") or ""),
+        store_name=str(ticket.get("store_name") or ""),
+        title="待门店补充",
+        content=f"工单 {ticket.get('ticket_no')} 已标记为待门店补充",
+        severity="warning",
+        created_by=operator,
+    )
+
+
+def fetch_notifications(
+    username: str,
+    after_id: int = 0,
+    limit: int = 20,
+    unread_only: bool = False,
+) -> List[Dict[str, object]]:
+    clean_username = username.strip()
+    clean_limit = min(max(int(limit or 20), 1), 100)
+    clauses: List[str] = []
+    params: List[object] = [clean_username]
+    if after_id > 0:
+        clauses.append("events.id > ?")
+        params.append(after_id)
+    if unread_only:
+        clauses.append("reads.id IS NULL")
+    where_sql = "WHERE " + " AND ".join(clauses) if clauses else ""
+    params.append(clean_limit)
+    with get_connection() as connection:
+        rows = connection.execute(
+            f"""
+            SELECT
+                events.id, events.event_type, events.ticket_id, events.ticket_no,
+                events.store_name, events.title, events.content, events.severity,
+                events.created_by, events.created_at,
+                CASE WHEN reads.id IS NULL THEN 0 ELSE 1 END AS is_read
+            FROM notification_events AS events
+            LEFT JOIN notification_reads AS reads
+                ON reads.event_id = events.id AND reads.username = ?
+            {where_sql}
+            ORDER BY events.id DESC
+            LIMIT ?
+            """,
+            params,
+        ).fetchall()
+    notifications = [dict(row) for row in rows]
+    for notification in notifications:
+        ticket_id = notification.get("ticket_id")
+        notification["is_read"] = bool(notification.get("is_read"))
+        notification["detail_url"] = f"/admin/ticket/{ticket_id}" if ticket_id else ""
+    return notifications
+
+
+def count_unread_notifications(username: str) -> int:
+    with get_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT COUNT(*) AS unread_count
+            FROM notification_events AS events
+            LEFT JOIN notification_reads AS reads
+                ON reads.event_id = events.id AND reads.username = ?
+            WHERE reads.id IS NULL
+            """,
+            (username.strip(),),
+        ).fetchone()
+    return int(row["unread_count"] or 0)
+
+
+def latest_notification_id() -> int:
+    with get_connection() as connection:
+        row = connection.execute("SELECT MAX(id) AS latest_id FROM notification_events").fetchone()
+    return int(row["latest_id"] or 0)
+
+
+def mark_notification_read(username: str, event_id: int) -> bool:
+    timestamp = now_text()
+    with get_connection() as connection:
+        event = connection.execute("SELECT id FROM notification_events WHERE id = ?", (event_id,)).fetchone()
+        if not event:
+            return False
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO notification_reads (event_id, username, read_at)
+            VALUES (?, ?, ?)
+            """,
+            (event_id, username.strip(), timestamp),
+        )
+    return True
+
+
+def mark_all_notifications_read(username: str) -> None:
+    timestamp = now_text()
+    with get_connection() as connection:
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO notification_reads (event_id, username, read_at)
+            SELECT id, ?, ? FROM notification_events
+            """,
+            (username.strip(), timestamp),
+        )
+
+
 def create_store_supplement(
     ticket: Dict[str, object],
     submitter: str,
@@ -2075,7 +2279,7 @@ def create_app() -> FastAPI:
         timestamp = now_text()
         quantity_value = int(quantity.strip()) if quantity.strip() else None
         try:
-            _ticket_id, ticket_no = create_ticket_with_images(
+            ticket_id, ticket_no = create_ticket_with_images(
                 {
                     "created_at": timestamp,
                     "store_name": store_name.strip(),
@@ -2093,6 +2297,12 @@ def create_app() -> FastAPI:
                 config,
                 prepared_files,
             )
+            try:
+                created_ticket = fetch_ticket(ticket_id)
+                if created_ticket:
+                    create_new_ticket_notification(created_ticket)
+            except Exception:
+                pass
         except RuntimeError as exc:
             return render_submit_form(request, status_code=500, error=str(exc), values=form_values)
         except OSError:
@@ -2218,6 +2428,11 @@ def create_app() -> FastAPI:
             )
         try:
             create_store_supplement(ticket, clean_submitter, note, prepared_images, prepared_files, config)
+            try:
+                updated_for_notification = fetch_ticket(ticket_id) or ticket
+                create_store_supplement_notification(updated_for_notification, clean_submitter)
+            except Exception:
+                pass
         except OSError:
             return render_supplement_page(request, ticket, clean_store_name, error="附件保存失败，请稍后重试。", status_code=500)
         updated_ticket = fetch_ticket(ticket_id) or ticket
@@ -2321,6 +2536,53 @@ def create_app() -> FastAPI:
             },
         )
 
+    @app.get("/admin/api/notifications")
+    def notifications_api(
+        admin: str = Depends(require_admin),
+        after_id: int = Query(0),
+        limit: int = Query(20),
+        unread_only: bool = Query(False),
+    ) -> Dict[str, object]:
+        notifications = fetch_notifications(
+            admin,
+            after_id=max(after_id, 0),
+            limit=limit,
+            unread_only=unread_only,
+        )
+        return {
+            "unread_count": count_unread_notifications(admin),
+            "latest_id": latest_notification_id(),
+            "notifications": notifications,
+        }
+
+    @app.post("/admin/api/notifications/{event_id}/read")
+    def mark_notification_read_api(
+        request: Request,
+        event_id: int,
+        admin: str = Depends(require_admin),
+        csrf_token: str = Form(""),
+    ) -> Dict[str, object]:
+        require_admin_csrf(request, csrf_token)
+        if not mark_notification_read(admin, event_id):
+            raise HTTPException(status_code=404, detail="消息不存在")
+        return {
+            "ok": True,
+            "unread_count": count_unread_notifications(admin),
+        }
+
+    @app.post("/admin/api/notifications/read-all")
+    def mark_all_notifications_read_api(
+        request: Request,
+        admin: str = Depends(require_admin),
+        csrf_token: str = Form(""),
+    ) -> Dict[str, object]:
+        require_admin_csrf(request, csrf_token)
+        mark_all_notifications_read(admin)
+        return {
+            "ok": True,
+            "unread_count": count_unread_notifications(admin),
+        }
+
     @app.get("/admin/ticket/{ticket_id}", response_class=HTMLResponse)
     def ticket_detail(
         request: Request,
@@ -2361,6 +2623,8 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail="处理人不正确")
         handler_note = handler_note.strip()
         timestamp = now_text()
+        should_notify_need_supplement = False
+        notification_ticket: Optional[Dict[str, object]] = None
         with get_connection() as connection:
             old_row = connection.execute("SELECT * FROM tickets WHERE id = ?", (ticket_id,)).fetchone()
             if not old_row:
@@ -2405,6 +2669,17 @@ def create_app() -> FastAPI:
                         timestamp,
                     ),
                 )
+                should_notify_need_supplement = old_status != status and status == "待门店补充"
+                if should_notify_need_supplement:
+                    notification_ticket = dict(old_ticket)
+                    notification_ticket["status"] = status
+                    notification_ticket["updated_at"] = timestamp
+                    notification_ticket["assigned_to"] = assigned_to
+        if should_notify_need_supplement and notification_ticket:
+            try:
+                create_need_store_supplement_notification(notification_ticket, admin)
+            except Exception:
+                pass
         return RedirectResponse(url=build_ticket_detail_url(ticket_id, return_url, saved="1"), status_code=303)
 
     @app.post("/admin/ticket/{ticket_id}/attachments", response_class=HTMLResponse)

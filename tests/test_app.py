@@ -1415,6 +1415,126 @@ def test_session_security_secure_cookie_expiry_csrf_and_env_example(tmp_path, mo
     assert "SESSION_COOKIE_SECURE=false" in env_example
 
 
+def test_notifications_for_new_tickets_api_reads_and_per_user_state(tmp_path, monkeypatch):
+    client, main = build_client(
+        tmp_path,
+        monkeypatch,
+        admin_users="admin:123456,caigou:123456",
+    )
+    normal = submit_ticket(client, urgency="普通", request_type="建单需求", description="普通提醒工单")
+    warning = submit_ticket(client, urgency="加急", request_type="审单需求", description="加急提醒工单")
+    urgent = submit_ticket(client, urgency="当天必须处理", request_type="商品异常", description="紧急提醒工单")
+    assert normal.status_code == 200
+    assert warning.status_code == 200
+    assert urgent.status_code == 200
+
+    events = rows_for(tmp_path, "notification_events")
+    assert [event["event_type"] for event in events] == ["new_ticket", "new_ticket", "new_ticket"]
+    assert [event["severity"] for event in events] == ["info", "warning", "urgent"]
+    assert events[-1]["title"] == "新工单"
+    assert "商品异常" in events[-1]["content"]
+
+    unauthenticated = TestClient(main.app).get("/admin/api/notifications", follow_redirects=False)
+    assert unauthenticated.status_code == 401
+
+    assert_login_success(login_admin(client, "admin", "123456"))
+    api_page = client.get("/admin/api/notifications?limit=2")
+    assert api_page.status_code == 200
+    payload = api_page.json()
+    assert payload["unread_count"] == 3
+    assert payload["latest_id"] == events[-1]["id"]
+    assert len(payload["notifications"]) == 2
+    assert payload["notifications"][0]["id"] == events[-1]["id"]
+    assert payload["notifications"][0]["is_read"] is False
+    assert payload["notifications"][0]["detail_url"] == "/admin/ticket/3"
+
+    missing_csrf = client.post(f"/admin/api/notifications/{events[-1]['id']}/read")
+    assert missing_csrf.status_code == 403
+
+    csrf_token = csrf_token_for(client)
+    mark_one = client.post(
+        f"/admin/api/notifications/{events[-1]['id']}/read",
+        data={"csrf_token": csrf_token},
+    )
+    assert mark_one.status_code == 200
+    assert mark_one.json()["unread_count"] == 2
+    assert client.get("/admin/api/notifications?unread_only=true").json()["unread_count"] == 2
+
+    caigou_client = TestClient(main.app)
+    assert_login_success(login_admin(caigou_client, "caigou", "123456"))
+    caigou_payload = caigou_client.get("/admin/api/notifications").json()
+    assert caigou_payload["unread_count"] == 3
+
+    read_all = client.post("/admin/api/notifications/read-all", data={"csrf_token": csrf_token})
+    assert read_all.status_code == 200
+    assert read_all.json()["unread_count"] == 0
+    assert caigou_client.get("/admin/api/notifications").json()["unread_count"] == 3
+
+
+def test_notifications_for_status_transition_and_store_supplement(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch)
+    submit_ticket(client, store_name="南京门东店", description="状态提醒工单")
+    logged_in_client(client)
+    admin_post(
+        client,
+        "/admin/ticket/1",
+        data={"status": "待门店补充", "assigned_to": "总部商品", "handler_note": "请补充"},
+        follow_redirects=False,
+    )
+    after_status = rows_for(tmp_path, "notification_events")
+    assert [event["event_type"] for event in after_status] == ["new_ticket", "need_store_supplement"]
+    assert after_status[-1]["title"] == "待门店补充"
+    assert after_status[-1]["severity"] == "warning"
+
+    admin_post(
+        client,
+        "/admin/ticket/1",
+        data={"status": "待门店补充", "assigned_to": "总部商品", "handler_note": "备注变化但状态不变"},
+        follow_redirects=False,
+    )
+    assert len(rows_for(tmp_path, "notification_events")) == 2
+
+    supplement = client.post(
+        "/query/ticket/1/supplement",
+        data={"store_name": "南京门东店", "submitter": "小李", "note": "补充了资料"},
+    )
+    assert supplement.status_code == 200
+    events = rows_for(tmp_path, "notification_events")
+    assert [event["event_type"] for event in events] == [
+        "new_ticket",
+        "need_store_supplement",
+        "store_supplement",
+    ]
+    assert events[-1]["title"] == "门店补充资料"
+    assert events[-1]["severity"] == "warning"
+    assert events[-1]["created_by"] == "门店:小李"
+
+
+def test_notification_ui_hooks_are_rendered_on_admin_pages(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch)
+    submit_ticket(client, description="页面消息入口工单")
+    logged_in_client(client)
+
+    for path in ("/admin", "/admin/ticket/1", "/admin/dashboard"):
+        page = client.get(path)
+        assert page.status_code == 200
+        assert "data-notification-root" in page.text
+        assert "data-notification-count" in page.text
+        assert "data-notification-list" in page.text
+        assert "开启桌面提醒" in page.text
+        assert "消息" in page.text
+        assert "/static/app.js?v=ui20260704" in page.text
+
+    script = (PROJECT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+    assert "/admin/api/notifications" in script
+    assert "setInterval" in script
+    assert "Notification.requestPermission" in script
+    assert "showNotificationToast" in script
+    assert "data-notification-root" in script
+    style = (PROJECT_DIR / "static" / "style.css").read_text(encoding="utf-8")
+    assert ".notification-badge[hidden]" in style
+
+
 def test_nginx_https_example_and_navigation_files_are_present(tmp_path, monkeypatch):
     nginx = PROJECT_DIR / "deploy" / "nginx-store-request-tool.conf.example"
     assert nginx.exists()

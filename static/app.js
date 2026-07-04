@@ -14,11 +14,22 @@ document.addEventListener("DOMContentLoaded", () => {
   const copyTicketButtons = document.querySelectorAll("[data-copy-ticket]");
   const requestTypeSelect = document.querySelector("[data-request-type-select]");
   const requestTypeHint = document.querySelector("[data-request-type-hint]");
+  const notificationRoot = document.querySelector("[data-notification-root]");
+  const notificationToggle = document.querySelector("[data-notification-toggle]");
+  const notificationPanel = document.querySelector("[data-notification-panel]");
+  const notificationCount = document.querySelector("[data-notification-count]");
+  const notificationList = document.querySelector("[data-notification-list]");
+  const notificationReadAll = document.querySelector("[data-notification-read-all]");
+  const notificationDesktopButton = document.querySelector("[data-notification-enable-desktop]");
+  const notificationToasts = document.querySelector("[data-notification-toasts]");
 
   let selectedImages = [];
   let selectedFiles = [];
   let selectedExtraImages = [];
   let selectedExtraFiles = [];
+  let notificationLatestId = 0;
+  let notificationInitialLoaded = false;
+  let notificationDesktopEnabled = window.localStorage.getItem("storeRequestDesktopNotifications") === "1";
 
   function formatFileSize(bytes) {
     if (bytes >= 1024 * 1024) {
@@ -90,6 +101,245 @@ document.addEventListener("DOMContentLoaded", () => {
     }
     const selectedRule = rules[requestTypeSelect.value] || {};
     requestTypeHint.textContent = selectedRule.description_hint || "不同需求类型可能要求补充品牌、商品、数量或附件。";
+  }
+
+  function notificationSeverityLabel(severity) {
+    if (severity === "urgent") {
+      return "紧急";
+    }
+    if (severity === "warning") {
+      return "提醒";
+    }
+    return "消息";
+  }
+
+  function notificationPost(url) {
+    const formData = new FormData();
+    formData.append("csrf_token", notificationRoot ? notificationRoot.dataset.csrfToken || "" : "");
+    return fetch(url, {
+      method: "POST",
+      body: formData,
+      credentials: "same-origin",
+    });
+  }
+
+  async function fetchNotificationPayload(params = {}) {
+    const query = new URLSearchParams();
+    Object.entries(params).forEach(([key, value]) => {
+      if (value !== undefined && value !== null && value !== "") {
+        query.set(key, String(value));
+      }
+    });
+    const response = await fetch(`/admin/api/notifications${query.toString() ? `?${query}` : ""}`, {
+      credentials: "same-origin",
+    });
+    if (!response.ok) {
+      throw new Error("notification fetch failed");
+    }
+    return response.json();
+  }
+
+  function updateNotificationCount(count) {
+    if (!notificationCount) {
+      return;
+    }
+    const value = Number(count || 0);
+    notificationCount.textContent = value > 99 ? "99+" : String(value);
+    notificationCount.hidden = value <= 0;
+  }
+
+  function createNotificationItem(notification) {
+    const item = document.createElement("article");
+    item.className = `notification-item ${notification.is_read ? "read" : "unread"}`;
+    item.dataset.notificationId = String(notification.id);
+
+    const top = document.createElement("div");
+    top.className = "notification-item-top";
+
+    const title = document.createElement("div");
+    title.className = "notification-item-title";
+    title.textContent = notification.title || "消息";
+    top.appendChild(title);
+
+    const severity = document.createElement("span");
+    severity.className = `notification-severity ${notification.severity || "info"}`;
+    severity.textContent = notificationSeverityLabel(notification.severity || "info");
+    top.appendChild(severity);
+    item.appendChild(top);
+
+    const content = document.createElement("p");
+    content.className = "notification-item-content";
+    content.textContent = notification.content || "";
+    item.appendChild(content);
+
+    const meta = document.createElement("p");
+    meta.className = "notification-item-meta";
+    meta.textContent = `${notification.store_name || "-"} · ${notification.ticket_no || "-"} · ${notification.created_at || ""}`;
+    item.appendChild(meta);
+
+    const actions = document.createElement("div");
+    actions.className = "notification-item-actions";
+    if (notification.detail_url) {
+      const detail = document.createElement("a");
+      detail.className = "ghost-button compact";
+      detail.href = notification.detail_url;
+      detail.textContent = "查看工单";
+      actions.appendChild(detail);
+    }
+    const read = document.createElement("button");
+    read.className = "ghost-button compact";
+    read.type = "button";
+    read.dataset.notificationRead = String(notification.id);
+    read.disabled = Boolean(notification.is_read);
+    read.textContent = notification.is_read ? "已读" : "标记已读";
+    actions.appendChild(read);
+    item.appendChild(actions);
+    return item;
+  }
+
+  function renderNotificationList(notifications) {
+    if (!notificationList) {
+      return;
+    }
+    notificationList.innerHTML = "";
+    if (!notifications || notifications.length === 0) {
+      const empty = document.createElement("p");
+      empty.className = "empty-note";
+      empty.textContent = "暂无消息。";
+      notificationList.appendChild(empty);
+      return;
+    }
+    notifications.forEach((notification) => {
+      notificationList.appendChild(createNotificationItem(notification));
+    });
+  }
+
+  function scheduleToastRemoval(toast) {
+    const timer = window.setTimeout(() => {
+      if (toast.dataset.hovering !== "1") {
+        toast.remove();
+      }
+    }, 8000);
+    toast.dataset.timer = String(timer);
+  }
+
+  function showBrowserNotification(notification) {
+    if (!notificationDesktopEnabled || !("Notification" in window) || Notification.permission !== "granted") {
+      return;
+    }
+    const desktopNotification = new Notification(notification.title || "消息提醒", {
+      body: notification.content || "",
+      tag: `store-request-${notification.id}`,
+    });
+    desktopNotification.onclick = () => {
+      window.focus();
+      if (notification.detail_url) {
+        window.location.href = notification.detail_url;
+      }
+    };
+  }
+
+  function showNotificationToast(notification) {
+    if (!notificationToasts) {
+      return;
+    }
+    while (notificationToasts.children.length >= 3) {
+      notificationToasts.firstElementChild.remove();
+    }
+    const toast = document.createElement("article");
+    toast.className = `notification-toast ${notification.severity || "info"}`;
+
+    const top = document.createElement("div");
+    top.className = "notification-toast-top";
+    const title = document.createElement("div");
+    title.className = "notification-toast-title";
+    title.textContent = notification.title || "消息提醒";
+    top.appendChild(title);
+    const close = document.createElement("button");
+    close.className = "ghost-button compact notification-toast-close";
+    close.type = "button";
+    close.textContent = "关闭";
+    close.addEventListener("click", () => toast.remove());
+    top.appendChild(close);
+    toast.appendChild(top);
+
+    const content = document.createElement("p");
+    content.className = "notification-item-content";
+    content.textContent = notification.content || "";
+    toast.appendChild(content);
+
+    const meta = document.createElement("p");
+    meta.className = "notification-item-meta";
+    meta.textContent = `${notification.store_name || "-"} · ${notification.ticket_no || "-"} · ${notification.created_at || ""}`;
+    toast.appendChild(meta);
+
+    const actions = document.createElement("div");
+    actions.className = "notification-item-actions";
+    if (notification.detail_url) {
+      const detail = document.createElement("a");
+      detail.className = "ghost-button compact";
+      detail.href = notification.detail_url;
+      detail.textContent = "查看工单";
+      actions.appendChild(detail);
+    }
+    const read = document.createElement("button");
+    read.className = "ghost-button compact";
+    read.type = "button";
+    read.textContent = "标记已读";
+    read.addEventListener("click", async () => {
+      await notificationPost(`/admin/api/notifications/${notification.id}/read`);
+      toast.remove();
+      refreshNotifications();
+    });
+    actions.appendChild(read);
+    toast.appendChild(actions);
+
+    toast.addEventListener("mouseenter", () => {
+      toast.dataset.hovering = "1";
+      window.clearTimeout(Number(toast.dataset.timer || 0));
+    });
+    toast.addEventListener("mouseleave", () => {
+      toast.dataset.hovering = "0";
+      scheduleToastRemoval(toast);
+    });
+    notificationToasts.appendChild(toast);
+    scheduleToastRemoval(toast);
+    showBrowserNotification(notification);
+  }
+
+  async function refreshNotifications() {
+    if (!notificationRoot) {
+      return;
+    }
+    try {
+      const payload = await fetchNotificationPayload({ limit: 20 });
+      updateNotificationCount(payload.unread_count);
+      renderNotificationList(payload.notifications || []);
+      notificationLatestId = Math.max(notificationLatestId, Number(payload.latest_id || 0));
+      notificationInitialLoaded = true;
+    } catch (_error) {
+      // Keep the admin page usable if the lightweight notification endpoint is unavailable.
+    }
+  }
+
+  async function pollNotifications() {
+    if (!notificationRoot || !notificationInitialLoaded) {
+      return;
+    }
+    try {
+      const payload = await fetchNotificationPayload({ after_id: notificationLatestId, limit: 20 });
+      updateNotificationCount(payload.unread_count);
+      const notifications = payload.notifications || [];
+      if (notifications.length > 0) {
+        notifications.slice().reverse().forEach(showNotificationToast);
+        notificationLatestId = Math.max(notificationLatestId, Number(payload.latest_id || 0));
+        await refreshNotifications();
+      } else {
+        notificationLatestId = Math.max(notificationLatestId, Number(payload.latest_id || 0));
+      }
+    } catch (_error) {
+      // Polling is best-effort and should not disturb normal admin work.
+    }
   }
 
   async function copyText(text) {
@@ -287,6 +537,64 @@ document.addEventListener("DOMContentLoaded", () => {
   if (requestTypeSelect && requestTypeHint) {
     requestTypeSelect.addEventListener("change", updateRequestTypeHint);
     updateRequestTypeHint();
+  }
+
+  if (notificationRoot) {
+    if (notificationDesktopButton && "Notification" in window) {
+      notificationDesktopButton.hidden = false;
+      if (Notification.permission === "granted" && notificationDesktopEnabled) {
+        notificationDesktopButton.textContent = "桌面提醒已开启";
+        notificationDesktopButton.disabled = true;
+      }
+      notificationDesktopButton.addEventListener("click", async () => {
+        const permission = await Notification.requestPermission();
+        if (permission === "granted") {
+          notificationDesktopEnabled = true;
+          window.localStorage.setItem("storeRequestDesktopNotifications", "1");
+          notificationDesktopButton.textContent = "桌面提醒已开启";
+          notificationDesktopButton.disabled = true;
+        }
+      });
+    }
+
+    if (notificationToggle && notificationPanel) {
+      notificationToggle.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        notificationPanel.hidden = !notificationPanel.hidden;
+        if (!notificationPanel.hidden) {
+          refreshNotifications();
+        }
+      });
+      document.addEventListener("click", (event) => {
+        if (!notificationRoot.contains(event.target)) {
+          notificationPanel.hidden = true;
+        }
+      });
+    }
+
+    if (notificationList) {
+      notificationList.addEventListener("click", async (event) => {
+        const readButton = event.target.closest("[data-notification-read]");
+        if (!readButton) {
+          return;
+        }
+        event.preventDefault();
+        await notificationPost(`/admin/api/notifications/${readButton.dataset.notificationRead}/read`);
+        await refreshNotifications();
+      });
+    }
+
+    if (notificationReadAll) {
+      notificationReadAll.addEventListener("click", async (event) => {
+        event.preventDefault();
+        await notificationPost("/admin/api/notifications/read-all");
+        await refreshNotifications();
+      });
+    }
+
+    refreshNotifications();
+    setInterval(pollNotifications, 15000);
   }
 
   copyTicketButtons.forEach((button) => {

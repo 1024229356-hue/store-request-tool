@@ -19,6 +19,24 @@
     </div>
     <div class="admin-actions">
       <span class="admin-user">当前账号：{{ admin_user }}</span>
+      <div class="notification-root" data-notification-root data-csrf-token="{{ csrf_token }}">
+        <button class="ghost-button compact notification-button" type="button" data-notification-toggle>
+          消息 <span class="notification-badge" data-notification-count hidden>0</span>
+        </button>
+        <div class="notification-panel" data-notification-panel hidden>
+          <div class="notification-panel-head">
+            <strong>消息提醒</strong>
+            <div class="notification-panel-actions">
+              <button class="ghost-button compact" type="button" data-notification-enable-desktop hidden>开启桌面提醒</button>
+              <button class="ghost-button compact" type="button" data-notification-read-all>全部已读</button>
+            </div>
+          </div>
+          <div class="notification-list" data-notification-list>
+            <p class="empty-note">暂无消息。</p>
+          </div>
+        </div>
+        <div class="notification-toast-area" data-notification-toasts></div>
+      </div>
       <a class="ghost-button compact" href="/admin">工单列表</a>
       <a class="ghost-button compact" href="/admin/dashboard">统计看板</a>
       <a class="ghost-button" href="{{ return_url }}">返回列表</a>
@@ -237,5 +255,6 @@
       </div>
     </section>
   </main>
+  <script src="/static/app.js?v=ui20260704"></script>
 </body>
 </html>
