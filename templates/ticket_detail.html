@@ -119,6 +119,166 @@
       <p class="description-box">{{ ticket.description }}</p>
     </section>
 
+    <section class="detail-section work-card collaboration-section">
+      <div class="section-heading">
+        <h2>协作人区域</h2>
+        <p>记录参与处理该工单的总部、门店或外部协作方。</p>
+      </div>
+      {% if participants %}
+      <div class="record-list collaboration-list">
+        {% for participant in participants %}
+        <article class="record-item">
+          <div class="record-topline">
+            <strong>{{ participant.participant_name }}</strong>
+            <span>{{ participant.created_at }}</span>
+          </div>
+          <div class="tag-list">
+            <span class="tag-chip">{{ participant.participant_type }}</span>
+            <span class="tag-chip">{{ participant.role or '未设置角色' }}</span>
+          </div>
+        </article>
+        {% endfor %}
+      </div>
+      {% else %}
+      <p class="empty-note">暂无协作人。</p>
+      {% endif %}
+      <form class="compact-form collaboration-form" method="post" action="/admin/ticket/{{ ticket.id }}/participants">
+        <input type="hidden" name="return_url" value="{{ return_url }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <label>
+          <span>类型</span>
+          <select name="participant_type">
+            <option value="team">总部小组</option>
+            <option value="admin">后台人员</option>
+            <option value="store">门店</option>
+            <option value="external">外部协作</option>
+          </select>
+        </label>
+        <label>
+          <span>名称</span>
+          <input name="participant_name" type="text" placeholder="例如：总部商品、采购或供应商">
+        </label>
+        <label>
+          <span>角色</span>
+          <input name="role" type="text" placeholder="例如：协作处理、跟进反馈">
+        </label>
+        <button class="ghost-button compact" type="submit">添加协作人</button>
+      </form>
+    </section>
+
+    <section class="detail-section work-card collaboration-section">
+      <div class="section-heading">
+        <h2>子任务区域</h2>
+        <p>把需要总部内部跟进的动作拆成可追踪事项。</p>
+      </div>
+      {% if tasks %}
+      <div class="task-list">
+        {% for task in tasks %}
+        <article class="task-card">
+          <form class="task-update-form" method="post" action="/admin/ticket/{{ ticket.id }}/tasks/{{ task.id }}">
+            <input type="hidden" name="return_url" value="{{ return_url }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <label>
+              <span>子任务</span>
+              <input name="title" type="text" value="{{ task.title }}">
+            </label>
+            <label>
+              <span>负责人</span>
+              <input name="assignee" type="text" value="{{ task.assignee or '' }}">
+            </label>
+            <label>
+              <span>状态</span>
+              <select name="status">
+                {% for item in task_statuses %}
+                <option value="{{ item }}" {% if task.status == item %}selected{% endif %}>{{ item }}</option>
+                {% endfor %}
+              </select>
+            </label>
+            <label>
+              <span>截止时间</span>
+              <input name="due_date" type="date" value="{{ task.due_date or '' }}">
+            </label>
+            <div class="task-meta">
+              <span>创建：{{ task.created_at }}</span>
+              <span>完成：{{ task.completed_at or '未完成' }}</span>
+            </div>
+            <button class="ghost-button compact" type="submit">更新子任务</button>
+          </form>
+        </article>
+        {% endfor %}
+      </div>
+      {% else %}
+      <p class="empty-note">暂无子任务。</p>
+      {% endif %}
+      <form class="compact-form collaboration-form" method="post" action="/admin/ticket/{{ ticket.id }}/tasks">
+        <input type="hidden" name="return_url" value="{{ return_url }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <label>
+          <span>子任务标题</span>
+          <input name="title" type="text" placeholder="例如：联系供应商确认库存">
+        </label>
+        <label>
+          <span>负责人</span>
+          <input name="assignee" type="text" placeholder="例如：总部商品">
+        </label>
+        <label>
+          <span>状态</span>
+          <select name="status">
+            {% for item in task_statuses %}
+            <option value="{{ item }}">{{ item }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>
+          <span>截止时间</span>
+          <input name="due_date" type="date">
+        </label>
+        <button class="ghost-button compact" type="submit">新增子任务</button>
+      </form>
+    </section>
+
+    <section class="detail-section work-card collaboration-section">
+      <div class="section-heading">
+        <h2>沟通记录</h2>
+        <p>门店可见回复会展示在门店详情页，内部备注只在后台可见。</p>
+      </div>
+      {% if comments %}
+      <div class="record-list collaboration-list">
+        {% for comment in comments %}
+        <article class="record-item comment-item">
+          <div class="record-topline">
+            <strong>{{ comment.author_name }}</strong>
+            <span>{{ comment.created_at }}</span>
+          </div>
+          <div class="tag-list">
+            <span class="tag-chip">{{ '门店' if comment.author_type == 'store' else '总部' }}</span>
+            <span class="tag-chip">{{ '内部备注' if comment.visibility == 'internal' else '门店可见' }}</span>
+          </div>
+          <p>{{ comment.content }}</p>
+        </article>
+        {% endfor %}
+      </div>
+      {% else %}
+      <p class="empty-note">暂无沟通记录。</p>
+      {% endif %}
+      <form class="comment-form" method="post" action="/admin/ticket/{{ ticket.id }}/comments">
+        <input type="hidden" name="return_url" value="{{ return_url }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <label>
+          <span>新增沟通</span>
+          <textarea name="content" rows="4" placeholder="填写给门店看的回复，或记录仅后台可见的内部备注"></textarea>
+        </label>
+        <label>
+          <span>可见范围</span>
+          <select name="visibility">
+            <option value="public">门店可见</option>
+            <option value="internal">内部备注</option>
+          </select>
+        </label>
+        <button class="primary-button compact" type="submit">发布沟通</button>
+      </form>
+    </section>
+
     <section class="detail-section work-card">
       <h2>图片附件</h2>
       <div class="uploaded-images">

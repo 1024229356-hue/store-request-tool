@@ -1778,6 +1778,68 @@ a:focus-visible {
   overflow-wrap: anywhere;
 }
 
+.collaboration-section {
+  display: grid;
+  gap: 14px;
+}
+
+.collaboration-list {
+  margin-bottom: 4px;
+}
+
+.compact-form,
+.comment-form,
+.task-update-form {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: #fff;
+  padding: 12px;
+}
+
+.collaboration-form {
+  grid-template-columns: repeat(3, minmax(0, 1fr)) auto;
+  align-items: end;
+}
+
+.comment-form {
+  margin-top: 12px;
+}
+
+.task-list {
+  display: grid;
+  gap: 10px;
+}
+
+.task-card {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--panel-soft);
+  padding: 10px;
+}
+
+.task-update-form {
+  grid-template-columns: minmax(180px, 1.4fr) repeat(3, minmax(120px, 1fr));
+  align-items: end;
+  background: #fff;
+}
+
+.task-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  grid-column: 1 / -2;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.comment-item .tag-list,
+.record-item .tag-list {
+  margin-bottom: 8px;
+}
+
 dt {
   color: var(--muted);
   font-size: 12px;
@@ -2378,6 +2440,15 @@ dd {
 
   .preview-remove {
     width: 100%;
+  }
+
+  .collaboration-form,
+  .task-update-form {
+    grid-template-columns: 1fr;
+  }
+
+  .task-meta {
+    grid-column: auto;
   }
 
   .admin-shell,

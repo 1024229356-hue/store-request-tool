@@ -11,6 +11,10 @@
 {% endblock %}
 
 {% block content %}
+    {% if error %}
+    <div class="alert alert-error">{{ error }}</div>
+    {% endif %}
+
     <section class="page-header submit-hero store-detail-hero">
       <p class="eyebrow">门店工单详情</p>
       <h1>{{ ticket.ticket_no }}</h1>
@@ -24,6 +28,44 @@
         <a class="ghost-button compact" href="{{ query_url }}">返回查询结果</a>
         <a class="primary-button compact" href="{{ supplement_url }}">补充资料</a>
       </div>
+    </section>
+
+    <section class="form-card highlight-card">
+      <div class="section-heading">
+        <h2>可见沟通记录</h2>
+        <p>这里展示总部回复和门店补充沟通，内部备注不会对门店展示。</p>
+      </div>
+      {% if comments %}
+      <div class="record-list collaboration-list">
+        {% for comment in comments %}
+        <article class="record-item comment-item">
+          <div class="record-topline">
+            <strong>{{ '门店补充' if comment.author_type == 'store' else '总部回复' }}</strong>
+            <span>{{ comment.created_at }}</span>
+          </div>
+          <p>{{ comment.content }}</p>
+          <div class="tag-list">
+            <span class="tag-chip">{{ comment.author_name }}</span>
+          </div>
+        </article>
+        {% endfor %}
+      </div>
+      {% else %}
+      <p class="empty-note">暂无可见沟通记录。</p>
+      {% endif %}
+      <form class="comment-form" method="post" action="/query/ticket/{{ ticket.id }}/comments">
+        <input type="hidden" name="store_name" value="{{ store_name }}">
+        <input type="hidden" name="return_url" value="{{ query_url }}">
+        <label>
+          <span>补充人</span>
+          <input name="author_name" type="text" placeholder="请输入姓名或岗位">
+        </label>
+        <label>
+          <span>门店补充沟通</span>
+          <textarea name="content" rows="4" placeholder="可补充处理进展、资料说明或对总部回复的确认"></textarea>
+        </label>
+        <button class="primary-button compact" type="submit">提交沟通</button>
+      </form>
     </section>
 
     <section class="form-card highlight-card">

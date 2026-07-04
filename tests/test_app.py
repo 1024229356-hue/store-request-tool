@@ -446,6 +446,197 @@ def test_multi_store_and_brand_validation_errors(tmp_path, monkeypatch):
     assert "建单需求必须至少选择或填写一个品牌。" in missing_brand.text
 
 
+def test_admin_comments_visibility_logs_and_notifications(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch)
+    submit_ticket(client, store_name="南京门东店", description="需要协作沟通")
+
+    unauthenticated = client.post(
+        "/admin/ticket/1/comments",
+        data={"content": "未登录不允许评论", "visibility": "public"},
+        follow_redirects=False,
+    )
+    assert unauthenticated.status_code == 303
+    assert unauthenticated.headers["location"].startswith("/admin/login")
+
+    logged_in_client(client)
+    public_comment = admin_post(
+        client,
+        "/admin/ticket/1/comments",
+        data={"content": "门店可见回复：总部已经联系供应商。", "visibility": "public"},
+        follow_redirects=False,
+    )
+    assert public_comment.status_code == 303
+    internal_comment = admin_post(
+        client,
+        "/admin/ticket/1/comments",
+        data={"content": "内部备注：供应商报价暂不外发。", "visibility": "internal"},
+        follow_redirects=False,
+    )
+    assert internal_comment.status_code == 303
+
+    comments = rows_for(tmp_path, "ticket_comments")
+    assert [comment["visibility"] for comment in comments] == ["public", "internal"]
+    assert comments[0]["author_type"] == "admin"
+    assert comments[0]["author_name"] == ADMIN_AUTH[0]
+    assert comments[1]["content"] == "内部备注：供应商报价暂不外发。"
+
+    logs = rows_for(tmp_path, "ticket_logs")
+    assert [log["action"] for log in logs[-2:]] == ["新增评论", "新增评论"]
+    assert "门店可见" in logs[-2]["note"]
+    assert "内部备注" in logs[-1]["note"]
+
+    events = rows_for(tmp_path, "notification_events")
+    assert [event["event_type"] for event in events] == ["new_ticket", "ticket_comment", "ticket_comment"]
+    assert events[-2]["title"] == "新增门店可见回复"
+    assert events[-1]["title"] == "新增内部备注"
+
+    admin_detail = client.get("/admin/ticket/1")
+    assert admin_detail.status_code == 200
+    assert "沟通记录" in admin_detail.text
+    assert "门店可见回复：总部已经联系供应商。" in admin_detail.text
+    assert "内部备注：供应商报价暂不外发。" in admin_detail.text
+    assert "内部备注" in admin_detail.text
+
+    store_detail = client.get("/query/ticket/1?store_name=南京门东店")
+    assert store_detail.status_code == 200
+    assert "可见沟通记录" in store_detail.text
+    assert "总部回复" in store_detail.text
+    assert "门店可见回复：总部已经联系供应商。" in store_detail.text
+    assert "内部备注：供应商报价暂不外发。" not in store_detail.text
+
+
+def test_store_public_comment_validates_store_and_notifies_admin(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch)
+    submit_ticket(client, store_name="南京门东店", description="门店需要补充沟通")
+
+    mismatch = client.post(
+        "/query/ticket/1/comments",
+        data={"store_name": "南昌万寿宫店", "author_name": "小李", "content": "其他门店不能评论"},
+    )
+    assert mismatch.status_code == 404
+
+    empty = client.post(
+        "/query/ticket/1/comments",
+        data={"store_name": "南京门东店", "author_name": "小李", "content": "  "},
+    )
+    assert empty.status_code == 400
+    assert "请填写沟通内容。" in empty.text
+
+    response = client.post(
+        "/query/ticket/1/comments",
+        data={"store_name": "南京门东店", "author_name": "小李", "content": "门店回复：已经补充到货照片。"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert response.headers["location"].startswith("/query/ticket/1")
+
+    comments = rows_for(tmp_path, "ticket_comments")
+    assert len(comments) == 1
+    assert comments[0]["author_type"] == "store"
+    assert comments[0]["author_name"] == "小李"
+    assert comments[0]["visibility"] == "public"
+    assert comments[0]["content"] == "门店回复：已经补充到货照片。"
+
+    logs = rows_for(tmp_path, "ticket_logs")
+    assert logs[-1]["action"] == "门店评论"
+    assert logs[-1]["operator"] == "门店:小李"
+
+    events = rows_for(tmp_path, "notification_events")
+    assert [event["event_type"] for event in events] == ["new_ticket", "ticket_comment"]
+    assert events[-1]["created_by"] == "门店:小李"
+    assert events[-1]["title"] == "门店新增沟通"
+
+    detail = client.get("/query/ticket/1?store_name=南京门东店")
+    assert detail.status_code == 200
+    assert "门店回复：已经补充到货照片。" in detail.text
+    assert "小李" in detail.text
+
+
+def test_admin_tasks_lifecycle_logs_notifications_and_participants(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch)
+    submit_ticket(client, store_name="南京门东店", description="需要拆子任务")
+
+    unauthenticated = client.post(
+        "/admin/ticket/1/tasks",
+        data={"title": "联系供应商确认库存", "assignee": "总部商品", "status": "待处理"},
+        follow_redirects=False,
+    )
+    assert unauthenticated.status_code == 303
+    assert unauthenticated.headers["location"].startswith("/admin/login")
+
+    logged_in_client(client)
+    participant = admin_post(
+        client,
+        "/admin/ticket/1/participants",
+        data={"participant_type": "team", "participant_name": "总部商品", "role": "协作处理"},
+        follow_redirects=False,
+    )
+    assert participant.status_code == 303
+
+    create_task = admin_post(
+        client,
+        "/admin/ticket/1/tasks",
+        data={
+            "title": "联系供应商确认库存",
+            "assignee": "总部商品",
+            "status": "待处理",
+            "due_date": "2026-07-06",
+        },
+        follow_redirects=False,
+    )
+    assert create_task.status_code == 303
+
+    update_task = admin_post(
+        client,
+        "/admin/ticket/1/tasks/1",
+        data={
+            "title": "联系供应商确认库存",
+            "assignee": "采购",
+            "status": "已完成",
+            "due_date": "2026-07-06",
+        },
+        follow_redirects=False,
+    )
+    assert update_task.status_code == 303
+
+    participants = rows_for(tmp_path, "ticket_participants")
+    assert participants[0]["participant_type"] == "team"
+    assert participants[0]["participant_name"] == "总部商品"
+    assert participants[0]["role"] == "协作处理"
+
+    tasks = rows_for(tmp_path, "ticket_tasks")
+    assert len(tasks) == 1
+    assert tasks[0]["title"] == "联系供应商确认库存"
+    assert tasks[0]["assignee"] == "采购"
+    assert tasks[0]["status"] == "已完成"
+    assert tasks[0]["due_date"] == "2026-07-06"
+    assert tasks[0]["completed_at"]
+
+    logs = rows_for(tmp_path, "ticket_logs")
+    assert [log["action"] for log in logs[-3:]] == ["新增协作人", "新增子任务", "更新子任务"]
+    assert "总部商品" in logs[-3]["note"]
+    assert "联系供应商确认库存" in logs[-2]["note"]
+    assert "已完成" in logs[-1]["note"]
+
+    events = rows_for(tmp_path, "notification_events")
+    assert [event["event_type"] for event in events] == [
+        "new_ticket",
+        "ticket_participant",
+        "ticket_task",
+        "ticket_task",
+    ]
+    assert events[-2]["title"] == "新增子任务"
+    assert events[-1]["title"] == "子任务已更新"
+
+    admin_detail = client.get("/admin/ticket/1")
+    assert admin_detail.status_code == 200
+    assert "协作人区域" in admin_detail.text
+    assert "子任务区域" in admin_detail.text
+    assert "总部商品" in admin_detail.text
+    assert "联系供应商确认库存" in admin_detail.text
+    assert "已完成" in admin_detail.text
+
+
 def test_cookie_login_logout_switch_account_and_operator_log(tmp_path, monkeypatch):
     client, _ = build_client(
         tmp_path,
@@ -1214,6 +1405,9 @@ def test_legacy_database_is_migrated_without_losing_existing_rows(tmp_path, monk
     assert "ticket_files" in tables
     assert "ticket_stores" in tables
     assert "ticket_brands" in tables
+    assert "ticket_participants" in tables
+    assert "ticket_comments" in tables
+    assert "ticket_tasks" in tables
     assert ticket_count == 1
     assert image_count == 1
     assert migrated_stores == [(1, "南京门东店")]

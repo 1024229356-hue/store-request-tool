@@ -43,6 +43,7 @@ DEFAULT_URGENCY_LEVELS = ["普通", "加急", "当天必须处理"]
 DEFAULT_STATUSES = ["待处理", "处理中", "待门店补充", "已完成", "已驳回"]
 DEFAULT_BRANDS: List[str] = []
 DEFAULT_HANDLERS = ["总部商品", "总部运营", "采购", "财务"]
+TASK_STATUSES = ["待处理", "处理中", "已完成"]
 DUE_STATUS_OPTIONS = ["已超时", "今日到期", "未到期", "未设置", "超时完成", "按时完成"]
 DEFAULT_SYSTEM = {
     "app_name": "门店需求工单系统",
@@ -651,6 +652,49 @@ def init_db() -> None:
         )
         connection.execute(
             """
+            CREATE TABLE IF NOT EXISTS ticket_participants (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticket_id INTEGER NOT NULL,
+                participant_type TEXT NOT NULL,
+                participant_name TEXT NOT NULL,
+                role TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (ticket_id) REFERENCES tickets(id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ticket_comments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticket_id INTEGER NOT NULL,
+                author_type TEXT NOT NULL,
+                author_name TEXT NOT NULL,
+                content TEXT NOT NULL,
+                visibility TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (ticket_id) REFERENCES tickets(id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ticket_tasks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticket_id INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                assignee TEXT,
+                status TEXT NOT NULL,
+                due_date TEXT,
+                completed_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (ticket_id) REFERENCES tickets(id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            """
             CREATE TABLE IF NOT EXISTS ticket_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 ticket_id INTEGER NOT NULL,
@@ -705,6 +749,11 @@ def init_db() -> None:
         connection.execute("CREATE INDEX IF NOT EXISTS idx_ticket_files_ticket_id ON ticket_files(ticket_id)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_ticket_logs_ticket_id ON ticket_logs(ticket_id)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_ticket_supplements_ticket_id ON ticket_supplements(ticket_id)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_ticket_participants_ticket_id ON ticket_participants(ticket_id)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_ticket_comments_ticket_id ON ticket_comments(ticket_id)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_ticket_comments_visibility ON ticket_comments(visibility)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_ticket_tasks_ticket_id ON ticket_tasks(ticket_id)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_ticket_tasks_status ON ticket_tasks(status)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_notification_events_created_at ON notification_events(created_at)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_notification_events_ticket_id ON notification_events(ticket_id)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_notification_reads_username ON notification_reads(username)")
@@ -1748,6 +1797,98 @@ def fetch_ticket_logs(ticket_id: int) -> List[Dict[str, object]]:
     return [dict(row) for row in rows]
 
 
+def fetch_ticket_participants(ticket_id: int) -> List[Dict[str, object]]:
+    with get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT id, ticket_id, participant_type, participant_name, role, created_at
+            FROM ticket_participants
+            WHERE ticket_id = ?
+            ORDER BY id ASC
+            """,
+            (ticket_id,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def fetch_ticket_comments(ticket_id: int, public_only: bool = False) -> List[Dict[str, object]]:
+    clauses = ["ticket_id = ?"]
+    params: List[object] = [ticket_id]
+    if public_only:
+        clauses.append("visibility = ?")
+        params.append("public")
+    where_sql = " AND ".join(clauses)
+    with get_connection() as connection:
+        rows = connection.execute(
+            f"""
+            SELECT id, ticket_id, author_type, author_name, content, visibility, created_at
+            FROM ticket_comments
+            WHERE {where_sql}
+            ORDER BY created_at ASC, id ASC
+            """,
+            params,
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def fetch_ticket_tasks(ticket_id: int) -> List[Dict[str, object]]:
+    with get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT id, ticket_id, title, assignee, status, due_date,
+                   completed_at, created_at, updated_at
+            FROM ticket_tasks
+            WHERE ticket_id = ?
+            ORDER BY
+                CASE status
+                    WHEN '待处理' THEN 0
+                    WHEN '处理中' THEN 1
+                    WHEN '已完成' THEN 2
+                    ELSE 3
+                END,
+                due_date IS NULL,
+                due_date,
+                id DESC
+            """,
+            (ticket_id,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def insert_ticket_log(
+    connection: sqlite3.Connection,
+    ticket_id: int,
+    action: str,
+    note: str,
+    operator: str,
+    created_at: str,
+    old_status: Optional[str] = None,
+    new_status: Optional[str] = None,
+    old_assigned_to: Optional[str] = None,
+    new_assigned_to: Optional[str] = None,
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO ticket_logs (
+            ticket_id, action, old_status, new_status, old_assigned_to,
+            new_assigned_to, note, operator, created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            ticket_id,
+            action,
+            old_status,
+            new_status,
+            old_assigned_to,
+            new_assigned_to,
+            note,
+            operator,
+            created_at,
+        ),
+    )
+
+
 def add_ticket_attachments(
     ticket_id: int,
     ticket_no: str,
@@ -1897,6 +2038,227 @@ def create_need_store_supplement_notification(ticket: Dict[str, object], operato
         content=f"工单 {ticket.get('ticket_no')} 已标记为待门店补充",
         severity="warning",
         created_by=operator,
+    )
+
+
+def visibility_label(visibility: str) -> str:
+    return "内部备注" if visibility == "internal" else "门店可见"
+
+
+def author_type_label(author_type: str) -> str:
+    return "门店" if author_type == "store" else "总部"
+
+
+def create_collaboration_notification(
+    ticket: Dict[str, object],
+    event_type: str,
+    title: str,
+    content: str,
+    created_by: str,
+    severity: str = "info",
+) -> int:
+    return create_notification_event(
+        event_type=event_type,
+        ticket_id=int(ticket["id"]),
+        ticket_no=str(ticket.get("ticket_no") or ""),
+        store_name=str(ticket.get("store_name") or ""),
+        title=title,
+        content=content,
+        severity=severity,
+        created_by=created_by,
+    )
+
+
+def create_ticket_participant(
+    ticket: Dict[str, object],
+    participant_type: str,
+    participant_name: str,
+    role: str,
+    operator: str,
+) -> int:
+    clean_type = participant_type.strip() or "team"
+    clean_name = participant_name.strip()
+    clean_role = role.strip()
+    if not clean_name:
+        raise ValueError("请填写协作人名称。")
+    ticket_id = int(ticket["id"])
+    timestamp = now_text()
+    note = f"{clean_name}（{clean_role or clean_type}）"
+    with get_connection() as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO ticket_participants (
+                ticket_id, participant_type, participant_name, role, created_at
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (ticket_id, clean_type, clean_name, clean_role, timestamp),
+        )
+        connection.execute("UPDATE tickets SET updated_at = ? WHERE id = ?", (timestamp, ticket_id))
+        insert_ticket_log(connection, ticket_id, "新增协作人", note, operator, timestamp)
+        participant_id = int(cursor.lastrowid)
+    create_collaboration_notification(
+        ticket,
+        "ticket_participant",
+        "新增协作人",
+        f"工单 {ticket.get('ticket_no')} 新增协作人：{note}",
+        operator,
+    )
+    return participant_id
+
+
+def create_ticket_comment(
+    ticket: Dict[str, object],
+    author_type: str,
+    author_name: str,
+    content: str,
+    visibility: str,
+    operator: str,
+) -> int:
+    clean_author_type = author_type.strip() or "admin"
+    clean_author_name = author_name.strip() or author_type_label(clean_author_type)
+    clean_content = content.strip()
+    clean_visibility = visibility.strip() or "public"
+    if clean_visibility not in {"public", "internal"}:
+        raise ValueError("评论可见范围不正确。")
+    if clean_author_type == "store":
+        clean_visibility = "public"
+    if not clean_content:
+        raise ValueError("请填写沟通内容。")
+    ticket_id = int(ticket["id"])
+    timestamp = now_text()
+    action = "门店评论" if clean_author_type == "store" else "新增评论"
+    note = f"{visibility_label(clean_visibility)}：{clean_content}"
+    with get_connection() as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO ticket_comments (
+                ticket_id, author_type, author_name, content, visibility, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (ticket_id, clean_author_type, clean_author_name, clean_content, clean_visibility, timestamp),
+        )
+        connection.execute("UPDATE tickets SET updated_at = ? WHERE id = ?", (timestamp, ticket_id))
+        insert_ticket_log(connection, ticket_id, action, note, operator, timestamp)
+        comment_id = int(cursor.lastrowid)
+    if clean_author_type == "store":
+        title = "门店新增沟通"
+        created_by = f"门店:{clean_author_name}"
+        severity = "warning"
+    elif clean_visibility == "internal":
+        title = "新增内部备注"
+        created_by = operator
+        severity = "info"
+    else:
+        title = "新增门店可见回复"
+        created_by = operator
+        severity = "info"
+    create_collaboration_notification(
+        ticket,
+        "ticket_comment",
+        title,
+        f"{author_type_label(clean_author_type)}为工单 {ticket.get('ticket_no')} 新增沟通记录",
+        created_by,
+        severity=severity,
+    )
+    return comment_id
+
+
+def create_ticket_task(
+    ticket: Dict[str, object],
+    title: str,
+    assignee: str,
+    status: str,
+    due_date: str,
+    operator: str,
+) -> int:
+    clean_title = title.strip()
+    clean_assignee = assignee.strip()
+    clean_status = status.strip() or "待处理"
+    clean_due_date = due_date.strip()
+    if not clean_title:
+        raise ValueError("请填写子任务标题。")
+    if clean_status not in TASK_STATUSES:
+        raise ValueError("子任务状态不正确。")
+    ticket_id = int(ticket["id"])
+    timestamp = now_text()
+    completed_at = timestamp if clean_status == "已完成" else None
+    note = f"{clean_title} / {clean_assignee or '未指定'} / {clean_status}"
+    with get_connection() as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO ticket_tasks (
+                ticket_id, title, assignee, status, due_date,
+                completed_at, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (ticket_id, clean_title, clean_assignee, clean_status, clean_due_date, completed_at, timestamp, timestamp),
+        )
+        connection.execute("UPDATE tickets SET updated_at = ? WHERE id = ?", (timestamp, ticket_id))
+        insert_ticket_log(connection, ticket_id, "新增子任务", note, operator, timestamp)
+        task_id = int(cursor.lastrowid)
+    create_collaboration_notification(
+        ticket,
+        "ticket_task",
+        "新增子任务",
+        f"工单 {ticket.get('ticket_no')} 新增子任务：{clean_title}",
+        operator,
+    )
+    return task_id
+
+
+def update_ticket_task(
+    ticket: Dict[str, object],
+    task_id: int,
+    title: str,
+    assignee: str,
+    status: str,
+    due_date: str,
+    operator: str,
+) -> None:
+    clean_title = title.strip()
+    clean_assignee = assignee.strip()
+    clean_status = status.strip() or "待处理"
+    clean_due_date = due_date.strip()
+    if not clean_title:
+        raise ValueError("请填写子任务标题。")
+    if clean_status not in TASK_STATUSES:
+        raise ValueError("子任务状态不正确。")
+    ticket_id = int(ticket["id"])
+    timestamp = now_text()
+    with get_connection() as connection:
+        old_row = connection.execute(
+            "SELECT * FROM ticket_tasks WHERE id = ? AND ticket_id = ?",
+            (task_id, ticket_id),
+        ).fetchone()
+        if not old_row:
+            raise HTTPException(status_code=404, detail="子任务不存在")
+        old_task = dict(old_row)
+        completed_at = old_task.get("completed_at")
+        if clean_status == "已完成" and not completed_at:
+            completed_at = timestamp
+        elif clean_status != "已完成":
+            completed_at = None
+        connection.execute(
+            """
+            UPDATE ticket_tasks
+            SET title = ?, assignee = ?, status = ?, due_date = ?,
+                completed_at = ?, updated_at = ?
+            WHERE id = ? AND ticket_id = ?
+            """,
+            (clean_title, clean_assignee, clean_status, clean_due_date, completed_at, timestamp, task_id, ticket_id),
+        )
+        connection.execute("UPDATE tickets SET updated_at = ? WHERE id = ?", (timestamp, ticket_id))
+        note = f"{old_task.get('status') or '未设置'} → {clean_status}：{clean_title}"
+        insert_ticket_log(connection, ticket_id, "更新子任务", note, operator, timestamp)
+    create_collaboration_notification(
+        ticket,
+        "ticket_task",
+        "子任务已更新",
+        f"工单 {ticket.get('ticket_no')} 子任务已更新：{clean_title}",
+        operator,
     )
 
 
@@ -2409,6 +2771,9 @@ def create_app() -> FastAPI:
         images = fetch_ticket_images(ticket_id)
         files = fetch_ticket_files(ticket_id)
         logs = fetch_ticket_logs(ticket_id)
+        participants = fetch_ticket_participants(ticket_id)
+        comments = fetch_ticket_comments(ticket_id)
+        tasks = fetch_ticket_tasks(ticket_id)
         config = load_app_config()
         return templates.TemplateResponse(
             request,
@@ -2421,6 +2786,10 @@ def create_app() -> FastAPI:
                 "statuses": config.statuses,
                 "handlers": config.handlers,
                 "logs": logs,
+                "participants": participants,
+                "comments": comments,
+                "tasks": tasks,
+                "task_statuses": TASK_STATUSES,
                 "saved": saved,
                 "attachments_saved": attachments_saved,
                 "upload_error": upload_error,
@@ -2521,12 +2890,14 @@ def create_app() -> FastAPI:
         ticket: Dict[str, object],
         store_name: str,
         return_url: str = "",
+        error: str = "",
         status_code: int = 200,
     ) -> HTMLResponse:
         query_url = store_query_list_return_url(store_name, return_url)
         detail_url = build_store_ticket_detail_url(int(ticket["id"]), store_name, query_url)
         supplement_url = build_store_ticket_supplement_url(int(ticket["id"]), store_name, query_url)
         supplements = fetch_store_ticket_supplements(int(ticket["id"]))
+        comments = fetch_ticket_comments(int(ticket["id"]), public_only=True)
         return templates.TemplateResponse(
             request,
             "query_detail.html",
@@ -2539,10 +2910,11 @@ def create_app() -> FastAPI:
                 "supplement_url": supplement_url,
                 "attachment_counts": fetch_ticket_attachment_counts(int(ticket["id"])),
                 "supplements": supplements,
+                "comments": comments,
                 "logs": fetch_store_visible_logs(int(ticket["id"])),
                 "needs_store_supplement": str(ticket.get("status") or "") == "待门店补充",
                 "handler_note": str(ticket.get("handler_note") or "").strip(),
-                "error": "",
+                "error": error,
             },
             status_code=status_code,
         )
@@ -2795,6 +3167,42 @@ def create_app() -> FastAPI:
         if not ticket:
             raise HTTPException(status_code=404, detail="未找到该门店对应工单")
         return render_store_ticket_detail(request, ticket, clean_store_name, return_url=return_url)
+
+    @app.post("/query/ticket/{ticket_id}/comments", response_class=HTMLResponse)
+    def add_store_ticket_comment(
+        request: Request,
+        ticket_id: int,
+        store_name: str = Form(""),
+        author_name: str = Form(""),
+        content: str = Form(""),
+        return_url: str = Form(""),
+    ) -> HTMLResponse:
+        clean_store_name = store_name.strip()
+        if not clean_store_name:
+            return HTMLResponse("请选择门店后提交沟通内容。", status_code=400)
+        ticket = fetch_store_ticket(ticket_id, clean_store_name)
+        if not ticket:
+            raise HTTPException(status_code=404, detail="未找到该门店对应工单")
+        clean_author_name = author_name.strip() or "门店"
+        if not content.strip():
+            return render_store_ticket_detail(
+                request,
+                ticket,
+                clean_store_name,
+                return_url=return_url,
+                error="请填写沟通内容。",
+                status_code=400,
+            )
+        create_ticket_comment(
+            ticket,
+            "store",
+            clean_author_name,
+            content,
+            "public",
+            f"门店:{clean_author_name}",
+        )
+        detail_url = build_store_ticket_detail_url(ticket_id, clean_store_name, return_url)
+        return RedirectResponse(url=detail_url, status_code=303)
 
     @app.get("/query/ticket/{ticket_id}/supplement", response_class=HTMLResponse)
     def supplement_page(
@@ -3091,6 +3499,92 @@ def create_app() -> FastAPI:
             upload_error=upload_error,
             return_url=return_url,
         )
+
+    @app.post("/admin/ticket/{ticket_id}/participants")
+    def add_ticket_participant_route(
+        request: Request,
+        ticket_id: int,
+        admin: str = Depends(require_admin),
+        participant_type: str = Form(""),
+        participant_name: str = Form(""),
+        role: str = Form(""),
+        return_url: str = Form(""),
+        csrf_token: str = Form(""),
+    ) -> RedirectResponse:
+        require_admin_csrf(request, csrf_token)
+        ticket = fetch_ticket(ticket_id)
+        if not ticket:
+            raise HTTPException(status_code=404, detail="工单不存在")
+        try:
+            create_ticket_participant(ticket, participant_type, participant_name, role, admin)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return RedirectResponse(url=build_ticket_detail_url(ticket_id, return_url, saved="1"), status_code=303)
+
+    @app.post("/admin/ticket/{ticket_id}/comments")
+    def add_admin_ticket_comment(
+        request: Request,
+        ticket_id: int,
+        admin: str = Depends(require_admin),
+        content: str = Form(""),
+        visibility: str = Form("public"),
+        return_url: str = Form(""),
+        csrf_token: str = Form(""),
+    ) -> RedirectResponse:
+        require_admin_csrf(request, csrf_token)
+        ticket = fetch_ticket(ticket_id)
+        if not ticket:
+            raise HTTPException(status_code=404, detail="工单不存在")
+        try:
+            create_ticket_comment(ticket, "admin", admin, content, visibility, admin)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return RedirectResponse(url=build_ticket_detail_url(ticket_id, return_url, saved="1"), status_code=303)
+
+    @app.post("/admin/ticket/{ticket_id}/tasks")
+    def add_ticket_task_route(
+        request: Request,
+        ticket_id: int,
+        admin: str = Depends(require_admin),
+        title: str = Form(""),
+        assignee: str = Form(""),
+        status: str = Form("待处理"),
+        due_date: str = Form(""),
+        return_url: str = Form(""),
+        csrf_token: str = Form(""),
+    ) -> RedirectResponse:
+        require_admin_csrf(request, csrf_token)
+        ticket = fetch_ticket(ticket_id)
+        if not ticket:
+            raise HTTPException(status_code=404, detail="工单不存在")
+        try:
+            create_ticket_task(ticket, title, assignee, status, due_date, admin)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return RedirectResponse(url=build_ticket_detail_url(ticket_id, return_url, saved="1"), status_code=303)
+
+    @app.post("/admin/ticket/{ticket_id}/tasks/{task_id}")
+    def update_ticket_task_route(
+        request: Request,
+        ticket_id: int,
+        task_id: int,
+        admin: str = Depends(require_admin),
+        title: str = Form(""),
+        assignee: str = Form(""),
+        status: str = Form("待处理"),
+        due_date: str = Form(""),
+        return_url: str = Form(""),
+        csrf_token: str = Form(""),
+    ) -> RedirectResponse:
+        require_admin_csrf(request, csrf_token)
+        ticket = fetch_ticket(ticket_id)
+        if not ticket:
+            raise HTTPException(status_code=404, detail="工单不存在")
+        try:
+            update_ticket_task(ticket, task_id, title, assignee, status, due_date, admin)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return RedirectResponse(url=build_ticket_detail_url(ticket_id, return_url, saved="1"), status_code=303)
 
     @app.post("/admin/ticket/{ticket_id}")
     def update_ticket(
