@@ -12,6 +12,7 @@
   "max_file_mb": 20,
   "max_file_count": 5,
   "max_total_file_upload_mb": 50,
+  "max_embedded_html_mb": 5,
   "store_query_default_days": 30,
   "store_query_page_size": 20,
   "supplement_status_after_store_update": "待处理"

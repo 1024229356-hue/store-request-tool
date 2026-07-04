@@ -2,6 +2,7 @@
 *.env
 data/*.db
 data/*.sqlite
+data/embedded_pages/
 uploads/
 backups/
 *.log

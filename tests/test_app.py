@@ -41,6 +41,7 @@ DEFAULT_TEST_CONFIG = {
         "max_file_mb": 20,
         "max_file_count": 5,
         "max_total_file_upload_mb": 50,
+        "max_embedded_html_mb": 5,
     },
 }
 
@@ -1408,6 +1409,7 @@ def test_legacy_database_is_migrated_without_losing_existing_rows(tmp_path, monk
     assert "ticket_participants" in tables
     assert "ticket_comments" in tables
     assert "ticket_tasks" in tables
+    assert "embedded_pages" in tables
     assert ticket_count == 1
     assert image_count == 1
     assert migrated_stores == [(1, "南京门东店")]
@@ -1900,6 +1902,171 @@ def test_zhiyang_logo_asset_and_styles_are_present():
     assert ".sidebar-logo-img" in style
     assert ".public-logo-img" in style
     assert "object-fit: contain" in style
+
+
+def test_runtime_embedded_page_upload_replace_navigation_and_content(tmp_path, monkeypatch):
+    client, main = build_client(tmp_path, monkeypatch)
+
+    unauthenticated = client.get("/admin/embedded-pages", follow_redirects=False)
+    assert unauthenticated.status_code == 303
+    assert unauthenticated.headers["location"].startswith("/admin/login")
+
+    logged_in_client(client)
+    monkeypatch.setattr(main, "now_text", lambda: "2026-07-04 10:00:00")
+    page = client.get("/admin/embedded-pages")
+    assert page.status_code == 200
+    assert "嵌入页面管理" in page.text
+    assert 'name="page_key"' in page.text
+    assert 'name="html_file"' in page.text
+
+    csrf_token = csrf_token_for(client, "/admin/embedded-pages")
+    create = client.post(
+        "/admin/embedded-pages",
+        data={
+            "csrf_token": csrf_token,
+            "page_key": "daily-report",
+            "title": "每日经营日报",
+            "nav_label": "经营日报",
+            "enabled": "1",
+        },
+        files={"html_file": ("daily.html", b"<h1>V1 report</h1>", "text/html")},
+        follow_redirects=False,
+    )
+    assert create.status_code == 303
+    assert create.headers["location"].startswith("/admin/embedded-pages")
+
+    pages = rows_for(tmp_path, "embedded_pages")
+    assert len(pages) == 1
+    assert pages[0]["page_key"] == "daily-report"
+    assert pages[0]["title"] == "每日经营日报"
+    assert pages[0]["nav_label"] == "经营日报"
+    assert pages[0]["filename"] == "daily-report.html"
+    assert pages[0]["enabled"] == 1
+    assert pages[0]["updated_by"] == ADMIN_AUTH[0]
+    embedded_file = tmp_path / "embedded_pages" / "daily-report.html"
+    assert embedded_file.is_file()
+    assert embedded_file.read_text(encoding="utf-8") == "<h1>V1 report</h1>"
+
+    dashboard = client.get("/admin/dashboard")
+    assert dashboard.status_code == 200
+    assert "扩展页面" in dashboard.text
+    assert "经营日报" in dashboard.text
+    assert "/admin/embed/daily-report" in dashboard.text
+
+    embed_page = client.get("/admin/embed/daily-report")
+    assert embed_page.status_code == 200
+    assert "每日经营日报" in embed_page.text
+    assert "/admin/embed-content/daily-report?v=20260704100000" in embed_page.text
+    assert "embedded-frame" in embed_page.text
+
+    content = client.get("/admin/embed-content/daily-report")
+    assert content.status_code == 200
+    assert content.text == "<h1>V1 report</h1>"
+    assert content.headers["x-frame-options"] == "SAMEORIGIN"
+    assert content.headers["x-content-type-options"] == "nosniff"
+
+    fresh_client = TestClient(main.app)
+    denied_content = fresh_client.get("/admin/embed-content/daily-report", follow_redirects=False)
+    assert denied_content.status_code != 200
+
+    monkeypatch.setattr(main, "now_text", lambda: "2026-07-04 10:05:00")
+    replace = client.post(
+        "/admin/embedded-pages/daily-report/replace",
+        data={"csrf_token": csrf_token},
+        files={"html_file": ("daily.html", b"<h1>V2 report</h1>", "text/html")},
+        follow_redirects=False,
+    )
+    assert replace.status_code == 303
+    updated_pages = rows_for(tmp_path, "embedded_pages")
+    assert updated_pages[0]["updated_at"] == "2026-07-04 10:05:00"
+    assert embedded_file.read_text(encoding="utf-8") == "<h1>V2 report</h1>"
+    updated_embed = client.get("/admin/embed/daily-report")
+    assert "/admin/embed-content/daily-report?v=20260704100500" in updated_embed.text
+    assert client.get("/admin/embed-content/daily-report").text == "<h1>V2 report</h1>"
+
+    disable = client.post(
+        "/admin/embedded-pages/daily-report/toggle",
+        data={"csrf_token": csrf_token, "enabled": "0"},
+        follow_redirects=False,
+    )
+    assert disable.status_code == 303
+    disabled_dashboard = client.get("/admin/dashboard")
+    assert "经营日报" not in disabled_dashboard.text
+    assert client.get("/admin/embed/daily-report").status_code == 404
+
+
+def test_embedded_page_upload_validation_and_backup_rules(tmp_path, monkeypatch):
+    client, _ = build_client(
+        tmp_path,
+        monkeypatch,
+        config_overrides={"system.json": dict(DEFAULT_TEST_CONFIG["system.json"], max_embedded_html_mb=1)},
+    )
+    logged_in_client(client)
+    csrf_token = csrf_token_for(client, "/admin/embedded-pages")
+
+    for bad_key in ("../test", "中文", "bad key"):
+        response = client.post(
+            "/admin/embedded-pages",
+            data={
+                "csrf_token": csrf_token,
+                "page_key": bad_key,
+                "title": "非法页面",
+                "nav_label": "非法",
+                "enabled": "1",
+            },
+            files={"html_file": ("bad.html", b"<h1>bad</h1>", "text/html")},
+        )
+        assert response.status_code == 400
+        assert "page_key 只能使用小写字母、数字和短横线。" in response.text
+
+    non_html = client.post(
+        "/admin/embedded-pages",
+        data={
+            "csrf_token": csrf_token,
+            "page_key": "not-html",
+            "title": "非 HTML",
+            "nav_label": "非 HTML",
+            "enabled": "1",
+        },
+        files={"html_file": ("report.txt", b"plain", "text/plain")},
+    )
+    assert non_html.status_code == 400
+    assert "只允许上传 .html 文件。" in non_html.text
+
+    empty_html = client.post(
+        "/admin/embedded-pages",
+        data={
+            "csrf_token": csrf_token,
+            "page_key": "empty-html",
+            "title": "空 HTML",
+            "nav_label": "空 HTML",
+            "enabled": "1",
+        },
+        files={"html_file": ("empty.html", b"", "text/html")},
+    )
+    assert empty_html.status_code == 400
+    assert "HTML 文件内容不能为空。" in empty_html.text
+
+    too_large = client.post(
+        "/admin/embedded-pages",
+        data={
+            "csrf_token": csrf_token,
+            "page_key": "large-html",
+            "title": "超大 HTML",
+            "nav_label": "超大",
+            "enabled": "1",
+        },
+        files={"html_file": ("large.html", b"x" * (1024 * 1024 + 1), "text/html")},
+    )
+    assert too_large.status_code == 400
+    assert "HTML 文件不能超过 1MB。" in too_large.text
+    assert rows_for(tmp_path, "embedded_pages") == []
+    assert not (tmp_path / "embedded_pages").exists()
+
+    backup_script = (PROJECT_DIR / "backup.sh").read_text(encoding="utf-8")
+    gitignore = (PROJECT_DIR / ".gitignore").read_text(encoding="utf-8")
+    assert "data/embedded_pages" in backup_script
+    assert "data/embedded_pages/" in gitignore
 
 
 def test_session_security_secure_cookie_expiry_csrf_and_env_example(tmp_path, monkeypatch):

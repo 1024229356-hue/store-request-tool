@@ -1,0 +1,22 @@
+{% set page_title = page.title %}
+{% set page_subtitle = '嵌入页面 · 刷新后读取服务器最新 HTML。' %}
+{% set page_eyebrow = '扩展页面' %}
+{% extends "base_admin.html" %}
+
+{% block topbar_actions %}
+<a class="ghost-button compact" href="/admin/embedded-pages">管理嵌入页面</a>
+{% endblock %}
+
+{% block main_class %}embedded-page-shell{% endblock %}
+
+{% block content %}
+<section class="embedded-page-view">
+  <iframe
+    class="embedded-frame"
+    src="{{ content_url }}"
+    title="{{ page.title }}"
+    loading="eager"
+    referrerpolicy="same-origin">
+  </iframe>
+</section>
+{% endblock %}

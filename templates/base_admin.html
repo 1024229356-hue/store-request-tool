@@ -33,6 +33,20 @@
         <a class="sidebar-link {% if current_menu == 'settings' %}active{% endif %}" href="/admin/settings">
           <span>配置管理</span>
         </a>
+        <a class="sidebar-link {% if current_menu == 'embedded-pages' %}active{% endif %}" href="/admin/embedded-pages">
+          <span>嵌入页面管理</span>
+        </a>
+        {% set embedded_pages = embedded_nav_pages() %}
+        {% if embedded_pages %}
+        <div class="sidebar-nav-group">
+          <span>扩展页面</span>
+          {% for page in embedded_pages %}
+          <a class="sidebar-link nested-link {% if current_menu == ('embedded:' ~ page.page_key) %}active{% endif %}" href="/admin/embed/{{ page.page_key }}">
+            <span>{{ page.nav_label }}</span>
+          </a>
+          {% endfor %}
+        </div>
+        {% endif %}
         <a class="sidebar-link {% if current_menu == 'account' %}active{% endif %}" href="/admin/account">
           <span>账号设置</span>
         </a>

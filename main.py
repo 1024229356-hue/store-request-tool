@@ -59,6 +59,7 @@ DEFAULT_SYSTEM = {
     "max_file_mb": 20,
     "max_file_count": 5,
     "max_total_file_upload_mb": 50,
+    "max_embedded_html_mb": 5,
     "store_query_default_days": 30,
     "store_query_page_size": 20,
     "supplement_status_after_store_update": "待处理",
@@ -93,6 +94,7 @@ class AppConfig:
     max_file_mb: int
     max_file_count: int
     max_total_file_upload_mb: int
+    max_embedded_html_mb: int
     store_query_default_days: int
     store_query_page_size: int
     supplement_status_after_store_update: str
@@ -112,6 +114,10 @@ class AppConfig:
     @property
     def max_total_file_upload_bytes(self) -> int:
         return self.max_total_file_upload_mb * 1024 * 1024
+
+    @property
+    def max_embedded_html_bytes(self) -> int:
+        return self.max_embedded_html_mb * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -404,6 +410,8 @@ def should_redirect_to_login(request: Request) -> bool:
         or path == "/admin/account"
         or path == "/admin/system"
         or path.startswith("/admin/ticket")
+        or path.startswith("/admin/embedded-pages")
+        or path.startswith("/admin/embed")
     )
 
 
@@ -425,6 +433,10 @@ def get_db_path() -> Path:
 
 def get_upload_dir() -> Path:
     return Path(os.environ.get("STORE_REQUEST_UPLOAD_DIR", DEFAULT_UPLOAD_DIR))
+
+
+def get_embedded_pages_dir() -> Path:
+    return get_db_path().parent / "embedded_pages"
 
 
 def get_config_dir() -> Path:
@@ -475,6 +487,7 @@ def add_column_if_missing(
 
 
 MULTI_VALUE_SPLIT_RE = re.compile(r"[,\uFF0C\u3001;\uFF1B]+")
+EMBEDDED_PAGE_KEY_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
 
 def unique_clean_values(values: Iterable[object]) -> List[str]:
@@ -495,6 +508,15 @@ def split_multi_value_text(value: object) -> List[str]:
 
 def join_display_values(values: Iterable[object]) -> str:
     return "、".join(unique_clean_values(values))
+
+
+def is_valid_embedded_page_key(page_key: str) -> bool:
+    return bool(EMBEDDED_PAGE_KEY_RE.fullmatch(page_key.strip()))
+
+
+def embedded_page_version(updated_at: object) -> str:
+    version = re.sub(r"\D+", "", str(updated_at or ""))
+    return version or "0"
 
 
 def normalize_store_names(raw_store_names: Optional[List[str]], legacy_store_name: str = "") -> List[str]:
@@ -738,6 +760,21 @@ def init_db() -> None:
             )
             """
         )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS embedded_pages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                page_key TEXT NOT NULL UNIQUE,
+                title TEXT NOT NULL,
+                nav_label TEXT NOT NULL,
+                filename TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                updated_by TEXT
+            )
+            """
+        )
         connection.execute("CREATE INDEX IF NOT EXISTS idx_tickets_created_at ON tickets(created_at)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_tickets_status ON tickets(status)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_tickets_assigned_to ON tickets(assigned_to)")
@@ -757,6 +794,7 @@ def init_db() -> None:
         connection.execute("CREATE INDEX IF NOT EXISTS idx_notification_events_created_at ON notification_events(created_at)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_notification_events_ticket_id ON notification_events(ticket_id)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_notification_reads_username ON notification_reads(username)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_embedded_pages_enabled ON embedded_pages(enabled)")
         backfill_ticket_relations(connection)
 
 
@@ -818,6 +856,7 @@ def load_system_config(statuses: List[str]) -> Dict[str, object]:
         "max_file_mb",
         "max_file_count",
         "max_total_file_upload_mb",
+        "max_embedded_html_mb",
         "store_query_default_days",
         "store_query_page_size",
     ):
@@ -876,6 +915,7 @@ def load_app_config() -> AppConfig:
         max_file_mb=int(system["max_file_mb"]),
         max_file_count=int(system["max_file_count"]),
         max_total_file_upload_mb=int(system["max_total_file_upload_mb"]),
+        max_embedded_html_mb=int(system["max_embedded_html_mb"]),
         store_query_default_days=int(system["store_query_default_days"]),
         store_query_page_size=int(system["store_query_page_size"]),
         supplement_status_after_store_update=str(system["supplement_status_after_store_update"]),
@@ -1855,6 +1895,197 @@ def fetch_ticket_tasks(ticket_id: int) -> List[Dict[str, object]]:
     return [dict(row) for row in rows]
 
 
+def embedded_html_filename(page_key: str) -> str:
+    return f"{page_key}.html"
+
+
+def embedded_html_path(filename: str) -> Optional[Path]:
+    clean_filename = safe_uploaded_name(filename)
+    if clean_filename != filename or not clean_filename.lower().endswith(".html"):
+        return None
+    base_dir = get_embedded_pages_dir()
+    target = base_dir / clean_filename
+    try:
+        if target.resolve().parent != base_dir.resolve():
+            return None
+    except OSError:
+        return None
+    return target
+
+
+def fetch_embedded_pages(enabled_only: bool = False) -> List[Dict[str, object]]:
+    clauses: List[str] = []
+    params: List[object] = []
+    if enabled_only:
+        clauses.append("enabled = 1")
+    where_sql = "WHERE " + " AND ".join(clauses) if clauses else ""
+    with get_connection() as connection:
+        rows = connection.execute(
+            f"""
+            SELECT id, page_key, title, nav_label, filename, enabled,
+                   created_at, updated_at, updated_by
+            FROM embedded_pages
+            {where_sql}
+            ORDER BY nav_label ASC, id ASC
+            """,
+            params,
+        ).fetchall()
+    pages = [dict(row) for row in rows]
+    for page in pages:
+        page["is_enabled"] = int(page.get("enabled") or 0) == 1
+        page["version"] = embedded_page_version(page.get("updated_at"))
+    return pages
+
+
+def fetch_enabled_embedded_pages() -> List[Dict[str, object]]:
+    return fetch_embedded_pages(enabled_only=True)
+
+
+def fetch_embedded_page(page_key: str, enabled_only: bool = False) -> Optional[Dict[str, object]]:
+    clean_key = page_key.strip()
+    if not is_valid_embedded_page_key(clean_key):
+        return None
+    clauses = ["page_key = ?"]
+    params: List[object] = [clean_key]
+    if enabled_only:
+        clauses.append("enabled = 1")
+    with get_connection() as connection:
+        row = connection.execute(
+            f"""
+            SELECT id, page_key, title, nav_label, filename, enabled,
+                   created_at, updated_at, updated_by
+            FROM embedded_pages
+            WHERE {" AND ".join(clauses)}
+            """,
+            params,
+        ).fetchone()
+    if not row:
+        return None
+    page = dict(row)
+    page["is_enabled"] = int(page.get("enabled") or 0) == 1
+    page["version"] = embedded_page_version(page.get("updated_at"))
+    return page
+
+
+async def prepare_embedded_html_file(html_file: Optional[UploadFile], config: AppConfig) -> bytes:
+    if not html_file or not html_file.filename:
+        raise ValueError("请选择要上传的 HTML 文件。")
+    filename = safe_uploaded_name(html_file.filename)
+    if not filename.lower().endswith(".html"):
+        raise ValueError("只允许上传 .html 文件。")
+    content = await html_file.read()
+    if len(content) > config.max_embedded_html_bytes:
+        raise ValueError(f"HTML 文件不能超过 {config.max_embedded_html_mb}MB。")
+    if not content.strip():
+        raise ValueError("HTML 文件内容不能为空。")
+    return content
+
+
+def validate_embedded_page_form(page_key: str, title: str, nav_label: str) -> Tuple[str, str, str]:
+    clean_key = page_key.strip()
+    clean_title = title.strip()
+    clean_nav_label = nav_label.strip()
+    if not is_valid_embedded_page_key(clean_key):
+        raise ValueError("page_key 只能使用小写字母、数字和短横线。")
+    if not clean_title:
+        raise ValueError("请填写页面标题。")
+    if not clean_nav_label:
+        raise ValueError("请填写导航名称。")
+    return clean_key, clean_title, clean_nav_label
+
+
+def write_embedded_html_file(filename: str, content: bytes) -> Path:
+    target = embedded_html_path(filename)
+    if not target:
+        raise ValueError("HTML 文件路径不正确。")
+    get_embedded_pages_dir().mkdir(parents=True, exist_ok=True)
+    target.write_bytes(content)
+    return target
+
+
+def create_embedded_page(
+    page_key: str,
+    title: str,
+    nav_label: str,
+    enabled: bool,
+    html_content: bytes,
+    updated_by: str,
+) -> int:
+    clean_key, clean_title, clean_nav_label = validate_embedded_page_form(page_key, title, nav_label)
+    filename = embedded_html_filename(clean_key)
+    timestamp = now_text()
+    with get_connection() as connection:
+        existing = connection.execute("SELECT id FROM embedded_pages WHERE page_key = ?", (clean_key,)).fetchone()
+        if existing:
+            raise ValueError("page_key 已存在，请使用替换文件。")
+    target = embedded_html_path(filename)
+    target_existed = bool(target and target.exists())
+    target = write_embedded_html_file(filename, html_content)
+    try:
+        with get_connection() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO embedded_pages (
+                    page_key, title, nav_label, filename, enabled,
+                    created_at, updated_at, updated_by
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    clean_key,
+                    clean_title,
+                    clean_nav_label,
+                    filename,
+                    1 if enabled else 0,
+                    timestamp,
+                    timestamp,
+                    updated_by,
+                ),
+            )
+            return int(cursor.lastrowid)
+    except Exception:
+        try:
+            if not target_existed:
+                target.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
+def replace_embedded_page_file(page_key: str, html_content: bytes, updated_by: str) -> None:
+    page = fetch_embedded_page(page_key)
+    if not page:
+        raise HTTPException(status_code=404, detail="嵌入页面不存在")
+    filename = str(page.get("filename") or "")
+    write_embedded_html_file(filename, html_content)
+    timestamp = now_text()
+    with get_connection() as connection:
+        connection.execute(
+            """
+            UPDATE embedded_pages
+            SET updated_at = ?, updated_by = ?
+            WHERE page_key = ?
+            """,
+            (timestamp, updated_by, page_key.strip()),
+        )
+
+
+def set_embedded_page_enabled(page_key: str, enabled: bool, updated_by: str) -> None:
+    page = fetch_embedded_page(page_key)
+    if not page:
+        raise HTTPException(status_code=404, detail="嵌入页面不存在")
+    timestamp = now_text()
+    with get_connection() as connection:
+        connection.execute(
+            """
+            UPDATE embedded_pages
+            SET enabled = ?, updated_at = ?, updated_by = ?
+            WHERE page_key = ?
+            """,
+            (1 if enabled else 0, timestamp, updated_by, page_key.strip()),
+        )
+
+
 def insert_ticket_log(
     connection: sqlite3.Connection,
     ticket_id: int,
@@ -2700,6 +2931,7 @@ def create_app() -> FastAPI:
 
     app = FastAPI(title=load_app_config().app_name)
     templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+    templates.env.globals["embedded_nav_pages"] = fetch_enabled_embedded_pages
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
     def render_submit_form(
@@ -2802,6 +3034,27 @@ def create_app() -> FastAPI:
                 "max_file_count": config.max_file_count,
                 "max_file_mb": config.max_file_mb,
                 "max_total_file_upload_mb": config.max_total_file_upload_mb,
+                "csrf_token": current_csrf_token(request),
+            },
+            status_code=status_code,
+        )
+
+    def render_embedded_pages_admin(
+        request: Request,
+        admin: str,
+        error: str = "",
+        status_code: int = 200,
+    ) -> HTMLResponse:
+        config = load_app_config()
+        return templates.TemplateResponse(
+            request,
+            "embedded_pages_admin.html",
+            {
+                "request": request,
+                "pages": fetch_embedded_pages(),
+                "error": error,
+                "max_embedded_html_mb": config.max_embedded_html_mb,
+                "admin_user": admin,
                 "csrf_token": current_csrf_token(request),
             },
             status_code=status_code,
@@ -3430,6 +3683,105 @@ def create_app() -> FastAPI:
                 "database_path": str(get_db_path()),
                 "upload_dir": str(get_upload_dir()),
                 "config_dir": str(get_config_dir()),
+            },
+        )
+
+    @app.get("/admin/embedded-pages", response_class=HTMLResponse)
+    def embedded_pages_admin(request: Request, admin: str = Depends(require_admin)) -> HTMLResponse:
+        return render_embedded_pages_admin(request, admin)
+
+    @app.post("/admin/embedded-pages", response_class=HTMLResponse)
+    async def create_embedded_page_route(
+        request: Request,
+        admin: str = Depends(require_admin),
+        page_key: str = Form(""),
+        title: str = Form(""),
+        nav_label: str = Form(""),
+        enabled: str = Form("0"),
+        html_file: Optional[UploadFile] = File(None),
+        csrf_token: str = Form(""),
+    ) -> HTMLResponse:
+        require_admin_csrf(request, csrf_token)
+        config = load_app_config()
+        try:
+            html_content = await prepare_embedded_html_file(html_file, config)
+            create_embedded_page(
+                page_key,
+                title,
+                nav_label,
+                enabled in {"1", "true", "on", "yes"},
+                html_content,
+                admin,
+            )
+        except ValueError as exc:
+            return render_embedded_pages_admin(request, admin, error=str(exc), status_code=400)
+        return RedirectResponse(url="/admin/embedded-pages", status_code=303)
+
+    @app.post("/admin/embedded-pages/{page_key}/replace", response_class=HTMLResponse)
+    async def replace_embedded_page_route(
+        request: Request,
+        page_key: str,
+        admin: str = Depends(require_admin),
+        html_file: Optional[UploadFile] = File(None),
+        csrf_token: str = Form(""),
+    ) -> HTMLResponse:
+        require_admin_csrf(request, csrf_token)
+        config = load_app_config()
+        try:
+            html_content = await prepare_embedded_html_file(html_file, config)
+            replace_embedded_page_file(page_key, html_content, admin)
+        except ValueError as exc:
+            return render_embedded_pages_admin(request, admin, error=str(exc), status_code=400)
+        return RedirectResponse(url="/admin/embedded-pages", status_code=303)
+
+    @app.post("/admin/embedded-pages/{page_key}/toggle")
+    def toggle_embedded_page_route(
+        request: Request,
+        page_key: str,
+        admin: str = Depends(require_admin),
+        enabled: str = Form("0"),
+        csrf_token: str = Form(""),
+    ) -> RedirectResponse:
+        require_admin_csrf(request, csrf_token)
+        set_embedded_page_enabled(page_key, enabled in {"1", "true", "on", "yes"}, admin)
+        return RedirectResponse(url="/admin/embedded-pages", status_code=303)
+
+    @app.get("/admin/embed-content/{page_key}", response_class=HTMLResponse)
+    def embedded_page_content(page_key: str, _admin: str = Depends(require_admin)) -> HTMLResponse:
+        page = fetch_embedded_page(page_key, enabled_only=True)
+        if not page:
+            raise HTTPException(status_code=404, detail="嵌入页面不存在或未启用")
+        target = embedded_html_path(str(page.get("filename") or ""))
+        if not target or not target.is_file():
+            raise HTTPException(status_code=404, detail="HTML 文件不存在")
+        return HTMLResponse(
+            target.read_text(encoding="utf-8"),
+            headers={
+                "X-Frame-Options": "SAMEORIGIN",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+
+    @app.get("/admin/embed/{page_key}", response_class=HTMLResponse)
+    def embedded_page_view(
+        request: Request,
+        page_key: str,
+        admin: str = Depends(require_admin),
+    ) -> HTMLResponse:
+        page = fetch_embedded_page(page_key, enabled_only=True)
+        if not page:
+            raise HTTPException(status_code=404, detail="嵌入页面不存在或未启用")
+        content_url = f"/admin/embed-content/{page['page_key']}?{urlencode({'v': page['version']})}"
+        return templates.TemplateResponse(
+            request,
+            "embedded_page.html",
+            {
+                "request": request,
+                "page": page,
+                "content_url": content_url,
+                "admin_user": admin,
+                "csrf_token": current_csrf_token(request),
+                "current_menu": f"embedded:{page['page_key']}",
             },
         )
 

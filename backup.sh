@@ -19,4 +19,11 @@ else
     echo "Warning: uploads/ not found, created empty uploads backup directory."
 fi
 
+if [ -d "data/embedded_pages" ]; then
+    cp -a "data/embedded_pages" "$backup_dir/embedded_pages"
+else
+    mkdir -p "$backup_dir/embedded_pages"
+    echo "Warning: data/embedded_pages/ not found, created empty embedded pages backup directory."
+fi
+
 echo "Backup complete: $backup_dir"

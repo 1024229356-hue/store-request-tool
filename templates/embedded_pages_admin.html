@@ -1,0 +1,107 @@
+{% set page_title = '嵌入页面管理' %}
+{% set page_subtitle = '上传或替换后台嵌入 HTML，刷新页面即可读取服务器最新版本。' %}
+{% set page_eyebrow = '扩展页面' %}
+{% set current_menu = 'embedded-pages' %}
+{% extends "base_admin.html" %}
+
+{% block content %}
+{% if error %}
+<div class="alert alert-error">{{ error }}</div>
+{% endif %}
+
+<section class="admin-section work-card embedded-admin-section">
+  <div class="section-heading">
+    <h2>新增嵌入页面</h2>
+    <p>HTML 文件会保存到运行数据目录，不进入 GitHub。page_key 只能使用小写字母、数字和短横线。</p>
+  </div>
+  <form class="embedded-form" method="post" action="/admin/embedded-pages" enctype="multipart/form-data">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label>
+      <span>page_key</span>
+      <input name="page_key" type="text" placeholder="daily-report" pattern="[a-z0-9]+(-[a-z0-9]+)*" required>
+    </label>
+    <label>
+      <span>页面标题</span>
+      <input name="title" type="text" placeholder="每日经营日报" required>
+    </label>
+    <label>
+      <span>导航名称</span>
+      <input name="nav_label" type="text" placeholder="经营日报" required>
+    </label>
+    <label>
+      <span>HTML 文件</span>
+      <input name="html_file" type="file" accept=".html" required>
+      <small class="inline-hint">仅支持 .html，最大 {{ max_embedded_html_mb }}MB。</small>
+    </label>
+    <label class="inline-check">
+      <input name="enabled" type="checkbox" value="1" checked>
+      <span>启用并显示在左侧导航</span>
+    </label>
+    <button class="primary-button" type="submit">新增页面</button>
+  </form>
+</section>
+
+<section class="admin-section work-card embedded-admin-section">
+  <div class="section-heading">
+    <h2>页面列表</h2>
+    <p>替换 HTML 后 iframe 地址会带新版本参数，后台用户刷新即可看到新版。</p>
+  </div>
+  <div class="table-wrap">
+    <table class="ticket-table erp-table embedded-table">
+      <thead>
+        <tr>
+          <th>page_key</th>
+          <th>页面标题</th>
+          <th>导航名称</th>
+          <th>状态</th>
+          <th>最近更新时间</th>
+          <th>更新人</th>
+          <th>预览</th>
+          <th>替换文件</th>
+          <th>启用/停用</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for page in pages %}
+        <tr>
+          <td>{{ page.page_key }}</td>
+          <td>{{ page.title }}</td>
+          <td>{{ page.nav_label }}</td>
+          <td>{{ '启用' if page.enabled else '停用' }}</td>
+          <td>{{ page.updated_at }}</td>
+          <td>{{ page.updated_by or '-' }}</td>
+          <td>
+            {% if page.enabled %}
+            <a class="ghost-button compact" href="/admin/embed/{{ page.page_key }}">预览</a>
+            {% else %}
+            <span class="subtle">未启用</span>
+            {% endif %}
+          </td>
+          <td>
+            <form class="inline-upload-form" method="post" action="/admin/embedded-pages/{{ page.page_key }}/replace" enctype="multipart/form-data">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <input name="html_file" type="file" accept=".html" required>
+              <button class="ghost-button compact" type="submit">替换文件</button>
+            </form>
+          </td>
+          <td>
+            <form method="post" action="/admin/embedded-pages/{{ page.page_key }}/toggle">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <input type="hidden" name="enabled" value="{{ '0' if page.enabled else '1' }}">
+              <button class="ghost-button compact" type="submit">{{ '停用' if page.enabled else '启用' }}</button>
+            </form>
+          </td>
+        </tr>
+        {% else %}
+        <tr>
+          <td class="empty-cell" colspan="9">
+            <strong>暂无嵌入页面</strong>
+            <span>新增页面后会出现在这里，启用状态下也会进入左侧扩展页面导航。</span>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}
