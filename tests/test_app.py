@@ -1459,6 +1459,48 @@ def test_admin_dashboard_due_status_and_attachment_statistics(tmp_path, monkeypa
     assert "该工单已超过期望完成时间，请优先处理。" in detail_page.text
 
 
+def test_lightweight_erp_admin_layout_navigation_and_placeholder_pages(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch)
+    submit_ticket_with_image_and_file(client, description="ERP 布局测试工单")
+    logged_in_client(client)
+
+    admin_page = client.get("/admin")
+    assert admin_page.status_code == 200
+    assert 'class="admin-layout"' in admin_page.text
+    assert "止痒 ERP" in admin_page.text
+    assert "工单管理" in admin_page.text
+    assert "data-current-menu=\"tickets\"" in admin_page.text
+
+    dashboard = client.get("/admin/dashboard")
+    assert dashboard.status_code == 200
+    assert "止痒运营协同总览" in dashboard.text
+    assert "dashboard-hero" in dashboard.text
+    assert "最近工单动态" in dashboard.text
+
+    for label in ("业务总览", "工单管理", "门店查询", "数据导出", "配置管理", "账号设置", "系统设置"):
+        assert label in dashboard.text
+
+    for path, title in (
+        ("/admin/settings", "配置管理"),
+        ("/admin/account", "账号设置"),
+        ("/admin/system", "系统设置"),
+    ):
+        unauthenticated = TestClient(__import__("main").app).get(path, follow_redirects=False)
+        assert unauthenticated.status_code == 303
+        assert unauthenticated.headers["location"].startswith("/admin/login")
+        page = client.get(path)
+        assert page.status_code == 200
+        assert 'class="admin-layout"' in page.text
+        assert title in page.text
+
+    assert client.get("/submit").status_code == 200
+    assert client.get("/query").status_code == 200
+    assert client.get("/admin/ticket/1").status_code == 200
+    export_response = client.get("/admin/export")
+    assert export_response.status_code == 200
+    assert export_response.content.startswith(b"PK")
+
+
 def test_session_security_secure_cookie_expiry_csrf_and_env_example(tmp_path, monkeypatch):
     monkeypatch.setenv("SESSION_MAX_AGE_HOURS", "1")
     monkeypatch.setenv("SESSION_COOKIE_SECURE", "true")

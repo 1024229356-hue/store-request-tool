@@ -1,260 +1,219 @@
-<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>止痒工单后台</title>
-  <link rel="stylesheet" href="/static/style.css?v=ui20260704">
-</head>
-<body class="page-admin">
-  <header class="admin-topbar">
-    <div>
-      <p class="eyebrow">总部后台</p>
-      <h1>止痒工单后台</h1>
-      <p class="subtle">统一查看、筛选、处理门店需求</p>
+{% set page_title = '工单管理' %}
+{% set page_subtitle = '统一查看、筛选、处理门店需求，保持处理过程可追踪。' %}
+{% set page_eyebrow = '止痒工单后台' %}
+{% set current_menu = 'tickets' %}
+{% extends "base_admin.html" %}
+
+{% block topbar_actions %}
+<a class="quick-action-button" href="{{ export_url }}">导出 Excel</a>
+<a class="ghost-button compact" href="/admin/dashboard">查看统计</a>
+{% endblock %}
+
+{% block content %}
+<section class="stats-section work-card" aria-label="统计概览">
+  <div class="section-heading admin-section-heading">
+    <h2>统计概览</h2>
+    <p>统计基于当前筛选条件，不受分页影响。</p>
+  </div>
+  <div class="stats-grid">
+    <article class="stat-card metric-card" data-summary-total="{{ summary.total_count }}">
+      <span>当前筛选结果</span>
+      <strong>{{ summary.total_count }}</strong>
+      <small>共 {{ pagination.total_pages }} 页</small>
+    </article>
+    <article class="stat-card metric-card">
+      <span>当前页工单</span>
+      <strong>{{ tickets|length }}</strong>
+      <small>每页 {{ pagination.page_size }} 条</small>
+    </article>
+    <article class="stat-card metric-card" data-summary-pending="{{ summary.pending_count }}">
+      <span>待处理</span>
+      <strong>{{ summary.pending_count }}</strong>
+      <small>需要分配或跟进</small>
+    </article>
+    <article class="stat-card metric-card" data-summary-processing="{{ summary.processing_count }}">
+      <span>处理中</span>
+      <strong>{{ summary.processing_count }}</strong>
+      <small>总部已接手</small>
+    </article>
+    <article class="stat-card metric-card stat-alert" data-summary-today-urgent="{{ summary.today_urgent_count }}">
+      <span>当天必须处理</span>
+      <strong>{{ summary.today_urgent_count }}</strong>
+      <small>优先查看</small>
+    </article>
+    <article class="stat-card metric-card" data-summary-completed="{{ summary.completed_count }}">
+      <span>已完成</span>
+      <strong>{{ summary.completed_count }}</strong>
+      <small>已闭环</small>
+    </article>
+  </div>
+</section>
+
+<section class="filter-card work-card">
+  <div class="section-heading admin-section-heading">
+    <h2>筛选条件</h2>
+    <p>按门店、状态、日期和关键词快速定位工单。</p>
+  </div>
+  <form class="filter-bar" method="get" action="/admin">
+    <label>
+      <span>门店</span>
+      <select name="store_name">
+        <option value="">全部</option>
+        {% for store in stores %}
+        <option value="{{ store }}" {% if filters.get('store_name') == store %}selected{% endif %}>{{ store }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>
+      <span>需求类型</span>
+      <select name="request_type">
+        <option value="">全部</option>
+        {% for item in request_types %}
+        <option value="{{ item }}" {% if filters.get('request_type') == item %}selected{% endif %}>{{ item }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>
+      <span>紧急程度</span>
+      <select name="urgency">
+        <option value="">全部</option>
+        {% for item in urgency_levels %}
+        <option value="{{ item }}" {% if filters.get('urgency') == item %}selected{% endif %}>{{ item }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>
+      <span>状态</span>
+      <select name="status">
+        <option value="">全部</option>
+        {% for item in statuses %}
+        <option value="{{ item }}" {% if filters.get('status') == item %}selected{% endif %}>{{ item }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>
+      <span>处理人</span>
+      <select name="assigned_to">
+        <option value="">全部</option>
+        {% for item in handlers %}
+        <option value="{{ item }}" {% if filters.get('assigned_to') == item %}selected{% endif %}>{{ item }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>
+      <span>时效</span>
+      <select name="due_status">
+        <option value="">全部</option>
+        {% for item in due_status_options %}
+        <option value="{{ item }}" {% if filters.get('due_status') == item %}selected{% endif %}>{{ item }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <div class="date-range">
+      <label>
+        <span>开始日期</span>
+        <input type="date" name="date_start" value="{{ filters.get('date_start', '') }}">
+      </label>
+      <label>
+        <span>结束日期</span>
+        <input type="date" name="date_end" value="{{ filters.get('date_end', '') }}">
+      </label>
     </div>
-    <div class="admin-actions">
-      <a class="ghost-button compact" href="/admin">工单列表</a>
-      <a class="ghost-button compact" href="/admin/dashboard">统计看板</a>
-      <span class="admin-user">当前账号：{{ admin_user }}</span>
-      <div class="notification-root" data-notification-root data-csrf-token="{{ csrf_token }}">
-        <button class="ghost-button compact notification-button" type="button" data-notification-toggle>
-          消息 <span class="notification-badge" data-notification-count hidden>0</span>
-        </button>
-        <div class="notification-panel" data-notification-panel hidden>
-          <div class="notification-panel-head">
-            <strong>消息提醒</strong>
-            <div class="notification-panel-actions">
-              <button class="ghost-button compact" type="button" data-notification-enable-desktop hidden>开启桌面提醒</button>
-              <button class="ghost-button compact" type="button" data-notification-read-all>全部已读</button>
-            </div>
-          </div>
-          <div class="notification-list" data-notification-list>
-            <p class="empty-note">暂无消息。</p>
-          </div>
-        </div>
-        <div class="notification-toast-area" data-notification-toasts></div>
-      </div>
-      <a class="secondary-button export-button" href="{{ export_url }}">导出 Excel</a>
-      <form class="account-action-form" method="post" action="/admin/logout">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <button class="ghost-button compact" type="submit">切换账号</button>
-      </form>
-      <form class="account-action-form" method="post" action="/admin/logout">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <button class="ghost-button compact" type="submit">退出登录</button>
-      </form>
+    <label class="filter-keyword">
+      <span>关键词</span>
+      <input type="search" name="keyword" value="{{ filters.get('keyword', '') }}" placeholder="工单号、商品、说明、处理人">
+    </label>
+    <label>
+      <span>排序</span>
+      <select name="sort">
+        <option value="newest" {% if sort == 'newest' %}selected{% endif %}>提交时间倒序</option>
+        <option value="urgency" {% if sort == 'urgency' %}selected{% endif %}>紧急程度优先</option>
+        <option value="status" {% if sort == 'status' %}selected{% endif %}>状态优先</option>
+      </select>
+    </label>
+    <div class="filter-actions">
+      <button class="primary-button compact" type="submit">筛选</button>
+      <a class="ghost-button compact" href="/admin">重置</a>
     </div>
-  </header>
+  </form>
+</section>
 
-  <main class="admin-shell">
-    <section class="stats-section" aria-label="统计概览">
-      <div class="section-heading admin-section-heading">
-        <h2>统计概览</h2>
-        <p>统计基于当前筛选条件，不受分页影响。</p>
-      </div>
-      <div class="stats-grid">
-        <article class="stat-card" data-summary-total="{{ summary.total_count }}">
-          <span>当前筛选结果</span>
-          <strong>{{ summary.total_count }}</strong>
-          <small>共 {{ pagination.total_pages }} 页</small>
-        </article>
-        <article class="stat-card">
-          <span>当前页工单</span>
-          <strong>{{ tickets|length }}</strong>
-          <small>每页 {{ pagination.page_size }} 条</small>
-        </article>
-        <article class="stat-card" data-summary-pending="{{ summary.pending_count }}">
-          <span>待处理</span>
-          <strong>{{ summary.pending_count }}</strong>
-          <small>需要分配或跟进</small>
-        </article>
-        <article class="stat-card" data-summary-processing="{{ summary.processing_count }}">
-          <span>处理中</span>
-          <strong>{{ summary.processing_count }}</strong>
-          <small>总部已接手</small>
-        </article>
-        <article class="stat-card stat-alert" data-summary-today-urgent="{{ summary.today_urgent_count }}">
-          <span>当天必须处理</span>
-          <strong>{{ summary.today_urgent_count }}</strong>
-          <small>优先查看</small>
-        </article>
-        <article class="stat-card" data-summary-completed="{{ summary.completed_count }}">
-          <span>已完成</span>
-          <strong>{{ summary.completed_count }}</strong>
-          <small>已闭环</small>
-        </article>
-      </div>
-    </section>
+<section class="table-wrap work-card">
+  <table class="ticket-table erp-table">
+    <thead>
+      <tr>
+        <th>工单号</th>
+        <th>提交时间</th>
+        <th>门店</th>
+        <th>提报人</th>
+        <th>需求类型</th>
+        <th>紧急程度</th>
+        <th>品牌</th>
+        <th>商品名称</th>
+        <th>规格条码</th>
+        <th>数量</th>
+        <th>问题说明摘要</th>
+        <th>图片数 / 文件数</th>
+        <th>当前状态</th>
+        <th>时效</th>
+        <th>处理人</th>
+        <th>完成时间</th>
+        <th>最后更新时间</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for ticket in tickets %}
+      <tr>
+        <td><a class="table-link ticket-no-link" href="{{ ticket.detail_url }}">{{ ticket.ticket_no }}</a></td>
+        <td>{{ ticket.created_at }}</td>
+        <td>{{ ticket.store_name }}</td>
+        <td>{{ ticket.submitter }}</td>
+        <td>{{ ticket.request_type }}</td>
+        <td><span class="badge status-badge urgency-{{ ticket.urgency }}">{{ ticket.urgency }}</span></td>
+        <td>{{ ticket.brand or '' }}</td>
+        <td>{{ ticket.product_name or '' }}</td>
+        <td>{{ ticket.sku_barcode or '' }}</td>
+        <td>{{ ticket.quantity if ticket.quantity is not none else '' }}</td>
+        <td class="summary-cell" title="{{ ticket.description }}">
+          <div class="summary-text">{{ ticket.description_summary }}</div>
+        </td>
+        <td title="图片 {{ ticket.image_count or 0 }} / 文件 {{ ticket.file_count or 0 }}">
+          <div class="attachment-counts">
+            <span class="attachment-badge">图片 {{ ticket.image_count or 0 }}</span>
+            <span class="attachment-badge">文件 {{ ticket.file_count or 0 }}</span>
+          </div>
+        </td>
+        <td><span class="badge status-badge status-{{ ticket.status }}">{{ ticket.status }}</span></td>
+        <td><span class="badge status-badge due-{{ ticket.due_status_class }}">{{ ticket.due_status }}</span></td>
+        <td>{{ ticket.assigned_to or '' }}</td>
+        <td>{{ ticket.closed_at or '' }}</td>
+        <td>{{ ticket.updated_at }}</td>
+      </tr>
+      {% else %}
+      <tr>
+        <td class="empty-cell" colspan="17">
+          <strong>当前条件下暂无工单</strong>
+          <span>可以调整筛选条件，或等待门店提交新的需求。</span>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
 
-    <section class="filter-card">
-      <div class="section-heading admin-section-heading">
-        <h2>筛选条件</h2>
-        <p>按门店、状态、日期和关键词快速定位工单。</p>
-      </div>
-      <form class="filter-bar" method="get" action="/admin">
-        <label>
-          <span>门店</span>
-          <select name="store_name">
-            <option value="">全部</option>
-            {% for store in stores %}
-            <option value="{{ store }}" {% if filters.get('store_name') == store %}selected{% endif %}>{{ store }}</option>
-            {% endfor %}
-          </select>
-        </label>
-        <label>
-          <span>需求类型</span>
-          <select name="request_type">
-            <option value="">全部</option>
-            {% for item in request_types %}
-            <option value="{{ item }}" {% if filters.get('request_type') == item %}selected{% endif %}>{{ item }}</option>
-            {% endfor %}
-          </select>
-        </label>
-        <label>
-          <span>紧急程度</span>
-          <select name="urgency">
-            <option value="">全部</option>
-            {% for item in urgency_levels %}
-            <option value="{{ item }}" {% if filters.get('urgency') == item %}selected{% endif %}>{{ item }}</option>
-            {% endfor %}
-          </select>
-        </label>
-        <label>
-          <span>状态</span>
-          <select name="status">
-            <option value="">全部</option>
-            {% for item in statuses %}
-            <option value="{{ item }}" {% if filters.get('status') == item %}selected{% endif %}>{{ item }}</option>
-            {% endfor %}
-          </select>
-        </label>
-        <label>
-          <span>处理人</span>
-          <select name="assigned_to">
-            <option value="">全部</option>
-            {% for item in handlers %}
-            <option value="{{ item }}" {% if filters.get('assigned_to') == item %}selected{% endif %}>{{ item }}</option>
-            {% endfor %}
-          </select>
-        </label>
-        <label>
-          <span>时效</span>
-          <select name="due_status">
-            <option value="">全部</option>
-            {% for item in due_status_options %}
-            <option value="{{ item }}" {% if filters.get('due_status') == item %}selected{% endif %}>{{ item }}</option>
-            {% endfor %}
-          </select>
-        </label>
-        <div class="date-range">
-          <label>
-            <span>开始日期</span>
-            <input type="date" name="date_start" value="{{ filters.get('date_start', '') }}">
-          </label>
-          <label>
-            <span>结束日期</span>
-            <input type="date" name="date_end" value="{{ filters.get('date_end', '') }}">
-          </label>
-        </div>
-        <label class="filter-keyword">
-          <span>关键词</span>
-          <input type="search" name="keyword" value="{{ filters.get('keyword', '') }}" placeholder="工单号、商品、说明、处理人">
-        </label>
-        <label>
-          <span>排序</span>
-          <select name="sort">
-            <option value="newest" {% if sort == 'newest' %}selected{% endif %}>提交时间倒序</option>
-            <option value="urgency" {% if sort == 'urgency' %}selected{% endif %}>紧急程度优先</option>
-            <option value="status" {% if sort == 'status' %}selected{% endif %}>状态优先</option>
-          </select>
-        </label>
-        <div class="filter-actions">
-          <button class="primary-button compact" type="submit">筛选</button>
-          <a class="ghost-button compact" href="/admin">重置</a>
-        </div>
-      </form>
-    </section>
-
-    <section class="table-wrap">
-      <table class="ticket-table">
-        <thead>
-          <tr>
-            <th>工单号</th>
-            <th>提交时间</th>
-            <th>门店</th>
-            <th>提报人</th>
-            <th>需求类型</th>
-            <th>紧急程度</th>
-            <th>品牌</th>
-            <th>商品名称</th>
-            <th>规格条码</th>
-            <th>数量</th>
-            <th>问题说明摘要</th>
-            <th>图片数 / 文件数</th>
-            <th>当前状态</th>
-            <th>时效</th>
-            <th>处理人</th>
-            <th>完成时间</th>
-            <th>最后更新时间</th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for ticket in tickets %}
-          <tr>
-            <td><a class="table-link" href="{{ ticket.detail_url }}">{{ ticket.ticket_no }}</a></td>
-            <td>{{ ticket.created_at }}</td>
-            <td>{{ ticket.store_name }}</td>
-            <td>{{ ticket.submitter }}</td>
-            <td>{{ ticket.request_type }}</td>
-            <td><span class="badge urgency-{{ ticket.urgency }}">{{ ticket.urgency }}</span></td>
-            <td>{{ ticket.brand or '' }}</td>
-            <td>{{ ticket.product_name or '' }}</td>
-            <td>{{ ticket.sku_barcode or '' }}</td>
-            <td>{{ ticket.quantity if ticket.quantity is not none else '' }}</td>
-            <td class="summary-cell" title="{{ ticket.description }}">
-              <div class="summary-text">{{ ticket.description_summary }}</div>
-            </td>
-            <td title="图片 {{ ticket.image_count or 0 }} / 文件 {{ ticket.file_count or 0 }}">
-              <div class="attachment-counts">
-                <span class="attachment-badge">图片 {{ ticket.image_count or 0 }}</span>
-                <span class="attachment-badge">文件 {{ ticket.file_count or 0 }}</span>
-              </div>
-            </td>
-            <td><span class="badge status-{{ ticket.status }}">{{ ticket.status }}</span></td>
-            <td><span class="badge due-{{ ticket.due_status_class }}">{{ ticket.due_status }}</span></td>
-            <td>{{ ticket.assigned_to or '' }}</td>
-            <td>{{ ticket.closed_at or '' }}</td>
-            <td>{{ ticket.updated_at }}</td>
-          </tr>
-          {% else %}
-          <tr>
-            <td class="empty-cell" colspan="17">
-              <strong>当前条件下暂无工单</strong>
-              <span>可以调整筛选条件，或等待门店提交新的需求。</span>
-            </td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-    </section>
-
-    <nav class="pagination-bar" aria-label="后台分页">
-      <div>当前第 {{ pagination.current_page }} 页 / 共 {{ pagination.total_pages }} 页 / 共 {{ pagination.total_count }} 条工单</div>
-      <div class="pagination-actions">
-        {% if pagination.has_prev %}
-        <a class="ghost-button compact" href="{{ prev_page_url }}">上一页</a>
-        {% else %}
-        <span class="ghost-button compact disabled">上一页</span>
-        {% endif %}
-        {% if pagination.has_next %}
-        <a class="ghost-button compact" href="{{ next_page_url }}">下一页</a>
-        {% else %}
-        <span class="ghost-button compact disabled">下一页</span>
-        {% endif %}
-      </div>
-    </nav>
-  </main>
-  <script src="/static/app.js?v=ui20260704"></script>
-</body>
-</html>
+<nav class="pagination-bar" aria-label="后台分页">
+  <div>当前第 {{ pagination.current_page }} 页 / 共 {{ pagination.total_pages }} 页 / 共 {{ pagination.total_count }} 条工单</div>
+  <div class="pagination-actions">
+    {% if pagination.has_prev %}
+    <a class="ghost-button compact" href="{{ prev_page_url }}">上一页</a>
+    {% else %}
+    <span class="ghost-button compact disabled">上一页</span>
+    {% endif %}
+    {% if pagination.has_next %}
+    <a class="ghost-button compact" href="{{ next_page_url }}">下一页</a>
+    {% else %}
+    <span class="ghost-button compact disabled">下一页</span>
+    {% endif %}
+  </div>
+</nav>
+{% endblock %}

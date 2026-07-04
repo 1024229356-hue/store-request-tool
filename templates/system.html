@@ -1,0 +1,23 @@
+{% set page_title = '系统设置' %}
+{% set page_subtitle = '查看本地运行、数据库、上传目录和部署维护提示。' %}
+{% set page_eyebrow = '运行维护' %}
+{% set current_menu = 'system' %}
+{% extends "base_admin.html" %}
+
+{% block content %}
+<section class="work-card placeholder-panel">
+  <div class="section-heading">
+    <h2>运行方式</h2>
+    <p>当前系统继续使用 FastAPI + Jinja2 + SQLite + 原生 HTML/CSS/JS。</p>
+  </div>
+  <dl class="detail-grid">
+    <div><dt>本地启动</dt><dd>python -m uvicorn main:app --host 127.0.0.1 --port 8701</dd></div>
+    <div><dt>数据库路径</dt><dd>{{ database_path }}</dd></div>
+    <div><dt>上传目录</dt><dd>{{ upload_dir }}</dd></div>
+    <div><dt>配置目录</dt><dd>{{ config_dir }}</dd></div>
+    <div><dt>备份说明</dt><dd>backup.sh 会备份 data/tickets.db 和 uploads/。</dd></div>
+    <div><dt>部署提示</dt><dd>生产环境建议使用 Nginx + HTTPS，并设置 SESSION_SECRET。</dd></div>
+  </dl>
+  <p class="empty-note">不要删除 data/tickets.db 或 uploads；运行数据保持本地，不上传 GitHub。</p>
+</section>
+{% endblock %}

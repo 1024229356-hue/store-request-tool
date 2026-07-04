@@ -1,193 +1,241 @@
-<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>统计看板</title>
-  <link rel="stylesheet" href="/static/style.css?v=ui20260704">
-</head>
-<body class="page-admin">
-  <header class="admin-topbar">
-    <div>
-      <p class="eyebrow">总部后台</p>
-      <h1>统计看板</h1>
-      <p class="subtle">按当前筛选条件汇总门店工单分类、状态、时效和附件情况。</p>
+{% set page_title = '业务总览' %}
+{% set page_subtitle = '统计看板 · 查看门店工单、状态时效、附件与补充资料概况。' %}
+{% set page_eyebrow = '运营工作台' %}
+{% set current_menu = 'dashboard' %}
+{% extends "base_admin.html" %}
+
+{% block topbar_actions %}
+<a class="quick-action-button" href="/admin">查看工单</a>
+<a class="ghost-button compact" href="/submit">提交工单</a>
+{% endblock %}
+
+{% block content %}
+<section class="dashboard-hero">
+  <div>
+    <p class="eyebrow">SaaS Dashboard</p>
+    <h2>止痒运营协同总览</h2>
+    <p>今日新增 {{ stats.today_new_count }} 条工单，当前待处理 {{ stats.pending_count }} 条，当天必须处理 {{ stats.today_urgent_count }} 条。</p>
+    <div class="hero-actions">
+      <a class="primary-button" href="/admin">查看工单</a>
+      <a class="ghost-button" href="/submit">提交工单</a>
     </div>
-    <div class="admin-actions">
-      <a class="ghost-button compact" href="/admin">工单列表</a>
-      <a class="ghost-button compact" href="/admin/dashboard">统计看板</a>
-      <span class="admin-user">当前账号：{{ admin_user }}</span>
-      <div class="notification-root" data-notification-root data-csrf-token="{{ csrf_token }}">
-        <button class="ghost-button compact notification-button" type="button" data-notification-toggle>
-          消息 <span class="notification-badge" data-notification-count hidden>0</span>
-        </button>
-        <div class="notification-panel" data-notification-panel hidden>
-          <div class="notification-panel-head">
-            <strong>消息提醒</strong>
-            <div class="notification-panel-actions">
-              <button class="ghost-button compact" type="button" data-notification-enable-desktop hidden>开启桌面提醒</button>
-              <button class="ghost-button compact" type="button" data-notification-read-all>全部已读</button>
-            </div>
-          </div>
-          <div class="notification-list" data-notification-list>
-            <p class="empty-note">暂无消息。</p>
-          </div>
-        </div>
-        <div class="notification-toast-area" data-notification-toasts></div>
-      </div>
-      <form class="account-action-form" method="post" action="/admin/logout">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <button class="ghost-button compact" type="submit">切换账号</button>
-      </form>
-      <form class="account-action-form" method="post" action="/admin/logout">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <button class="ghost-button compact" type="submit">退出登录</button>
-      </form>
+  </div>
+  <div class="hero-date">
+    <span>当前日期</span>
+    <strong>{{ today_label }}</strong>
+  </div>
+</section>
+
+<section class="stats-section work-card">
+  <div class="section-heading admin-section-heading">
+    <h2>核心指标</h2>
+    <p>一眼查看总部需要优先处理的工单状态。</p>
+  </div>
+  <div class="stats-grid dashboard-card-grid">
+    <article class="stat-card metric-card">
+      <span>今日新增工单</span>
+      <strong>{{ stats.today_new_count }}</strong>
+      <small>今天提交</small>
+    </article>
+    <article class="stat-card metric-card">
+      <span>当前待处理</span>
+      <strong>{{ stats.pending_count }}</strong>
+      <small>需要分派</small>
+    </article>
+    <article class="stat-card metric-card">
+      <span>处理中</span>
+      <strong>{{ stats.processing_count }}</strong>
+      <small>总部接手</small>
+    </article>
+    <article class="stat-card metric-card">
+      <span>待门店补充</span>
+      <strong>{{ stats.need_supplement_count }}</strong>
+      <small>等待门店</small>
+    </article>
+    <article class="stat-card metric-card">
+      <span>已完成</span>
+      <strong>{{ stats.completed_count }}</strong>
+      <small>完成闭环</small>
+    </article>
+    <article class="stat-card metric-card stat-alert">
+      <span>已超时</span>
+      <strong>{{ stats.overdue_count }}</strong>
+      <small>优先处理</small>
+    </article>
+    <article class="stat-card metric-card">
+      <span>附件工单数</span>
+      <strong>{{ stats.attachment_ticket_count }}</strong>
+      <small>含图片或文件</small>
+    </article>
+    <article class="stat-card metric-card">
+      <span>门店补充数</span>
+      <strong>{{ stats.store_supplement_count }}</strong>
+      <small>补充资料记录</small>
+    </article>
+  </div>
+</section>
+
+<section class="filter-card work-card">
+  <div class="section-heading admin-section-heading">
+    <h2>看板筛选</h2>
+    <p>筛选后，指标、动态和结构统计会同步更新。</p>
+  </div>
+  <form class="filter-bar" method="get" action="/admin/dashboard">
+    <label>
+      <span>门店</span>
+      <select name="store_name">
+        <option value="">全部</option>
+        {% for store in stores %}
+        <option value="{{ store }}" {% if filters.get('store_name') == store %}selected{% endif %}>{{ store }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>
+      <span>需求类型</span>
+      <select name="request_type">
+        <option value="">全部</option>
+        {% for item in request_types %}
+        <option value="{{ item }}" {% if filters.get('request_type') == item %}selected{% endif %}>{{ item }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>
+      <span>状态</span>
+      <select name="status">
+        <option value="">全部</option>
+        {% for item in statuses %}
+        <option value="{{ item }}" {% if filters.get('status') == item %}selected{% endif %}>{{ item }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>
+      <span>处理人</span>
+      <select name="assigned_to">
+        <option value="">全部</option>
+        {% for item in handlers %}
+        <option value="{{ item }}" {% if filters.get('assigned_to') == item %}selected{% endif %}>{{ item }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <div class="date-range">
+      <label>
+        <span>开始日期</span>
+        <input type="date" name="date_start" value="{{ filters.get('date_start', '') }}">
+      </label>
+      <label>
+        <span>结束日期</span>
+        <input type="date" name="date_end" value="{{ filters.get('date_end', '') }}">
+      </label>
     </div>
-  </header>
+    <div class="filter-actions">
+      <button class="primary-button compact" type="submit">筛选</button>
+      <a class="ghost-button compact" href="/admin/dashboard">重置</a>
+    </div>
+  </form>
+</section>
 
-  <main class="admin-shell">
-    <section class="filter-card">
-      <form class="filter-bar" method="get" action="/admin/dashboard">
-        <label>
-          <span>门店</span>
-          <select name="store_name">
-            <option value="">全部</option>
-            {% for store in stores %}
-            <option value="{{ store }}" {% if filters.get('store_name') == store %}selected{% endif %}>{{ store }}</option>
-            {% endfor %}
-          </select>
-        </label>
-        <label>
-          <span>需求类型</span>
-          <select name="request_type">
-            <option value="">全部</option>
-            {% for item in request_types %}
-            <option value="{{ item }}" {% if filters.get('request_type') == item %}selected{% endif %}>{{ item }}</option>
-            {% endfor %}
-          </select>
-        </label>
-        <label>
-          <span>状态</span>
-          <select name="status">
-            <option value="">全部</option>
-            {% for item in statuses %}
-            <option value="{{ item }}" {% if filters.get('status') == item %}selected{% endif %}>{{ item }}</option>
-            {% endfor %}
-          </select>
-        </label>
-        <label>
-          <span>处理人</span>
-          <select name="assigned_to">
-            <option value="">全部</option>
-            {% for item in handlers %}
-            <option value="{{ item }}" {% if filters.get('assigned_to') == item %}selected{% endif %}>{{ item }}</option>
-            {% endfor %}
-          </select>
-        </label>
-        <div class="date-range">
-          <label>
-            <span>开始日期</span>
-            <input type="date" name="date_start" value="{{ filters.get('date_start', '') }}">
-          </label>
-          <label>
-            <span>结束日期</span>
-            <input type="date" name="date_end" value="{{ filters.get('date_end', '') }}">
-          </label>
+<section class="dashboard-grid dashboard-main-grid">
+  <article class="dashboard-panel work-card">
+    <h2>最近工单动态</h2>
+    <div class="recent-ticket-list">
+      {% for ticket in stats.recent_tickets %}
+      <div class="recent-ticket-item">
+        <div>
+          <a class="table-link ticket-no-link" href="{{ ticket.detail_url }}">{{ ticket.ticket_no }}</a>
+          <p>{{ ticket.store_name }} · {{ ticket.request_type }} · {{ ticket.description_summary }}</p>
         </div>
-        <div class="filter-actions">
-          <button class="primary-button compact" type="submit">筛选</button>
-          <a class="ghost-button compact" href="/admin/dashboard">重置</a>
-        </div>
-      </form>
-    </section>
-
-    <section class="stats-section">
-      <div class="stats-grid dashboard-card-grid">
-        {% for card in stats.cards %}
-        <article class="stat-card">
-          <span>{{ card.label }}</span>
-          <strong>{{ card.count }}</strong>
-          <small>{{ card.percent }}%</small>
-        </article>
-        {% endfor %}
+        <span class="badge status-badge status-{{ ticket.status }}">{{ ticket.status }}</span>
+        <time>{{ ticket.created_at }}</time>
+        <a class="ghost-button compact" href="{{ ticket.detail_url }}">查看</a>
       </div>
-    </section>
+      {% else %}
+      <p class="empty-note">暂无最近工单动态。</p>
+      {% endfor %}
+    </div>
+  </article>
 
-    <section class="dashboard-grid">
-      <article class="dashboard-panel">
-        <h2>按需求类型统计</h2>
-        {% for row in stats.by_request_type %}
-        <div class="bar-row">
-          <div class="bar-top"><span>{{ row.label }}</span><strong>{{ row.count }} / {{ row.percent }}%</strong></div>
-          <div class="bar-track"><span style="width: {{ row.percent }}%;"></span></div>
-        </div>
-        {% else %}
-        <p class="empty-note">暂无数据。</p>
-        {% endfor %}
-      </article>
+  <article class="dashboard-panel work-card">
+    <h2>工单类型结构</h2>
+    {% for row in stats.by_request_type %}
+    <div class="bar-row">
+      <div class="bar-top"><span>{{ row.label }}</span><strong>{{ row.count }} / {{ row.percent }}%</strong></div>
+      <div class="bar-track"><span style="width: {{ row.percent }}%;"></span></div>
+    </div>
+    {% else %}
+    <p class="empty-note">暂无数据。</p>
+    {% endfor %}
+  </article>
+</section>
 
-      <article class="dashboard-panel">
-        <h2>按门店统计 TOP 10</h2>
-        {% for row in stats.by_store %}
-        <div class="bar-row">
-          <div class="bar-top"><span>{{ row.label }}</span><strong>{{ row.count }} / {{ row.percent }}%</strong></div>
-          <div class="bar-track"><span style="width: {{ row.percent }}%;"></span></div>
-        </div>
-        {% else %}
-        <p class="empty-note">暂无数据。</p>
-        {% endfor %}
-      </article>
+<section class="dashboard-grid">
+  <article class="dashboard-panel work-card">
+    <h2>按门店统计 TOP 10</h2>
+    {% for row in stats.by_store %}
+    <div class="bar-row">
+      <div class="bar-top"><span>{{ row.label }}</span><strong>{{ row.count }} / {{ row.percent }}%</strong></div>
+      <div class="bar-track"><span style="width: {{ row.percent }}%;"></span></div>
+    </div>
+    {% else %}
+    <p class="empty-note">暂无数据。</p>
+    {% endfor %}
+  </article>
 
-      <article class="dashboard-panel">
-        <h2>按处理人统计</h2>
-        {% for row in stats.by_handler %}
-        <div class="bar-row">
-          <div class="bar-top"><span>{{ row.label }}</span><strong>{{ row.count }} / {{ row.percent }}%</strong></div>
-          <div class="bar-track"><span style="width: {{ row.percent }}%;"></span></div>
-        </div>
-        {% else %}
-        <p class="empty-note">暂无数据。</p>
-        {% endfor %}
-      </article>
+  <article class="dashboard-panel work-card">
+    <h2>按处理人统计</h2>
+    {% for row in stats.by_handler %}
+    <div class="bar-row">
+      <div class="bar-top"><span>{{ row.label }}</span><strong>{{ row.count }} / {{ row.percent }}%</strong></div>
+      <div class="bar-track"><span style="width: {{ row.percent }}%;"></span></div>
+    </div>
+    {% else %}
+    <p class="empty-note">暂无数据。</p>
+    {% endfor %}
+  </article>
 
-      <article class="dashboard-panel">
-        <h2>按状态统计</h2>
-        {% for row in stats.by_status %}
-        <div class="bar-row">
-          <div class="bar-top"><span>{{ row.label }}</span><strong>{{ row.count }} / {{ row.percent }}%</strong></div>
-          <div class="bar-track"><span style="width: {{ row.percent }}%;"></span></div>
-        </div>
-        {% else %}
-        <p class="empty-note">暂无数据。</p>
-        {% endfor %}
-      </article>
+  <article class="dashboard-panel work-card">
+    <h2>按状态统计</h2>
+    {% for row in stats.by_status %}
+    <div class="bar-row">
+      <div class="bar-top"><span>{{ row.label }}</span><strong>{{ row.count }} / {{ row.percent }}%</strong></div>
+      <div class="bar-track"><span style="width: {{ row.percent }}%;"></span></div>
+    </div>
+    {% else %}
+    <p class="empty-note">暂无数据。</p>
+    {% endfor %}
+  </article>
 
-      <article class="dashboard-panel">
-        <h2>按紧急程度统计</h2>
-        {% for row in stats.by_urgency %}
-        <div class="bar-row">
-          <div class="bar-top"><span>{{ row.label }}</span><strong>{{ row.count }} / {{ row.percent }}%</strong></div>
-          <div class="bar-track"><span style="width: {{ row.percent }}%;"></span></div>
-        </div>
-        {% else %}
-        <p class="empty-note">暂无数据。</p>
-        {% endfor %}
-      </article>
+  <article class="dashboard-panel work-card">
+    <h2>按紧急程度统计</h2>
+    {% for row in stats.by_urgency %}
+    <div class="bar-row">
+      <div class="bar-top"><span>{{ row.label }}</span><strong>{{ row.count }} / {{ row.percent }}%</strong></div>
+      <div class="bar-track"><span style="width: {{ row.percent }}%;"></span></div>
+    </div>
+    {% else %}
+    <p class="empty-note">暂无数据。</p>
+    {% endfor %}
+  </article>
 
-      <article class="dashboard-panel">
-        <h2>附件情况统计</h2>
-        {% for row in stats.attachments %}
-        <div class="bar-row">
-          <div class="bar-top"><span>{{ row.label }}</span><strong>{{ row.count }} / {{ row.percent }}%</strong></div>
-          <div class="bar-track"><span style="width: {{ row.percent }}%;"></span></div>
-        </div>
-        {% else %}
-        <p class="empty-note">暂无数据。</p>
-        {% endfor %}
-      </article>
-    </section>
-  </main>
-  <script src="/static/app.js?v=ui20260704"></script>
-</body>
-</html>
+  <article class="dashboard-panel work-card">
+    <h2>附件情况统计</h2>
+    {% for row in stats.attachments %}
+    <div class="bar-row">
+      <div class="bar-top"><span>{{ row.label }}</span><strong>{{ row.count }} / {{ row.percent }}%</strong></div>
+      <div class="bar-track"><span style="width: {{ row.percent }}%;"></span></div>
+    </div>
+    {% else %}
+    <p class="empty-note">暂无数据。</p>
+    {% endfor %}
+  </article>
+
+  <article class="dashboard-panel work-card">
+    <h2>总体状态</h2>
+    {% for card in stats.cards %}
+    <div class="bar-row">
+      <div class="bar-top"><span>{{ card.label }}</span><strong>{{ card.count }} / {{ card.percent }}%</strong></div>
+      <div class="bar-track"><span style="width: {{ card.percent }}%;"></span></div>
+    </div>
+    {% endfor %}
+  </article>
+</section>
+{% endblock %}

@@ -1,238 +1,151 @@
-<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>工单详情</title>
-  <link rel="stylesheet" href="/static/style.css?v=ui20260704">
-</head>
-<body class="page-admin">
-  <header class="admin-topbar">
-    <div>
-      <p class="eyebrow">工单详情</p>
-      <h1>{{ ticket.ticket_no }}</h1>
-      <div class="detail-header-badges">
-        <span class="badge status-{{ ticket.status }}">{{ ticket.status }}</span>
-        <span class="badge urgency-{{ ticket.urgency }}">{{ ticket.urgency }}</span>
-        <span class="badge due-{{ ticket.due_status_class }}">{{ ticket.due_status }}</span>
-      </div>
-    </div>
-    <div class="admin-actions">
-      <span class="admin-user">当前账号：{{ admin_user }}</span>
-      <div class="notification-root" data-notification-root data-csrf-token="{{ csrf_token }}">
-        <button class="ghost-button compact notification-button" type="button" data-notification-toggle>
-          消息 <span class="notification-badge" data-notification-count hidden>0</span>
-        </button>
-        <div class="notification-panel" data-notification-panel hidden>
-          <div class="notification-panel-head">
-            <strong>消息提醒</strong>
-            <div class="notification-panel-actions">
-              <button class="ghost-button compact" type="button" data-notification-enable-desktop hidden>开启桌面提醒</button>
-              <button class="ghost-button compact" type="button" data-notification-read-all>全部已读</button>
-            </div>
-          </div>
-          <div class="notification-list" data-notification-list>
-            <p class="empty-note">暂无消息。</p>
-          </div>
-        </div>
-        <div class="notification-toast-area" data-notification-toasts></div>
-      </div>
-      <a class="ghost-button compact" href="/admin">工单列表</a>
-      <a class="ghost-button compact" href="/admin/dashboard">统计看板</a>
-      <a class="ghost-button" href="{{ return_url }}">返回列表</a>
-      <form class="account-action-form" method="post" action="/admin/logout">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <button class="ghost-button compact" type="submit">切换账号</button>
-      </form>
-      <form class="account-action-form" method="post" action="/admin/logout">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <button class="ghost-button compact" type="submit">退出登录</button>
-      </form>
-    </div>
-  </header>
+{% set page_title = ticket.ticket_no %}
+{% set page_subtitle = '工单详情 · 提交信息、附件、处理面板和日志留痕。' %}
+{% set page_eyebrow = '工单详情' %}
+{% set current_menu = 'tickets' %}
+{% extends "base_admin.html" %}
 
-  <main class="detail-shell">
-    {% if saved %}
-    <div class="alert alert-success">处理信息已保存。</div>
-    {% endif %}
-    {% if attachments_saved %}
-    <div class="alert alert-success">补充附件已上传。</div>
-    {% endif %}
-    {% if upload_error %}
-    <div class="alert alert-error">{{ upload_error }}</div>
-    {% endif %}
-    {% if ticket.due_status == '已超时' %}
-    <div class="alert alert-error">该工单已超过期望完成时间，请优先处理。</div>
-    {% endif %}
+{% block header_meta %}
+<div class="detail-header-badges">
+  <span class="badge status-badge status-{{ ticket.status }}">{{ ticket.status }}</span>
+  <span class="badge status-badge urgency-{{ ticket.urgency }}">{{ ticket.urgency }}</span>
+  <span class="badge status-badge due-{{ ticket.due_status_class }}">{{ ticket.due_status }}</span>
+</div>
+{% endblock %}
 
-    <section class="detail-layout">
-      <div class="detail-main">
-        <section class="detail-section">
-          <h2>提交信息</h2>
-          <div class="detail-groups">
-            <section class="info-group">
-              <h3>基础信息</h3>
-              <dl class="detail-grid">
-                <div><dt>工单号</dt><dd>{{ ticket.ticket_no }}</dd></div>
-                <div><dt>门店</dt><dd>{{ ticket.store_name }}</dd></div>
-                <div><dt>提报人</dt><dd>{{ ticket.submitter }}</dd></div>
-                <div><dt>需求类型</dt><dd>{{ ticket.request_type }}</dd></div>
-                <div><dt>紧急程度</dt><dd><span class="badge urgency-{{ ticket.urgency }}">{{ ticket.urgency }}</span></dd></div>
-                <div><dt>当前状态</dt><dd><span class="badge status-{{ ticket.status }}">{{ ticket.status }}</span></dd></div>
-              </dl>
-            </section>
+{% block topbar_actions %}
+<a class="ghost-button compact" href="{{ return_url }}">返回列表</a>
+{% endblock %}
 
-            <section class="info-group">
-              <h3>商品信息</h3>
-              <dl class="detail-grid">
-                <div><dt>品牌</dt><dd>{{ ticket.brand or '-' }}</dd></div>
-                <div><dt>商品名称</dt><dd>{{ ticket.product_name or '-' }}</dd></div>
-                <div><dt>规格条码</dt><dd>{{ ticket.sku_barcode or '-' }}</dd></div>
-                <div><dt>数量</dt><dd>{{ ticket.quantity if ticket.quantity is not none else '-' }}</dd></div>
-              </dl>
-            </section>
+{% block main_class %}detail-shell{% endblock %}
 
-            <section class="info-group">
-              <h3>时间信息</h3>
-              <dl class="detail-grid">
-                <div><dt>提交时间</dt><dd>{{ ticket.created_at }}</dd></div>
-                <div><dt>期望完成时间</dt><dd>{{ ticket.expected_finish_date or '-' }}</dd></div>
-                <div><dt>时效状态</dt><dd><span class="badge due-{{ ticket.due_status_class }}">{{ ticket.due_status }}</span></dd></div>
-                <div><dt>最后更新时间</dt><dd>{{ ticket.updated_at }}</dd></div>
-                <div><dt>完成时间</dt><dd>{{ ticket.closed_at or '-' }}</dd></div>
-                <div><dt>处理人</dt><dd>{{ ticket.assigned_to or '-' }}</dd></div>
-              </dl>
-            </section>
-          </div>
+{% block content %}
+{% if saved %}
+<div class="alert alert-success">处理信息已保存。</div>
+{% endif %}
+{% if attachments_saved %}
+<div class="alert alert-success">补充附件已上传。</div>
+{% endif %}
+{% if upload_error %}
+<div class="alert alert-error">{{ upload_error }}</div>
+{% endif %}
+{% if ticket.due_status == '已超时' %}
+<div class="alert alert-error">该工单已超过期望完成时间，请优先处理。</div>
+{% endif %}
+
+<section class="detail-summary-card work-card">
+  <div>
+    <span>工单号</span>
+    <strong>{{ ticket.ticket_no }}</strong>
+  </div>
+  <div>
+    <span>门店</span>
+    <strong>{{ ticket.store_name }}</strong>
+  </div>
+  <div>
+    <span>当前状态</span>
+    <strong>{{ ticket.status }}</strong>
+  </div>
+  <div>
+    <span>最后更新时间</span>
+    <strong>{{ ticket.updated_at }}</strong>
+  </div>
+</section>
+
+<section class="detail-layout">
+  <div class="detail-main">
+    <section class="detail-section work-card">
+      <h2>提交信息</h2>
+      <div class="detail-groups">
+        <section class="info-group">
+          <h3>基础信息</h3>
+          <dl class="detail-grid">
+            <div><dt>工单号</dt><dd>{{ ticket.ticket_no }}</dd></div>
+            <div><dt>门店</dt><dd>{{ ticket.store_name }}</dd></div>
+            <div><dt>提报人</dt><dd>{{ ticket.submitter }}</dd></div>
+            <div><dt>需求类型</dt><dd>{{ ticket.request_type }}</dd></div>
+            <div><dt>紧急程度</dt><dd><span class="badge status-badge urgency-{{ ticket.urgency }}">{{ ticket.urgency }}</span></dd></div>
+            <div><dt>当前状态</dt><dd><span class="badge status-badge status-{{ ticket.status }}">{{ ticket.status }}</span></dd></div>
+          </dl>
         </section>
 
-        <section class="detail-section">
-          <h2>问题说明</h2>
-          <p class="description-box">{{ ticket.description }}</p>
+        <section class="info-group">
+          <h3>商品信息</h3>
+          <dl class="detail-grid">
+            <div><dt>品牌</dt><dd>{{ ticket.brand or '-' }}</dd></div>
+            <div><dt>商品名称</dt><dd>{{ ticket.product_name or '-' }}</dd></div>
+            <div><dt>规格条码</dt><dd>{{ ticket.sku_barcode or '-' }}</dd></div>
+            <div><dt>数量</dt><dd>{{ ticket.quantity if ticket.quantity is not none else '-' }}</dd></div>
+          </dl>
         </section>
 
-        <section class="detail-section">
-          <h2>图片</h2>
-          <div class="uploaded-images">
-            {% for image in images %}
-            <div class="image-card">
-              <a href="{{ image.protected_url }}" target="_blank">
-                <img src="{{ image.protected_url }}" alt="工单图片" onerror="this.closest('.image-card').classList.add('missing'); this.remove();">
-              </a>
-              <span>{{ image.filename }}</span>
-              <div class="image-actions">
-                <a class="ghost-button compact" href="{{ image.protected_url }}" target="_blank">查看图片</a>
-                <form method="post" action="/admin/ticket/{{ ticket.id }}/image/{{ image.id }}/delete" onsubmit="return confirm('确认删除这张图片吗？删除后不可恢复。');">
-                  <input type="hidden" name="return_url" value="{{ return_url }}">
-                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                  <button class="danger-button compact" type="submit">删除附件</button>
-                </form>
-              </div>
-            </div>
-            {% else %}
-            <p class="empty-note">未上传图片，门店没有提供现场截图或照片。</p>
-            {% endfor %}
-          </div>
-        </section>
-
-        <section class="detail-section">
-          <h2>文件附件</h2>
-          <div class="file-list">
-            {% for file in files %}
-            <div class="file-row">
-              <div class="file-info">
-                <strong>{{ file.original_filename }}</strong>
-                <span>{{ file.size_label }} · {{ file.uploaded_at }}</span>
-              </div>
-              <div class="file-actions">
-                <a class="ghost-button compact" href="{{ file.download_url }}">下载文件</a>
-                <form method="post" action="/admin/ticket/{{ ticket.id }}/file/{{ file.id }}/delete" onsubmit="return confirm('确认删除这个文件吗？删除后不可恢复。');">
-                  <input type="hidden" name="return_url" value="{{ return_url }}">
-                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                  <button class="danger-button compact" type="submit">删除文件</button>
-                </form>
-              </div>
-            </div>
-            {% else %}
-            <p class="empty-note">未上传文件附件，暂无清单或补充材料。</p>
-            {% endfor %}
-          </div>
+        <section class="info-group">
+          <h3>时间信息</h3>
+          <dl class="detail-grid">
+            <div><dt>提交时间</dt><dd>{{ ticket.created_at }}</dd></div>
+            <div><dt>期望完成时间</dt><dd>{{ ticket.expected_finish_date or '-' }}</dd></div>
+            <div><dt>时效状态</dt><dd><span class="badge status-badge due-{{ ticket.due_status_class }}">{{ ticket.due_status }}</span></dd></div>
+            <div><dt>最后更新时间</dt><dd>{{ ticket.updated_at }}</dd></div>
+            <div><dt>完成时间</dt><dd>{{ ticket.closed_at or '-' }}</dd></div>
+            <div><dt>处理人</dt><dd>{{ ticket.assigned_to or '-' }}</dd></div>
+          </dl>
         </section>
       </div>
-
-      <aside class="handler-panel">
-        <h2>总部处理面板</h2>
-        <p class="panel-note">状态改为已完成会记录完成时间，请确认处理结果后保存。</p>
-        <form method="post" action="/admin/ticket/{{ ticket.id }}">
-          <input type="hidden" name="return_url" value="{{ return_url }}">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <label>
-            <span>状态</span>
-            <select name="status">
-              {% for item in statuses %}
-              <option value="{{ item }}" {% if ticket.status == item %}selected{% endif %}>{{ item }}</option>
-              {% endfor %}
-            </select>
-          </label>
-          <label>
-            <span>处理人</span>
-            <select name="assigned_to">
-              <option value="">暂不指定</option>
-              {% for item in handlers %}
-              <option value="{{ item }}" {% if ticket.assigned_to == item %}selected{% endif %}>{{ item }}</option>
-              {% endfor %}
-            </select>
-          </label>
-          <label>
-            <span>处理备注</span>
-            <textarea name="handler_note" rows="8">{{ ticket.handler_note or '' }}</textarea>
-          </label>
-          <button class="primary-button" type="submit">保存处理结果</button>
-        </form>
-
-        <section class="supplement-panel">
-          <h2>补充附件</h2>
-          <p class="panel-note">总部可上传处理凭证、截图、表格或供应商反馈文件。</p>
-          <form method="post" action="/admin/ticket/{{ ticket.id }}/attachments" enctype="multipart/form-data">
-            <input type="hidden" name="return_url" value="{{ return_url }}">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <div class="upload-card compact-upload-card">
-              <div>
-                <h3>补充图片</h3>
-                <p class="field-hint">支持 {{ image_accept }}，最多 {{ max_image_count }} 张，单张不超过 {{ max_image_mb }}MB。</p>
-              </div>
-              <label class="file-control">
-                <span>选择图片</span>
-                <input name="new_images" type="file" accept="{{ image_accept }}" multiple data-extra-image-input>
-              </label>
-              <div class="upload-tools">
-                <button class="ghost-button compact upload-clear" type="button" data-clear-extra-images>清空图片</button>
-              </div>
-              <div class="upload-preview image-preview" data-extra-image-preview></div>
-            </div>
-
-            <div class="upload-card compact-upload-card">
-              <div>
-                <h3>补充文件</h3>
-                <p class="field-hint">最多 {{ max_file_count }} 个，单个不超过 {{ max_file_mb }}MB，总大小不超过 {{ max_total_file_upload_mb }}MB。</p>
-              </div>
-              <label class="file-control">
-                <span>选择文件</span>
-                <input name="new_files" type="file" accept="{{ file_accept }}" multiple data-extra-file-input>
-              </label>
-              <div class="upload-tools">
-                <button class="ghost-button compact upload-clear" type="button" data-clear-extra-files>清空文件</button>
-              </div>
-              <div class="upload-preview file-preview" data-extra-file-preview></div>
-            </div>
-
-            <button class="primary-button" type="submit">上传补充附件</button>
-          </form>
-        </section>
-      </aside>
     </section>
 
-    <section class="detail-section log-section">
+    <section class="detail-section work-card">
+      <h2>问题说明</h2>
+      <p class="description-box">{{ ticket.description }}</p>
+    </section>
+
+    <section class="detail-section work-card">
+      <h2>图片附件</h2>
+      <div class="uploaded-images">
+        {% for image in images %}
+        <div class="image-card">
+          <a href="{{ image.protected_url }}" target="_blank">
+            <img src="{{ image.protected_url }}" alt="工单图片" onerror="this.closest('.image-card').classList.add('missing'); this.remove();">
+          </a>
+          <span>{{ image.filename }}</span>
+          <div class="image-actions">
+            <a class="ghost-button compact" href="{{ image.protected_url }}" target="_blank">查看图片</a>
+            <form method="post" action="/admin/ticket/{{ ticket.id }}/image/{{ image.id }}/delete" onsubmit="return confirm('确认删除这张图片吗？删除后不可恢复。');">
+              <input type="hidden" name="return_url" value="{{ return_url }}">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <button class="danger-button compact" type="submit">删除附件</button>
+            </form>
+          </div>
+        </div>
+        {% else %}
+        <p class="empty-note">未上传图片，门店没有提供现场截图或照片。</p>
+        {% endfor %}
+      </div>
+    </section>
+
+    <section class="detail-section work-card">
+      <h2>文件附件</h2>
+      <div class="file-list">
+        {% for file in files %}
+        <div class="file-row">
+          <div class="file-info">
+            <strong>{{ file.original_filename }}</strong>
+            <span>{{ file.size_label }} · {{ file.uploaded_at }}</span>
+          </div>
+          <div class="file-actions">
+            <a class="ghost-button compact" href="{{ file.download_url }}">下载文件</a>
+            <form method="post" action="/admin/ticket/{{ ticket.id }}/file/{{ file.id }}/delete" onsubmit="return confirm('确认删除这个文件吗？删除后不可恢复。');">
+              <input type="hidden" name="return_url" value="{{ return_url }}">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <button class="danger-button compact" type="submit">删除文件</button>
+            </form>
+          </div>
+        </div>
+        {% else %}
+        <p class="empty-note">未上传文件附件，暂无清单或补充材料。</p>
+        {% endfor %}
+      </div>
+    </section>
+
+    <section class="detail-section log-section work-card">
       <h2>处理日志</h2>
       <div class="timeline-log">
         {% for log in logs %}
@@ -254,7 +167,77 @@
         {% endfor %}
       </div>
     </section>
-  </main>
-  <script src="/static/app.js?v=ui20260704"></script>
-</body>
-</html>
+  </div>
+
+  <aside class="handler-panel work-card">
+    <h2>总部处理面板</h2>
+    <p class="panel-note">状态改为已完成会记录完成时间，请确认处理结果后保存。</p>
+    <form method="post" action="/admin/ticket/{{ ticket.id }}">
+      <input type="hidden" name="return_url" value="{{ return_url }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label>
+        <span>状态</span>
+        <select name="status">
+          {% for item in statuses %}
+          <option value="{{ item }}" {% if ticket.status == item %}selected{% endif %}>{{ item }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>
+        <span>处理人</span>
+        <select name="assigned_to">
+          <option value="">暂不指定</option>
+          {% for item in handlers %}
+          <option value="{{ item }}" {% if ticket.assigned_to == item %}selected{% endif %}>{{ item }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>
+        <span>处理备注</span>
+        <textarea name="handler_note" rows="8">{{ ticket.handler_note or '' }}</textarea>
+      </label>
+      <button class="primary-button" type="submit">保存处理结果</button>
+    </form>
+
+    <section class="supplement-panel">
+      <h2>补充附件</h2>
+      <p class="panel-note">总部可上传处理凭证、截图、表格或供应商反馈文件。</p>
+      <form method="post" action="/admin/ticket/{{ ticket.id }}/attachments" enctype="multipart/form-data">
+        <input type="hidden" name="return_url" value="{{ return_url }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <div class="upload-card compact-upload-card">
+          <div>
+            <h3>补充图片</h3>
+            <p class="field-hint">支持 {{ image_accept }}，最多 {{ max_image_count }} 张，单张不超过 {{ max_image_mb }}MB。</p>
+          </div>
+          <label class="file-control">
+            <span>选择图片</span>
+            <input name="new_images" type="file" accept="{{ image_accept }}" multiple data-extra-image-input>
+          </label>
+          <div class="upload-tools">
+            <button class="ghost-button compact upload-clear" type="button" data-clear-extra-images>清空图片</button>
+          </div>
+          <div class="upload-preview image-preview" data-extra-image-preview></div>
+        </div>
+
+        <div class="upload-card compact-upload-card">
+          <div>
+            <h3>补充文件</h3>
+            <p class="field-hint">最多 {{ max_file_count }} 个，单个不超过 {{ max_file_mb }}MB，总大小不超过 {{ max_total_file_upload_mb }}MB。</p>
+          </div>
+          <label class="file-control">
+            <span>选择文件</span>
+            <input name="new_files" type="file" accept="{{ file_accept }}" multiple data-extra-file-input>
+          </label>
+          <div class="upload-tools">
+            <button class="ghost-button compact upload-clear" type="button" data-clear-extra-files>清空文件</button>
+          </div>
+          <div class="upload-preview file-preview" data-extra-file-preview></div>
+        </div>
+
+        <button class="primary-button" type="submit">上传补充附件</button>
+      </form>
+    </section>
+  </aside>
+</section>
+{% endblock %}

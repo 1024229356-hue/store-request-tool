@@ -395,7 +395,14 @@ def should_redirect_to_login(request: Request) -> bool:
     path = request.url.path
     if path.startswith("/admin/uploads") or path.startswith("/admin/files") or path.startswith("/admin/export"):
         return False
-    return path == "/admin" or path == "/admin/dashboard" or path.startswith("/admin/ticket")
+    return (
+        path == "/admin"
+        or path == "/admin/dashboard"
+        or path == "/admin/settings"
+        or path == "/admin/account"
+        or path == "/admin/system"
+        or path.startswith("/admin/ticket")
+    )
 
 
 def require_admin(request: Request) -> str:
@@ -1970,20 +1977,37 @@ def fetch_dashboard_stats(filters: Dict[str, str]) -> Dict[str, object]:
     config = load_app_config()
     tickets = fetch_tickets(filters, "newest", config)
     total = len(tickets)
+    today_prefix = datetime.now().date().isoformat()
     status_counter: Counter[str] = Counter(str(ticket.get("status") or "未填写") for ticket in tickets)
     type_counter: Counter[str] = Counter(str(ticket.get("request_type") or "未填写") for ticket in tickets)
     store_counter: Counter[str] = Counter(str(ticket.get("store_name") or "未填写") for ticket in tickets)
     handler_counter: Counter[str] = Counter(str(ticket.get("assigned_to") or "未指定") or "未指定" for ticket in tickets)
     urgency_counter: Counter[str] = Counter(str(ticket.get("urgency") or "未填写") for ticket in tickets)
+    today_new_count = sum(1 for ticket in tickets if str(ticket.get("created_at") or "").startswith(today_prefix))
     overdue_count = sum(1 for ticket in tickets if ticket.get("due_status") == "已超时")
     due_today_count = sum(1 for ticket in tickets if ticket.get("due_status") == "今日到期")
     image_ticket_count = sum(1 for ticket in tickets if int(ticket.get("image_count") or 0) > 0)
     file_ticket_count = sum(1 for ticket in tickets if int(ticket.get("file_count") or 0) > 0)
+    attachment_ticket_count = sum(
+        1
+        for ticket in tickets
+        if int(ticket.get("image_count") or 0) > 0 or int(ticket.get("file_count") or 0) > 0
+    )
     no_attachment_count = sum(
         1
         for ticket in tickets
         if int(ticket.get("image_count") or 0) == 0 and int(ticket.get("file_count") or 0) == 0
     )
+    supplement_count = 0
+    if tickets:
+        ticket_ids = [int(ticket["id"]) for ticket in tickets]
+        placeholders = ",".join("?" for _ in ticket_ids)
+        with get_connection() as connection:
+            row = connection.execute(
+                f"SELECT COUNT(*) AS total FROM ticket_supplements WHERE ticket_id IN ({placeholders})",
+                ticket_ids,
+            ).fetchone()
+        supplement_count = int(row["total"] or 0)
     cards = [
         {"label": "总工单数", "count": total, "percent": 100 if total else 0},
         {"label": "待处理数", "count": status_counter.get("待处理", 0), "percent": percent_value(status_counter.get("待处理", 0), total)},
@@ -1999,10 +2023,24 @@ def fetch_dashboard_stats(filters: Dict[str, str]) -> Dict[str, object]:
         {"label": "有文件工单数", "count": file_ticket_count, "percent": percent_value(file_ticket_count, total)},
         {"label": "无附件工单数", "count": no_attachment_count, "percent": percent_value(no_attachment_count, total)},
     ]
+    type_structure = [
+        {"label": label, "count": type_counter.get(label, 0), "percent": percent_value(type_counter.get(label, 0), total)}
+        for label in config.request_types
+    ]
     return {
         "total": total,
+        "today_new_count": today_new_count,
+        "pending_count": status_counter.get("待处理", 0),
+        "processing_count": status_counter.get("处理中", 0),
+        "need_supplement_count": status_counter.get("待门店补充", 0),
+        "completed_count": status_counter.get("已完成", 0),
+        "overdue_count": overdue_count,
+        "today_urgent_count": urgency_counter.get("当天必须处理", 0),
+        "attachment_ticket_count": attachment_ticket_count,
+        "store_supplement_count": supplement_count,
+        "recent_tickets": tickets[:5],
         "cards": cards,
-        "by_request_type": counter_rows(type_counter, total),
+        "by_request_type": type_structure,
         "by_store": counter_rows(store_counter, total, limit=10),
         "by_handler": counter_rows(handler_counter, total),
         "by_status": counter_rows(status_counter, total),
@@ -2707,6 +2745,8 @@ def create_app() -> FastAPI:
             "date_end": date_end,
         }
         stats = fetch_dashboard_stats(filters)
+        for ticket in stats["recent_tickets"]:
+            ticket["detail_url"] = build_ticket_detail_url(int(ticket["id"]), "/admin/dashboard")
         return templates.TemplateResponse(
             request,
             "dashboard.html",
@@ -2718,8 +2758,58 @@ def create_app() -> FastAPI:
                 "handlers": config.handlers,
                 "filters": filters,
                 "stats": stats,
+                "today_label": datetime.now().strftime("%Y-%m-%d"),
                 "admin_user": admin,
                 "csrf_token": current_csrf_token(request),
+            },
+        )
+
+    @app.get("/admin/settings", response_class=HTMLResponse)
+    def admin_settings(request: Request, admin: str = Depends(require_admin)) -> HTMLResponse:
+        return templates.TemplateResponse(
+            request,
+            "settings.html",
+            {
+                "request": request,
+                "admin_user": admin,
+                "csrf_token": current_csrf_token(request),
+                "config_files": [
+                    "stores.json",
+                    "request_types.json",
+                    "urgency_levels.json",
+                    "statuses.json",
+                    "brands.json",
+                    "handlers.json",
+                    "system.json",
+                    "request_type_rules.json",
+                ],
+            },
+        )
+
+    @app.get("/admin/account", response_class=HTMLResponse)
+    def admin_account(request: Request, admin: str = Depends(require_admin)) -> HTMLResponse:
+        return templates.TemplateResponse(
+            request,
+            "account.html",
+            {
+                "request": request,
+                "admin_user": admin,
+                "csrf_token": current_csrf_token(request),
+            },
+        )
+
+    @app.get("/admin/system", response_class=HTMLResponse)
+    def admin_system(request: Request, admin: str = Depends(require_admin)) -> HTMLResponse:
+        return templates.TemplateResponse(
+            request,
+            "system.html",
+            {
+                "request": request,
+                "admin_user": admin,
+                "csrf_token": current_csrf_token(request),
+                "database_path": str(get_db_path()),
+                "upload_dir": str(get_upload_dir()),
+                "config_dir": str(get_config_dir()),
             },
         )
 

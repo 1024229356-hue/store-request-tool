@@ -1,0 +1,24 @@
+{% set page_title = '账号设置' %}
+{% set page_subtitle = '查看当前登录账号和多账号环境变量配置方式。' %}
+{% set page_eyebrow = '账号与权限' %}
+{% set current_menu = 'account' %}
+{% extends "base_admin.html" %}
+
+{% block content %}
+<section class="work-card placeholder-panel">
+  <div class="section-heading">
+    <h2>当前账号</h2>
+    <p>后台登录会话使用 Cookie 保存，退出或切换账号后需要重新登录。</p>
+  </div>
+  <dl class="detail-grid">
+    <div><dt>当前账号</dt><dd>{{ admin_user }}</dd></div>
+    <div><dt>登录方式</dt><dd>admin_session Cookie</dd></div>
+    <div><dt>配置位置</dt><dd>.env</dd></div>
+  </dl>
+  <div class="note-box plain-note">
+    <span>多账号配置说明</span>
+    <p>ADMIN_USERS=admin:123456,caigou:123456</p>
+  </div>
+  <p class="empty-note">修改 .env 后需要重启服务，系统不会读取浏览器缓存的 Basic Auth 自动登录。</p>
+</section>
+{% endblock %}

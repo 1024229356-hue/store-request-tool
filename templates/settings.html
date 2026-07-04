@@ -1,0 +1,23 @@
+{% set page_title = '配置管理' %}
+{% set page_subtitle = '当前版本通过本地 config 目录维护配置，后续可升级为在线配置。' %}
+{% set page_eyebrow = '系统配置' %}
+{% set current_menu = 'settings' %}
+{% extends "base_admin.html" %}
+
+{% block content %}
+<section class="work-card placeholder-panel">
+  <div class="section-heading">
+    <h2>当前配置文件</h2>
+    <p>请通过 VS Code 或文本编辑器修改 config 目录下的 JSON 文件，保存后按说明重启或刷新。</p>
+  </div>
+  <div class="config-file-grid">
+    {% for filename in config_files %}
+    <div class="config-file-card">
+      <strong>{{ filename }}</strong>
+      <span>config/{{ filename }}</span>
+    </div>
+    {% endfor %}
+  </div>
+  <p class="empty-note">当前版本请通过 VS Code 修改 config 目录配置文件，后续可升级为在线配置。</p>
+</section>
+{% endblock %}
