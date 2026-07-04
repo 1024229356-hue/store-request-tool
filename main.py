@@ -6,11 +6,12 @@ import os
 import secrets
 import sqlite3
 import uuid
+from collections import Counter
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from io import BytesIO
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import quote, urlencode, urlsplit
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile, status as http_status
@@ -32,6 +33,8 @@ DEFAULT_UPLOAD_DIR = BASE_DIR / "uploads"
 ENV_FILE = BASE_DIR / ".env"
 SESSION_COOKIE_NAME = "admin_session"
 DEFAULT_SESSION_SECRET = "store-request-tool-local-dev-session-secret"
+PLACEHOLDER_SESSION_SECRET = "change-this-to-a-random-long-secret"
+DEFAULT_SESSION_MAX_AGE_HOURS = 12
 
 DEFAULT_STORES = ["南京门东店", "南昌万寿宫店", "山城巷店", "东郊记忆店", "蟠龙天地店", "秀水街店", "湾里店", "下浩里店", "烟台山店"]
 DEFAULT_REQUEST_TYPES = ["建单需求", "审单需求", "商品异常", "缺货需求", "新品需求", "系统问题", "其他"]
@@ -39,6 +42,7 @@ DEFAULT_URGENCY_LEVELS = ["普通", "加急", "当天必须处理"]
 DEFAULT_STATUSES = ["待处理", "处理中", "待门店补充", "已完成", "已驳回"]
 DEFAULT_BRANDS: List[str] = []
 DEFAULT_HANDLERS = ["总部商品", "总部运营", "采购", "财务"]
+DUE_STATUS_OPTIONS = ["已超时", "今日到期", "未到期", "未设置", "超时完成", "按时完成"]
 DEFAULT_SYSTEM = {
     "app_name": "门店需求工单系统",
     "port": 8701,
@@ -53,6 +57,9 @@ DEFAULT_SYSTEM = {
     "max_file_mb": 20,
     "max_file_count": 5,
     "max_total_file_upload_mb": 50,
+    "store_query_default_days": 30,
+    "store_query_page_size": 20,
+    "supplement_status_after_store_update": "待处理",
 }
 COMPLETED_STATUS = "已完成"
 BLOCKED_FILE_EXTENSIONS = {"exe", "bat", "cmd", "js", "py", "sh", "php", "jar", "msi"}
@@ -84,6 +91,9 @@ class AppConfig:
     max_file_mb: int
     max_file_count: int
     max_total_file_upload_mb: int
+    store_query_default_days: int
+    store_query_page_size: int
+    supplement_status_after_store_update: str
 
     @property
     def max_image_bytes(self) -> int:
@@ -132,6 +142,7 @@ EXCEL_HEADERS = [
     "最后更新时间",
     "处理时长小时",
     "是否超时",
+    "时效状态",
 ]
 
 
@@ -199,6 +210,34 @@ def get_session_secret() -> str:
     return os.environ.get("SESSION_SECRET", DEFAULT_SESSION_SECRET)
 
 
+def get_app_env() -> str:
+    return os.environ.get("APP_ENV", "development").strip().lower() or "development"
+
+
+def get_session_max_age_seconds() -> int:
+    raw_value = os.environ.get("SESSION_MAX_AGE_HOURS", str(DEFAULT_SESSION_MAX_AGE_HOURS)).strip()
+    try:
+        hours = float(raw_value)
+    except ValueError:
+        hours = DEFAULT_SESSION_MAX_AGE_HOURS
+    if hours <= 0:
+        hours = DEFAULT_SESSION_MAX_AGE_HOURS
+    return int(hours * 3600)
+
+
+def session_cookie_secure() -> bool:
+    return os.environ.get("SESSION_COOKIE_SECURE", "false").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def warn_if_insecure_production_session() -> None:
+    if get_app_env() == "production" and get_session_secret() in {DEFAULT_SESSION_SECRET, PLACEHOLDER_SESSION_SECRET}:
+        print(
+            "WARNING: APP_ENV=production but SESSION_SECRET is still the default or example value. "
+            "Set a random long SESSION_SECRET before exposing the admin system.",
+            flush=True,
+        )
+
+
 def base64url_encode(raw: bytes) -> str:
     return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
 
@@ -213,12 +252,29 @@ def sign_session_payload(payload: str) -> str:
     return base64url_encode(signature)
 
 
-def create_admin_session(username: str) -> str:
-    payload = base64url_encode(json.dumps({"username": username}, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+def create_admin_session(
+    username: str,
+    issued_at: Optional[int] = None,
+    max_age_seconds: Optional[int] = None,
+) -> str:
+    issued_at_value = int(issued_at if issued_at is not None else datetime.now().timestamp())
+    max_age_value = int(max_age_seconds if max_age_seconds is not None else get_session_max_age_seconds())
+    payload = base64url_encode(
+        json.dumps(
+            {
+                "username": username,
+                "issued_at": issued_at_value,
+                "expires_at": issued_at_value + max_age_value,
+                "csrf_token": secrets.token_urlsafe(32),
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    )
     return f"{payload}.{sign_session_payload(payload)}"
 
 
-def read_admin_session(token: str) -> Optional[str]:
+def read_admin_session_data(token: str) -> Optional[Dict[str, Any]]:
     if not token or "." not in token:
         return None
     payload, signature = token.rsplit(".", 1)
@@ -230,13 +286,37 @@ def read_admin_session(token: str) -> Optional[str]:
     except (ValueError, json.JSONDecodeError):
         return None
     username = str(data.get("username") or "").strip()
-    if username and admin_username_exists(username):
-        return username
+    expires_at = data.get("expires_at")
+    if not isinstance(expires_at, (int, float)) or datetime.now().timestamp() >= float(expires_at):
+        return None
+    csrf_token = str(data.get("csrf_token") or "").strip()
+    if username and csrf_token and admin_username_exists(username):
+        return data
     return None
+
+
+def read_admin_session(token: str) -> Optional[str]:
+    data = read_admin_session_data(token)
+    if not data:
+        return None
+    return str(data.get("username") or "").strip() or None
 
 
 def current_admin_username(request: Request) -> Optional[str]:
     return read_admin_session(request.cookies.get(SESSION_COOKIE_NAME, ""))
+
+
+def current_csrf_token(request: Request) -> str:
+    data = read_admin_session_data(request.cookies.get(SESSION_COOKIE_NAME, ""))
+    if not data:
+        return ""
+    return str(data.get("csrf_token") or "")
+
+
+def require_admin_csrf(request: Request, csrf_token: str) -> None:
+    expected_token = current_csrf_token(request)
+    if not expected_token or not secrets.compare_digest(csrf_token or "", expected_token):
+        raise HTTPException(status_code=http_status.HTTP_403_FORBIDDEN, detail="CSRF token invalid.")
 
 
 def safe_admin_return_url(value: str) -> str:
@@ -271,7 +351,7 @@ def should_redirect_to_login(request: Request) -> bool:
     path = request.url.path
     if path.startswith("/admin/uploads") or path.startswith("/admin/files") or path.startswith("/admin/export"):
         return False
-    return path == "/admin" or path.startswith("/admin/ticket")
+    return path == "/admin" or path == "/admin/dashboard" or path.startswith("/admin/ticket")
 
 
 def require_admin(request: Request) -> str:
@@ -377,10 +457,16 @@ def init_db() -> None:
                 ticket_id INTEGER NOT NULL,
                 image_path TEXT NOT NULL,
                 uploaded_at TEXT NOT NULL,
+                source TEXT,
+                uploaded_by TEXT,
+                supplement_id INTEGER,
                 FOREIGN KEY (ticket_id) REFERENCES tickets(id) ON DELETE CASCADE
             )
             """
         )
+        add_column_if_missing(connection, "ticket_images", "source", "TEXT")
+        add_column_if_missing(connection, "ticket_images", "uploaded_by", "TEXT")
+        add_column_if_missing(connection, "ticket_images", "supplement_id", "INTEGER")
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS ticket_files (
@@ -392,6 +478,27 @@ def init_db() -> None:
                 file_ext TEXT NOT NULL,
                 file_size INTEGER NOT NULL,
                 uploaded_at TEXT NOT NULL,
+                source TEXT,
+                uploaded_by TEXT,
+                supplement_id INTEGER,
+                FOREIGN KEY (ticket_id) REFERENCES tickets(id) ON DELETE CASCADE
+            )
+            """
+        )
+        add_column_if_missing(connection, "ticket_files", "source", "TEXT")
+        add_column_if_missing(connection, "ticket_files", "uploaded_by", "TEXT")
+        add_column_if_missing(connection, "ticket_files", "supplement_id", "INTEGER")
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ticket_supplements (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticket_id INTEGER NOT NULL,
+                store_name TEXT NOT NULL,
+                submitter TEXT NOT NULL,
+                note TEXT,
+                image_count INTEGER DEFAULT 0,
+                file_count INTEGER DEFAULT 0,
+                created_at TEXT NOT NULL,
                 FOREIGN KEY (ticket_id) REFERENCES tickets(id) ON DELETE CASCADE
             )
             """
@@ -419,6 +526,7 @@ def init_db() -> None:
         connection.execute("CREATE INDEX IF NOT EXISTS idx_ticket_images_ticket_id ON ticket_images(ticket_id)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_ticket_files_ticket_id ON ticket_files(ticket_id)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_ticket_logs_ticket_id ON ticket_logs(ticket_id)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_ticket_supplements_ticket_id ON ticket_supplements(ticket_id)")
 
 
 def clean_string_list(value: object, default: List[str], allow_empty: bool = False) -> List[str]:
@@ -479,6 +587,8 @@ def load_system_config(statuses: List[str]) -> Dict[str, object]:
         "max_file_mb",
         "max_file_count",
         "max_total_file_upload_mb",
+        "store_query_default_days",
+        "store_query_page_size",
     ):
         system[key] = positive_int_config(system, key)
 
@@ -494,6 +604,9 @@ def load_system_config(statuses: List[str]) -> Dict[str, object]:
 
     default_status = str(system.get("default_status", "")).strip()
     system["default_status"] = default_status if default_status in statuses else statuses[0]
+
+    supplement_status = str(system.get("supplement_status_after_store_update", "")).strip()
+    system["supplement_status_after_store_update"] = supplement_status if supplement_status in statuses else "待处理"
 
     for key in ("app_name", "excel_filename_prefix"):
         value = str(system.get(key, "")).strip()
@@ -532,11 +645,47 @@ def load_app_config() -> AppConfig:
         max_file_mb=int(system["max_file_mb"]),
         max_file_count=int(system["max_file_count"]),
         max_total_file_upload_mb=int(system["max_total_file_upload_mb"]),
+        store_query_default_days=int(system["store_query_default_days"]),
+        store_query_page_size=int(system["store_query_page_size"]),
+        supplement_status_after_store_update=str(system["supplement_status_after_store_update"]),
     )
 
 
 def load_stores() -> List[str]:
     return load_app_config().stores
+
+
+REQUEST_RULE_FIELD_LABELS = {
+    "brand": "品牌",
+    "product_name": "商品名称",
+    "sku_barcode": "规格条码",
+    "quantity": "数量",
+    "description": "问题说明",
+    "expected_finish_date": "期望完成时间",
+}
+
+
+def load_request_type_rules() -> Dict[str, Dict[str, object]]:
+    raw_rules = load_json_file("request_type_rules.json", {})
+    if not isinstance(raw_rules, dict):
+        return {}
+    rules: Dict[str, Dict[str, object]] = {}
+    for request_type, raw_rule in raw_rules.items():
+        if not isinstance(raw_rule, dict):
+            continue
+        required_fields = [
+            str(field).strip()
+            for field in raw_rule.get("required_fields", [])
+            if str(field).strip() in REQUEST_RULE_FIELD_LABELS
+        ]
+        rules[str(request_type)] = {
+            "required_fields": required_fields,
+            "require_image": bool(raw_rule.get("require_image", False)),
+            "require_file": bool(raw_rule.get("require_file", False)),
+            "require_any_attachment": bool(raw_rule.get("require_any_attachment", False)),
+            "description_hint": str(raw_rule.get("description_hint") or "").strip(),
+        }
+    return rules
 
 
 def compact_text(value: Optional[str], max_len: int = 36) -> str:
@@ -637,6 +786,44 @@ def overdue_text(ticket: Dict[str, object]) -> str:
     return "是" if compare_date > expected.date() else "否"
 
 
+def due_status_label(ticket: Dict[str, object]) -> str:
+    expected = parse_datetime_text(ticket.get("expected_finish_date"))
+    if not expected:
+        return "未设置"
+    expected_date = expected.date()
+    status = str(ticket.get("status") or "")
+    closed_at = parse_datetime_text(ticket.get("closed_at"))
+    if status == COMPLETED_STATUS:
+        closed_date = (closed_at or parse_datetime_text(ticket.get("updated_at")) or datetime.now()).date()
+        return "超时完成" if closed_date > expected_date else "按时完成"
+    today = datetime.now().date()
+    if today > expected_date:
+        return "已超时"
+    if today == expected_date:
+        return "今日到期"
+    return "未到期"
+
+
+def due_status_class(label: str) -> str:
+    mapping = {
+        "已超时": "overdue",
+        "今日到期": "due-today",
+        "未到期": "not-due",
+        "未设置": "unset",
+        "超时完成": "completed-late",
+        "按时完成": "completed-on-time",
+    }
+    return mapping.get(label, "unset")
+
+
+def annotate_ticket_runtime(ticket: Dict[str, object]) -> Dict[str, object]:
+    label = due_status_label(ticket)
+    ticket["due_status"] = label
+    ticket["due_status_class"] = due_status_class(label)
+    ticket["description_summary"] = compact_text(str(ticket.get("description") or ""))
+    return ticket
+
+
 def build_query_params(filters: Dict[str, str], sort: str, page: Optional[int] = None) -> str:
     params = {key: value for key, value in filters.items() if str(value or "").strip()}
     if sort:
@@ -669,6 +856,27 @@ def validate_submission(
         return "请填写问题说明。"
     if quantity.strip() and not quantity.strip().isdigit():
         return "数量只能填写数字。"
+    return None
+
+
+def validate_request_type_rule(
+    request_type: str,
+    values: Dict[str, str],
+    prepared_images: List[Tuple[str, bytes]],
+    prepared_files: List[PreparedFile],
+) -> Optional[str]:
+    rule = load_request_type_rules().get(request_type)
+    if not rule:
+        return None
+    for field in rule.get("required_fields", []):
+        if not str(values.get(str(field), "")).strip():
+            return f"{request_type}必须填写{REQUEST_RULE_FIELD_LABELS.get(str(field), str(field))}。"
+    if rule.get("require_image") and not prepared_images:
+        return f"{request_type}必须上传至少一张图片。"
+    if rule.get("require_file") and not prepared_files:
+        return f"{request_type}必须上传至少一个文件附件。"
+    if rule.get("require_any_attachment") and not prepared_images and not prepared_files:
+        return f"{request_type}必须上传图片或文件附件。"
     return None
 
 
@@ -861,8 +1069,11 @@ def create_ticket_with_images(
                 saved_files.extend(saved_image_files)
                 for image_path in image_paths:
                     connection.execute(
-                        "INSERT INTO ticket_images (ticket_id, image_path, uploaded_at) VALUES (?, ?, ?)",
-                        (ticket_id, image_path, timestamp),
+                        """
+                        INSERT INTO ticket_images (ticket_id, image_path, uploaded_at, source, uploaded_by, supplement_id)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        (ticket_id, image_path, timestamp, "store_initial", ticket_data["submitter"], None),
                     )
                 file_records, saved_attachment_files = save_files(ticket_no, prepared_files)
                 saved_files.extend(saved_attachment_files)
@@ -871,9 +1082,9 @@ def create_ticket_with_images(
                         """
                         INSERT INTO ticket_files (
                             ticket_id, original_filename, stored_filename, file_path,
-                            file_ext, file_size, uploaded_at
+                            file_ext, file_size, uploaded_at, source, uploaded_by, supplement_id
                         )
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             ticket_id,
@@ -883,6 +1094,9 @@ def create_ticket_with_images(
                             file_record["file_ext"],
                             file_record["file_size"],
                             timestamp,
+                            "store_initial",
+                            ticket_data["submitter"],
+                            None,
                         ),
                     )
             return ticket_id, ticket_no
@@ -902,7 +1116,9 @@ def build_ticket_where(filters: Dict[str, str]) -> Tuple[str, List[str]]:
     params: List[str] = []
 
     exact_fields = {
+        "ticket_no": "ticket_no",
         "store_name": "store_name",
+        "submitter": "submitter",
         "request_type": "request_type",
         "urgency": "urgency",
         "status": "status",
@@ -983,6 +1199,8 @@ def build_order_sql(sort: str, config: AppConfig) -> str:
 
 
 def count_tickets(filters: Dict[str, str]) -> int:
+    if filters.get("due_status", "").strip():
+        return len(fetch_tickets(filters, "newest", load_app_config()))
     where_sql, params = build_ticket_where(filters)
     with get_connection() as connection:
         row = connection.execute(f"SELECT COUNT(*) AS total FROM tickets {where_sql}", params).fetchone()
@@ -990,6 +1208,15 @@ def count_tickets(filters: Dict[str, str]) -> int:
 
 
 def fetch_ticket_summary(filters: Dict[str, str]) -> Dict[str, int]:
+    if filters.get("due_status", "").strip():
+        tickets = fetch_tickets(filters, "newest", load_app_config())
+        return {
+            "total_count": len(tickets),
+            "pending_count": sum(1 for ticket in tickets if ticket.get("status") == "待处理"),
+            "processing_count": sum(1 for ticket in tickets if ticket.get("status") == "处理中"),
+            "today_urgent_count": sum(1 for ticket in tickets if ticket.get("urgency") == "当天必须处理"),
+            "completed_count": sum(1 for ticket in tickets if ticket.get("status") == COMPLETED_STATUS),
+        }
     where_sql, params = build_ticket_where(filters)
     with get_connection() as connection:
         row = connection.execute(
@@ -1057,11 +1284,30 @@ def fetch_tickets(
         ).fetchall()
     tickets = [dict(row) for row in rows]
     for ticket in tickets:
-        ticket["description_summary"] = compact_text(str(ticket.get("description") or ""))
+        annotate_ticket_runtime(ticket)
+    due_filter = filters.get("due_status", "").strip()
+    if due_filter:
+        tickets = [ticket for ticket in tickets if ticket.get("due_status") == due_filter]
     return tickets
 
 
 def fetch_ticket_page(filters: Dict[str, str], sort: str, config: AppConfig, page: int) -> Tuple[List[Dict[str, object]], Dict[str, int]]:
+    if filters.get("due_status", "").strip():
+        all_tickets = fetch_tickets(filters, sort, config)
+        total_count = len(all_tickets)
+        total_pages = max((total_count + config.page_size - 1) // config.page_size, 1)
+        current_page = min(max(page, 1), total_pages)
+        offset = (current_page - 1) * config.page_size
+        return all_tickets[offset : offset + config.page_size], {
+            "current_page": current_page,
+            "total_pages": total_pages,
+            "total_count": total_count,
+            "page_size": config.page_size,
+            "has_prev": 1 if current_page > 1 else 0,
+            "has_next": 1 if current_page < total_pages else 0,
+            "prev_page": max(current_page - 1, 1),
+            "next_page": min(current_page + 1, total_pages),
+        }
     total_count = count_tickets(filters)
     total_pages = max((total_count + config.page_size - 1) // config.page_size, 1)
     current_page = min(max(page, 1), total_pages)
@@ -1082,13 +1328,18 @@ def fetch_ticket_page(filters: Dict[str, str], sort: str, config: AppConfig, pag
 def fetch_ticket(ticket_id: int) -> Optional[Dict[str, object]]:
     with get_connection() as connection:
         row = connection.execute("SELECT * FROM tickets WHERE id = ?", (ticket_id,)).fetchone()
-    return dict(row) if row else None
+    return annotate_ticket_runtime(dict(row)) if row else None
 
 
 def fetch_ticket_images(ticket_id: int) -> List[Dict[str, object]]:
     with get_connection() as connection:
         rows = connection.execute(
-            "SELECT id, ticket_id, image_path, uploaded_at FROM ticket_images WHERE ticket_id = ? ORDER BY id",
+            """
+            SELECT id, ticket_id, image_path, uploaded_at, source, uploaded_by, supplement_id
+            FROM ticket_images
+            WHERE ticket_id = ?
+            ORDER BY id
+            """,
             (ticket_id,),
         ).fetchall()
     images = [dict(row) for row in rows]
@@ -1103,7 +1354,7 @@ def fetch_ticket_files(ticket_id: int) -> List[Dict[str, object]]:
         rows = connection.execute(
             """
             SELECT id, ticket_id, original_filename, stored_filename, file_path,
-                   file_ext, file_size, uploaded_at
+                   file_ext, file_size, uploaded_at, source, uploaded_by, supplement_id
             FROM ticket_files
             WHERE ticket_id = ?
             ORDER BY id
@@ -1120,7 +1371,7 @@ def fetch_ticket_files(ticket_id: int) -> List[Dict[str, object]]:
 def fetch_ticket_file(file_id: int, ticket_id: Optional[int] = None) -> Optional[Dict[str, object]]:
     sql = """
         SELECT id, ticket_id, original_filename, stored_filename, file_path,
-               file_ext, file_size, uploaded_at
+               file_ext, file_size, uploaded_at, source, uploaded_by, supplement_id
         FROM ticket_files
         WHERE id = ?
     """
@@ -1136,7 +1387,11 @@ def fetch_ticket_file(file_id: int, ticket_id: Optional[int] = None) -> Optional
 def fetch_ticket_image(image_id: int, ticket_id: int) -> Optional[Dict[str, object]]:
     with get_connection() as connection:
         row = connection.execute(
-            "SELECT id, ticket_id, image_path, uploaded_at FROM ticket_images WHERE id = ? AND ticket_id = ?",
+            """
+            SELECT id, ticket_id, image_path, uploaded_at, source, uploaded_by, supplement_id
+            FROM ticket_images
+            WHERE id = ? AND ticket_id = ?
+            """,
             (image_id, ticket_id),
         ).fetchone()
     return dict(row) if row else None
@@ -1182,17 +1437,20 @@ def add_ticket_attachments(
                 raise HTTPException(status_code=404, detail="工单不存在")
             for image_path in image_paths:
                 connection.execute(
-                    "INSERT INTO ticket_images (ticket_id, image_path, uploaded_at) VALUES (?, ?, ?)",
-                    (ticket_id, image_path, timestamp),
+                    """
+                    INSERT INTO ticket_images (ticket_id, image_path, uploaded_at, source, uploaded_by, supplement_id)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (ticket_id, image_path, timestamp, "admin_supplement", operator, None),
                 )
             for file_record in file_records:
                 connection.execute(
                     """
                     INSERT INTO ticket_files (
                         ticket_id, original_filename, stored_filename, file_path,
-                        file_ext, file_size, uploaded_at
+                        file_ext, file_size, uploaded_at, source, uploaded_by, supplement_id
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         ticket_id,
@@ -1202,6 +1460,9 @@ def add_ticket_attachments(
                         file_record["file_ext"],
                         file_record["file_size"],
                         timestamp,
+                        "admin_supplement",
+                        operator,
+                        None,
                     ),
                 )
             connection.execute("UPDATE tickets SET updated_at = ? WHERE id = ?", (timestamp, ticket_id))
@@ -1219,6 +1480,220 @@ def add_ticket_attachments(
         cleanup_saved_files(saved_files)
         raise
     return image_count, file_count
+
+
+def create_store_supplement(
+    ticket: Dict[str, object],
+    submitter: str,
+    note: str,
+    prepared_images: List[Tuple[str, bytes]],
+    prepared_files: List[PreparedFile],
+    config: AppConfig,
+) -> int:
+    ticket_id = int(ticket["id"])
+    ticket_no = str(ticket["ticket_no"])
+    store_name = str(ticket["store_name"])
+    old_status = str(ticket.get("status") or "")
+    old_assigned_to = str(ticket.get("assigned_to") or "")
+    timestamp = now_text()
+    saved_files: List[Path] = []
+    try:
+        image_paths, saved_image_files = save_images(ticket_no, prepared_images)
+        saved_files.extend(saved_image_files)
+        file_records, saved_attachment_files = save_files(ticket_no, prepared_files)
+        saved_files.extend(saved_attachment_files)
+        image_count = len(image_paths)
+        file_count = len(file_records)
+        new_status = (
+            config.supplement_status_after_store_update
+            if old_status == "待门店补充"
+            else old_status
+        )
+        closed_at = ticket.get("closed_at")
+        if new_status == COMPLETED_STATUS and not closed_at:
+            closed_at = timestamp
+        elif old_status == COMPLETED_STATUS and new_status != COMPLETED_STATUS:
+            closed_at = None
+        note_parts = []
+        clean_note = note.strip()
+        if clean_note:
+            note_parts.append(clean_note)
+        note_parts.append(f"新增图片 {image_count} 张，文件 {file_count} 个")
+        log_note = "；".join(note_parts)
+
+        with get_connection() as connection:
+            current = connection.execute("SELECT * FROM tickets WHERE id = ?", (ticket_id,)).fetchone()
+            if not current:
+                raise HTTPException(status_code=404, detail="工单不存在")
+            if str(current["store_name"]) != store_name:
+                raise HTTPException(status_code=403, detail="门店不匹配")
+            cursor = connection.execute(
+                """
+                INSERT INTO ticket_supplements (
+                    ticket_id, store_name, submitter, note, image_count, file_count, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (ticket_id, store_name, submitter, clean_note, image_count, file_count, timestamp),
+            )
+            supplement_id = int(cursor.lastrowid)
+            for image_path in image_paths:
+                connection.execute(
+                    """
+                    INSERT INTO ticket_images (ticket_id, image_path, uploaded_at, source, uploaded_by, supplement_id)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (ticket_id, image_path, timestamp, "store_supplement", submitter, supplement_id),
+                )
+            for file_record in file_records:
+                connection.execute(
+                    """
+                    INSERT INTO ticket_files (
+                        ticket_id, original_filename, stored_filename, file_path,
+                        file_ext, file_size, uploaded_at, source, uploaded_by, supplement_id
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        ticket_id,
+                        file_record["original_filename"],
+                        file_record["stored_filename"],
+                        file_record["file_path"],
+                        file_record["file_ext"],
+                        file_record["file_size"],
+                        timestamp,
+                        "store_supplement",
+                        submitter,
+                        supplement_id,
+                    ),
+                )
+            connection.execute(
+                "UPDATE tickets SET status = ?, closed_at = ?, updated_at = ? WHERE id = ?",
+                (new_status, closed_at, timestamp, ticket_id),
+            )
+            connection.execute(
+                """
+                INSERT INTO ticket_logs (
+                    ticket_id, action, old_status, new_status, old_assigned_to,
+                    new_assigned_to, note, operator, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    ticket_id,
+                    "门店补充资料",
+                    old_status,
+                    new_status,
+                    old_assigned_to,
+                    old_assigned_to,
+                    log_note,
+                    f"门店:{submitter}",
+                    timestamp,
+                ),
+            )
+        return supplement_id
+    except Exception:
+        cleanup_saved_files(saved_files)
+        raise
+
+
+def build_public_query_params(filters: Dict[str, str], page: Optional[int] = None) -> str:
+    params = {key: value for key, value in filters.items() if str(value or "").strip()}
+    if page is not None:
+        params["page"] = str(page)
+    return urlencode(params)
+
+
+def normalize_store_query_filters(raw_filters: Dict[str, str], config: AppConfig) -> Dict[str, str]:
+    filters = {key: str(value or "").strip() for key, value in raw_filters.items()}
+    store_name = filters.get("store_name", "")
+    if store_name and store_name in config.stores:
+        optional_keys = ["ticket_no", "submitter", "keyword", "status", "date_start", "date_end"]
+        if not any(filters.get(key) for key in optional_keys):
+            filters["date_start"] = (datetime.now().date() - timedelta(days=config.store_query_default_days)).isoformat()
+    return filters
+
+
+def fetch_store_query_page(
+    filters: Dict[str, str],
+    config: AppConfig,
+    page: int,
+) -> Tuple[List[Dict[str, object]], Dict[str, int]]:
+    page_size = config.store_query_page_size
+    total_count = count_tickets(filters)
+    total_pages = max((total_count + page_size - 1) // page_size, 1)
+    current_page = min(max(page, 1), total_pages)
+    offset = (current_page - 1) * page_size
+    tickets = fetch_tickets(filters, "newest", config, limit=page_size, offset=offset)
+    return tickets, {
+        "current_page": current_page,
+        "total_pages": total_pages,
+        "total_count": total_count,
+        "page_size": page_size,
+        "has_prev": 1 if current_page > 1 else 0,
+        "has_next": 1 if current_page < total_pages else 0,
+        "prev_page": max(current_page - 1, 1),
+        "next_page": min(current_page + 1, total_pages),
+    }
+
+
+def percent_value(count: int, total: int) -> int:
+    if total <= 0:
+        return 0
+    return round(count * 100 / total)
+
+
+def counter_rows(counter: Counter[str], total: int, limit: Optional[int] = None) -> List[Dict[str, object]]:
+    rows = [
+        {"label": label or "未填写", "count": count, "percent": percent_value(count, total)}
+        for label, count in counter.most_common(limit)
+    ]
+    return rows
+
+
+def fetch_dashboard_stats(filters: Dict[str, str]) -> Dict[str, object]:
+    config = load_app_config()
+    tickets = fetch_tickets(filters, "newest", config)
+    total = len(tickets)
+    status_counter: Counter[str] = Counter(str(ticket.get("status") or "未填写") for ticket in tickets)
+    type_counter: Counter[str] = Counter(str(ticket.get("request_type") or "未填写") for ticket in tickets)
+    store_counter: Counter[str] = Counter(str(ticket.get("store_name") or "未填写") for ticket in tickets)
+    handler_counter: Counter[str] = Counter(str(ticket.get("assigned_to") or "未指定") or "未指定" for ticket in tickets)
+    urgency_counter: Counter[str] = Counter(str(ticket.get("urgency") or "未填写") for ticket in tickets)
+    overdue_count = sum(1 for ticket in tickets if ticket.get("due_status") == "已超时")
+    due_today_count = sum(1 for ticket in tickets if ticket.get("due_status") == "今日到期")
+    image_ticket_count = sum(1 for ticket in tickets if int(ticket.get("image_count") or 0) > 0)
+    file_ticket_count = sum(1 for ticket in tickets if int(ticket.get("file_count") or 0) > 0)
+    no_attachment_count = sum(
+        1
+        for ticket in tickets
+        if int(ticket.get("image_count") or 0) == 0 and int(ticket.get("file_count") or 0) == 0
+    )
+    cards = [
+        {"label": "总工单数", "count": total, "percent": 100 if total else 0},
+        {"label": "待处理数", "count": status_counter.get("待处理", 0), "percent": percent_value(status_counter.get("待处理", 0), total)},
+        {"label": "处理中数", "count": status_counter.get("处理中", 0), "percent": percent_value(status_counter.get("处理中", 0), total)},
+        {"label": "待门店补充数", "count": status_counter.get("待门店补充", 0), "percent": percent_value(status_counter.get("待门店补充", 0), total)},
+        {"label": "已完成数", "count": status_counter.get("已完成", 0), "percent": percent_value(status_counter.get("已完成", 0), total)},
+        {"label": "已驳回数", "count": status_counter.get("已驳回", 0), "percent": percent_value(status_counter.get("已驳回", 0), total)},
+        {"label": "超时工单数", "count": overdue_count, "percent": percent_value(overdue_count, total)},
+        {"label": "今日到期数", "count": due_today_count, "percent": percent_value(due_today_count, total)},
+    ]
+    attachment_rows = [
+        {"label": "有图片工单数", "count": image_ticket_count, "percent": percent_value(image_ticket_count, total)},
+        {"label": "有文件工单数", "count": file_ticket_count, "percent": percent_value(file_ticket_count, total)},
+        {"label": "无附件工单数", "count": no_attachment_count, "percent": percent_value(no_attachment_count, total)},
+    ]
+    return {
+        "total": total,
+        "cards": cards,
+        "by_request_type": counter_rows(type_counter, total),
+        "by_store": counter_rows(store_counter, total, limit=10),
+        "by_handler": counter_rows(handler_counter, total),
+        "by_status": counter_rows(status_counter, total),
+        "by_urgency": counter_rows(urgency_counter, total),
+        "attachments": attachment_rows,
+    }
 
 
 def build_excel(tickets: List[Dict[str, object]]) -> BytesIO:
@@ -1285,10 +1760,11 @@ def build_excel(tickets: List[Dict[str, object]]) -> BytesIO:
                 ticket.get("updated_at"),
                 processing_hours(ticket),
                 overdue_text(ticket),
+                ticket.get("due_status") or due_status_label(ticket),
             ]
         )
 
-    widths = [22, 20, 16, 14, 14, 14, 16, 20, 20, 10, 38, 42, 26, 34, 18, 14, 14, 32, 20, 20, 16, 12]
+    widths = [22, 20, 16, 14, 14, 14, 16, 20, 20, 10, 38, 42, 26, 34, 18, 14, 14, 32, 20, 20, 16, 12, 14]
     for index, width in enumerate(widths, start=1):
         sheet.column_dimensions[get_column_letter(index)].width = width
     for row in sheet.iter_rows(min_row=2):
@@ -1304,6 +1780,7 @@ def build_excel(tickets: List[Dict[str, object]]) -> BytesIO:
 
 def create_app() -> FastAPI:
     load_env_file()
+    warn_if_insecure_production_session()
     ensure_directories()
     init_db()
 
@@ -1338,6 +1815,7 @@ def create_app() -> FastAPI:
                 "max_total_file_upload_mb": config.max_total_file_upload_mb,
                 "error": error,
                 "values": values or {},
+                "request_type_rules_json": json.dumps(load_request_type_rules(), ensure_ascii=False),
             },
             status_code=status_code,
         )
@@ -1403,6 +1881,81 @@ def create_app() -> FastAPI:
                 "max_file_count": config.max_file_count,
                 "max_file_mb": config.max_file_mb,
                 "max_total_file_upload_mb": config.max_total_file_upload_mb,
+                "csrf_token": current_csrf_token(request),
+            },
+            status_code=status_code,
+        )
+
+    def render_query_page(
+        request: Request,
+        filters: Optional[Dict[str, str]] = None,
+        tickets: Optional[List[Dict[str, object]]] = None,
+        pagination: Optional[Dict[str, int]] = None,
+        error: str = "",
+        searched: bool = False,
+        status_code: int = 200,
+    ) -> HTMLResponse:
+        config = load_app_config()
+        active_filters = filters or {}
+        page_state = pagination or {
+            "current_page": 1,
+            "total_pages": 1,
+            "total_count": 0,
+            "page_size": config.store_query_page_size,
+            "has_prev": 0,
+            "has_next": 0,
+            "prev_page": 1,
+            "next_page": 1,
+        }
+        prev_query = build_public_query_params(active_filters, page_state["prev_page"])
+        next_query = build_public_query_params(active_filters, page_state["next_page"])
+        return templates.TemplateResponse(
+            request,
+            "query.html",
+            {
+                "request": request,
+                "stores": config.stores,
+                "statuses": config.statuses,
+                "filters": active_filters,
+                "tickets": tickets or [],
+                "pagination": page_state,
+                "prev_page_url": "/query" + (f"?{prev_query}" if prev_query else ""),
+                "next_page_url": "/query" + (f"?{next_query}" if next_query else ""),
+                "error": error,
+                "searched": searched,
+            },
+            status_code=status_code,
+        )
+
+    def render_supplement_page(
+        request: Request,
+        ticket: Dict[str, object],
+        store_name: str,
+        error: str = "",
+        success: bool = False,
+        status_code: int = 200,
+    ) -> HTMLResponse:
+        config = load_app_config()
+        query_url = "/query?" + urlencode({"store_name": store_name})
+        supplement_url = f"/query/ticket/{ticket['id']}/supplement?" + urlencode({"store_name": store_name})
+        return templates.TemplateResponse(
+            request,
+            "supplement.html",
+            {
+                "request": request,
+                "ticket": ticket,
+                "store_name": store_name,
+                "error": error,
+                "success": success,
+                "query_url": query_url,
+                "supplement_url": supplement_url,
+                "image_accept": ",".join(f".{extension}" for extension in config.allowed_image_extensions),
+                "file_accept": ",".join(f".{extension}" for extension in config.allowed_file_extensions),
+                "max_image_count": config.max_image_count,
+                "max_image_mb": config.max_image_mb,
+                "max_file_count": config.max_file_count,
+                "max_file_mb": config.max_file_mb,
+                "max_total_file_upload_mb": config.max_total_file_upload_mb,
             },
             status_code=status_code,
         )
@@ -1432,16 +1985,21 @@ def create_app() -> FastAPI:
                 next_url=next_url,
             )
         response = RedirectResponse(url=next_url, status_code=303)
+        max_age = get_session_max_age_seconds()
         response.set_cookie(
             SESSION_COOKIE_NAME,
-            create_admin_session(authenticated_username),
+            create_admin_session(authenticated_username, max_age_seconds=max_age),
             httponly=True,
             samesite="lax",
+            max_age=max_age,
+            secure=session_cookie_secure(),
         )
         return response
 
     @app.post("/admin/logout")
-    def admin_logout() -> RedirectResponse:
+    def admin_logout(request: Request, csrf_token: str = Form("")) -> RedirectResponse:
+        if current_admin_username(request):
+            require_admin_csrf(request, csrf_token)
         response = RedirectResponse(url="/admin/login?logged_out=1", status_code=303)
         response.delete_cookie(SESSION_COOKIE_NAME)
         return response
@@ -1510,6 +2068,10 @@ def create_app() -> FastAPI:
         except ValueError as exc:
             return render_submit_form(request, status_code=400, error=str(exc), values=form_values)
 
+        rule_error = validate_request_type_rule(request_type, form_values, prepared_images, prepared_files)
+        if rule_error:
+            return render_submit_form(request, status_code=400, error=rule_error, values=form_values)
+
         timestamp = now_text()
         quantity_value = int(quantity.strip()) if quantity.strip() else None
         try:
@@ -1542,6 +2104,125 @@ def create_app() -> FastAPI:
             {"request": request, "ticket_no": ticket_no},
         )
 
+    @app.get("/query", response_class=HTMLResponse)
+    def query_page(
+        request: Request,
+        store_name: str = Query(""),
+        ticket_no: str = Query(""),
+        submitter: str = Query(""),
+        keyword: str = Query(""),
+        status: str = Query(""),
+        date_start: str = Query(""),
+        date_end: str = Query(""),
+        page: int = Query(1),
+    ) -> HTMLResponse:
+        config = load_app_config()
+        raw_filters = {
+            "store_name": store_name,
+            "ticket_no": ticket_no,
+            "submitter": submitter,
+            "keyword": keyword,
+            "status": status,
+            "date_start": date_start,
+            "date_end": date_end,
+        }
+        submitted = any(str(value or "").strip() for value in raw_filters.values())
+        filters = normalize_store_query_filters(raw_filters, config)
+        if not submitted:
+            return render_query_page(request, filters=filters)
+        if not filters.get("store_name") or filters.get("store_name") not in config.stores:
+            return render_query_page(
+                request,
+                filters=filters,
+                error="请选择门店后再查询。",
+                searched=True,
+                status_code=400,
+            )
+        if filters.get("status") and filters.get("status") not in config.statuses:
+            return render_query_page(
+                request,
+                filters=filters,
+                error="请选择有效状态。",
+                searched=True,
+                status_code=400,
+            )
+        tickets, pagination = fetch_store_query_page(filters, config, page)
+        for ticket in tickets:
+            ticket["supplement_url"] = f"/query/ticket/{ticket['id']}/supplement?" + urlencode({"store_name": filters["store_name"]})
+        return render_query_page(request, filters=filters, tickets=tickets, pagination=pagination, searched=True)
+
+    @app.post("/query")
+    def query_submit(
+        store_name: str = Form(""),
+        ticket_no: str = Form(""),
+        submitter: str = Form(""),
+        keyword: str = Form(""),
+        status: str = Form(""),
+        date_start: str = Form(""),
+        date_end: str = Form(""),
+    ) -> RedirectResponse:
+        params = {
+            "store_name": store_name.strip(),
+            "ticket_no": ticket_no.strip(),
+            "submitter": submitter.strip(),
+            "keyword": keyword.strip(),
+            "status": status.strip(),
+            "date_start": date_start.strip(),
+            "date_end": date_end.strip(),
+        }
+        query = build_public_query_params(params)
+        return RedirectResponse(url="/query" + (f"?{query}" if query else ""), status_code=303)
+
+    @app.get("/query/ticket/{ticket_id}/supplement", response_class=HTMLResponse)
+    def supplement_page(request: Request, ticket_id: int, store_name: str = Query("")) -> HTMLResponse:
+        ticket = fetch_ticket(ticket_id)
+        if not ticket:
+            raise HTTPException(status_code=404, detail="工单不存在")
+        clean_store_name = store_name.strip()
+        if clean_store_name != str(ticket.get("store_name") or ""):
+            raise HTTPException(status_code=403, detail="门店不匹配")
+        return render_supplement_page(request, ticket, clean_store_name)
+
+    @app.post("/query/ticket/{ticket_id}/supplement", response_class=HTMLResponse)
+    async def submit_supplement(
+        request: Request,
+        ticket_id: int,
+        store_name: str = Form(""),
+        submitter: str = Form(""),
+        note: str = Form(""),
+        images: Optional[List[UploadFile]] = File(None),
+        files: Optional[List[UploadFile]] = File(None),
+    ) -> HTMLResponse:
+        ticket = fetch_ticket(ticket_id)
+        if not ticket:
+            raise HTTPException(status_code=404, detail="工单不存在")
+        clean_store_name = store_name.strip()
+        if clean_store_name != str(ticket.get("store_name") or ""):
+            raise HTTPException(status_code=403, detail="门店不匹配")
+        clean_submitter = submitter.strip()
+        if not clean_submitter:
+            return render_supplement_page(request, ticket, clean_store_name, error="请填写补充人。", status_code=400)
+        config = load_app_config()
+        try:
+            prepared_images = await prepare_images(images, config)
+            prepared_files = await prepare_files(files, config)
+        except ValueError as exc:
+            return render_supplement_page(request, ticket, clean_store_name, error=str(exc), status_code=400)
+        if not note.strip() and not prepared_images and not prepared_files:
+            return render_supplement_page(
+                request,
+                ticket,
+                clean_store_name,
+                error="请填写补充说明或上传附件。",
+                status_code=400,
+            )
+        try:
+            create_store_supplement(ticket, clean_submitter, note, prepared_images, prepared_files, config)
+        except OSError:
+            return render_supplement_page(request, ticket, clean_store_name, error="附件保存失败，请稍后重试。", status_code=500)
+        updated_ticket = fetch_ticket(ticket_id) or ticket
+        return render_supplement_page(request, updated_ticket, clean_store_name, success=True)
+
     @app.get("/admin", response_class=HTMLResponse)
     def admin_page(
         request: Request,
@@ -1554,6 +2235,7 @@ def create_app() -> FastAPI:
         date_start: str = Query(""),
         date_end: str = Query(""),
         keyword: str = Query(""),
+        due_status: str = Query(""),
         sort: str = Query("newest"),
         page: int = Query(1),
     ) -> HTMLResponse:
@@ -1566,6 +2248,7 @@ def create_app() -> FastAPI:
             "date_start": date_start,
             "date_end": date_end,
             "keyword": keyword,
+            "due_status": due_status,
         }
         config = load_app_config()
         tickets, pagination = fetch_ticket_page(filters, sort, config, page)
@@ -1588,6 +2271,7 @@ def create_app() -> FastAPI:
                 "urgency_levels": config.urgency_levels,
                 "statuses": config.statuses,
                 "handlers": config.handlers,
+                "due_status_options": DUE_STATUS_OPTIONS,
                 "filters": filters,
                 "sort": sort,
                 "summary": summary,
@@ -1596,6 +2280,44 @@ def create_app() -> FastAPI:
                 "prev_page_url": "/admin" + (f"?{prev_query}" if prev_query else ""),
                 "next_page_url": "/admin" + (f"?{next_query}" if next_query else ""),
                 "admin_user": admin,
+                "csrf_token": current_csrf_token(request),
+            },
+        )
+
+    @app.get("/admin/dashboard", response_class=HTMLResponse)
+    def admin_dashboard(
+        request: Request,
+        admin: str = Depends(require_admin),
+        store_name: str = Query(""),
+        request_type: str = Query(""),
+        status: str = Query(""),
+        assigned_to: str = Query(""),
+        date_start: str = Query(""),
+        date_end: str = Query(""),
+    ) -> HTMLResponse:
+        config = load_app_config()
+        filters = {
+            "store_name": store_name,
+            "request_type": request_type,
+            "status": status,
+            "assigned_to": assigned_to,
+            "date_start": date_start,
+            "date_end": date_end,
+        }
+        stats = fetch_dashboard_stats(filters)
+        return templates.TemplateResponse(
+            request,
+            "dashboard.html",
+            {
+                "request": request,
+                "stores": config.stores,
+                "request_types": config.request_types,
+                "statuses": config.statuses,
+                "handlers": config.handlers,
+                "filters": filters,
+                "stats": stats,
+                "admin_user": admin,
+                "csrf_token": current_csrf_token(request),
             },
         )
 
@@ -1621,13 +2343,16 @@ def create_app() -> FastAPI:
 
     @app.post("/admin/ticket/{ticket_id}")
     def update_ticket(
+        request: Request,
         ticket_id: int,
         admin: str = Depends(require_admin),
         status: str = Form(""),
         assigned_to: str = Form(""),
         handler_note: str = Form(""),
         return_url: str = Form(""),
+        csrf_token: str = Form(""),
     ) -> RedirectResponse:
+        require_admin_csrf(request, csrf_token)
         config = load_app_config()
         if status not in config.statuses:
             raise HTTPException(status_code=400, detail="状态不正确")
@@ -1690,7 +2415,9 @@ def create_app() -> FastAPI:
         new_images: Optional[List[UploadFile]] = File(None),
         new_files: Optional[List[UploadFile]] = File(None),
         return_url: str = Form(""),
+        csrf_token: str = Form(""),
     ) -> HTMLResponse:
+        require_admin_csrf(request, csrf_token)
         ticket = fetch_ticket(ticket_id)
         if not ticket:
             raise HTTPException(status_code=404, detail="工单不存在")
@@ -1731,11 +2458,14 @@ def create_app() -> FastAPI:
 
     @app.post("/admin/ticket/{ticket_id}/image/{image_id}/delete")
     def delete_ticket_image(
+        request: Request,
         ticket_id: int,
         image_id: int,
         admin: str = Depends(require_admin),
         return_url: str = Form(""),
+        csrf_token: str = Form(""),
     ) -> RedirectResponse:
+        require_admin_csrf(request, csrf_token)
         image = fetch_ticket_image(image_id, ticket_id)
         if not image:
             raise HTTPException(status_code=404, detail="图片不存在")
@@ -1764,11 +2494,14 @@ def create_app() -> FastAPI:
 
     @app.post("/admin/ticket/{ticket_id}/file/{file_id}/delete")
     def delete_ticket_file(
+        request: Request,
         ticket_id: int,
         file_id: int,
         admin: str = Depends(require_admin),
         return_url: str = Form(""),
+        csrf_token: str = Form(""),
     ) -> RedirectResponse:
+        require_admin_csrf(request, csrf_token)
         ticket_file = fetch_ticket_file(file_id, ticket_id)
         if not ticket_file:
             raise HTTPException(status_code=404, detail="文件不存在")
@@ -1829,6 +2562,7 @@ def create_app() -> FastAPI:
         date_start: str = Query(""),
         date_end: str = Query(""),
         keyword: str = Query(""),
+        due_status: str = Query(""),
         sort: str = Query("newest"),
     ) -> StreamingResponse:
         filters = {
@@ -1840,6 +2574,7 @@ def create_app() -> FastAPI:
             "date_start": date_start,
             "date_end": date_end,
             "keyword": keyword,
+            "due_status": due_status,
         }
         config = load_app_config()
         output = build_excel(fetch_tickets(filters, sort, config))

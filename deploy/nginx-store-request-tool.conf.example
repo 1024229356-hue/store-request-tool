@@ -1,0 +1,37 @@
+# Example Nginx HTTPS reverse proxy for store-request-tool.
+# Replace request.example.com and certificate paths before use.
+# You can request certificates with Let's Encrypt / certbot, for example:
+#   sudo certbot --nginx -d request.example.com
+#
+# In production, run uvicorn on 127.0.0.1:8701 behind Nginx instead of
+# exposing 0.0.0.0:8701 directly to the public internet.
+
+server {
+    listen 80;
+    server_name request.example.com;
+
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    server_name request.example.com;
+
+    ssl_certificate /etc/letsencrypt/live/request.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/request.example.com/privkey.pem;
+
+    client_max_body_size 100M;
+
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+
+    location / {
+        proxy_pass http://127.0.0.1:8701;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+    }
+}

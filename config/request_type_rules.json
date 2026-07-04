@@ -1,0 +1,37 @@
+{
+  "建单需求": {
+    "required_fields": ["brand", "product_name", "quantity"],
+    "require_image": false,
+    "require_file": false,
+    "require_any_attachment": true,
+    "description_hint": "请说明到货情况、采购单需求或建单原因"
+  },
+  "审单需求": {
+    "required_fields": ["description"],
+    "require_image": true,
+    "require_file": false,
+    "require_any_attachment": false,
+    "description_hint": "请提供单据编号、单据类型和需要审核的原因"
+  },
+  "商品异常": {
+    "required_fields": ["product_name", "description"],
+    "require_image": true,
+    "require_file": false,
+    "require_any_attachment": false,
+    "description_hint": "请说明异常现象、影响范围和处理诉求"
+  },
+  "缺货需求": {
+    "required_fields": ["brand", "product_name", "quantity"],
+    "require_image": false,
+    "require_file": false,
+    "require_any_attachment": false,
+    "description_hint": "请说明缺货商品、影响销售情况和期望补货数量"
+  },
+  "新品需求": {
+    "required_fields": ["brand", "product_name", "description"],
+    "require_image": false,
+    "require_file": false,
+    "require_any_attachment": false,
+    "description_hint": "请说明新品来源、预估需求和上架原因"
+  }
+}

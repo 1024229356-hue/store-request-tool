@@ -37,10 +37,13 @@ ADMIN_USERS=admin:123456,caigou:123456,yunying:123456
 生产环境必须配置 Cookie 签名密钥：
 
 ```text
+APP_ENV=production
 SESSION_SECRET=change-this-to-a-random-long-secret
+SESSION_MAX_AGE_HOURS=12
+SESSION_COOKIE_SECURE=true
 ```
 
-请改成随机长字符串。修改 `.env` 后需要重启服务才会生效。登录后后台顶部会显示当前账号，并提供“退出登录”和“切换账号”。本地 HTTP 环境下 Cookie 使用 `HttpOnly` 和 `SameSite=Lax`；正式部署到 HTTPS 后建议在反向代理和应用配置中启用 Secure Cookie。
+请把 `SESSION_SECRET` 改成随机长字符串。`APP_ENV=production` 但仍使用默认密钥时，系统启动会打印明确警告。修改 `.env` 后需要重启服务才会生效。登录后后台顶部会显示当前账号，并提供“退出登录”和“切换账号”。本地 HTTP 环境下 Cookie 使用 `HttpOnly` 和 `SameSite=Lax`；正式部署到 HTTPS 后建议设置 `SESSION_COOKIE_SECURE=true`。
 
 后台认证只读取 `admin_session` Cookie，不再接受浏览器缓存的 HTTP Basic Authorization 自动登录。点击“退出登录”或“切换账号”会删除登录 Cookie 并返回 `/admin/login?logged_out=1`，需要重新输入账号密码。
 
@@ -49,7 +52,9 @@ SESSION_SECRET=change-this-to-a-random-long-secret
 ## 访问地址
 
 - 门店提报页：http://127.0.0.1:8701/submit
+- 门店查询页：http://127.0.0.1:8701/query
 - 后台管理页：http://127.0.0.1:8701/admin
+- 统计看板：http://127.0.0.1:8701/admin/dashboard
 - Excel 导出：http://127.0.0.1:8701/admin/export
 
 ## 门店如何填写
@@ -62,6 +67,12 @@ SESSION_SECRET=change-this-to-a-random-long-secret
 6. 可上传多张图片，支持 `jpg`、`jpeg`、`png`、`webp`，单张不超过 10MB，默认最多 5 张、总大小不超过 30MB。
 7. 可按需上传普通文件，例如 PDF、Word、Excel、CSV、TXT、ZIP、RAR。图片和文件在提交前都可以从待上传列表中删除。
 8. 提交后页面会显示工单号，格式为 `REQ-YYYYMMDD-四位流水号`。
+
+## 门店如何查询和补充资料
+
+门店可以打开 `/query` 查询本店工单。门店是必填项，工单号不是必填项；只选择门店时，系统默认展示该门店最近 30 天工单。查询页只展示工单进度、处理备注、时效状态和附件数量，不提供后台附件下载、删除或状态修改入口。
+
+如果需要补充资料，可在查询结果中点击“补充资料”。补充人必填；补充说明、图片、文件至少需要提供一种。若工单状态为“待门店补充”，补充成功后会按 `config/system.json` 中的 `supplement_status_after_store_update` 自动回到默认“待处理”。
 
 ## 附件上传说明
 
@@ -87,6 +98,8 @@ SESSION_SECRET=change-this-to-a-random-long-secret
 7. 详情页可查看图片和文件附件，普通文件通过 `/admin/files/{file_id}` 下载。
 8. 总部可在详情页补充上传处理凭证、截图、表格或供应商反馈文件，补充上传会写入处理日志。
 9. 如门店提交错附件，总部可在详情页删除图片或文件，删除前会有确认提示，删除操作会写入处理日志。
+10. 后台列表和详情页会显示时效状态：未设置、已超时、今日到期、未到期、超时完成、按时完成。列表支持按时效筛选。
+11. 后台 `/admin/dashboard` 提供轻量统计看板，可按日期、门店、需求类型、状态和处理人筛选。
 
 状态包括：
 
@@ -228,6 +241,7 @@ config/statuses.json
 config/brands.json
 config/handlers.json
 config/system.json
+config/request_type_rules.json
 ```
 
 如果配置文件不存在、JSON 格式错误或核心配置为空，系统会自动使用内置默认值兜底，不会因为配置问题启动失败。
@@ -257,6 +271,24 @@ config/system.json
 ```
 
 新增后，门店提报页和后台筛选会使用新的需求类型；提交校验也会按这个文件判断。
+
+### 如何维护需求类型必填规则
+
+编辑 `config/request_type_rules.json`，可为不同需求类型配置额外必填项、图片/文件要求和说明提示：
+
+```json
+{
+  "建单需求": {
+    "required_fields": ["brand", "product_name", "quantity"],
+    "require_image": false,
+    "require_file": false,
+    "require_any_attachment": true,
+    "description_hint": "请说明到货情况、采购单需求或建单原因"
+  }
+}
+```
+
+`required_fields` 支持 `brand`、`product_name`、`sku_barcode`、`quantity`、`description`、`expected_finish_date`。如果规则文件不存在、JSON 格式错误，或某个需求类型没有配置规则，系统只使用基础校验，不会阻断提交。
 
 ### 如何新增品牌
 
@@ -321,7 +353,10 @@ ADMIN_PASSWORD=change-me
   "allowed_file_extensions": ["pdf", "doc", "docx", "xls", "xlsx", "csv", "txt", "zip", "rar"],
   "max_file_mb": 20,
   "max_file_count": 5,
-  "max_total_file_upload_mb": 50
+  "max_total_file_upload_mb": 50,
+  "store_query_default_days": 30,
+  "store_query_page_size": 20,
+  "supplement_status_after_store_update": "待处理"
 }
 ```
 
@@ -334,6 +369,9 @@ ADMIN_PASSWORD=change-me
 - `max_file_mb`：单个普通文件大小限制，默认 20MB。
 - `max_file_count`：每张工单最多上传普通文件数量，默认 5。
 - `max_total_file_upload_mb`：每张工单普通文件总大小限制，默认 50MB。
+- `store_query_default_days`：门店只选择门店查询时默认回看天数，默认 30。
+- `store_query_page_size`：门店查询页每页条数，默认 20。
+- `supplement_status_after_store_update`：门店补充“待门店补充”工单后自动切回的状态，默认“待处理”。
 
 普通文件格式必须走白名单。即使误配到白名单里，系统也会拒绝 `exe`、`bat`、`cmd`、`js`、`py`、`sh`、`php`、`jar`、`msi` 等可执行或脚本类后缀。
 
@@ -375,8 +413,27 @@ ADMIN_PASSWORD=change-me
 - `tickets.closed_at`
 - `ticket_logs`
 - `ticket_files`
+- `ticket_supplements`
+- `ticket_images.source`
+- `ticket_images.uploaded_by`
+- `ticket_images.supplement_id`
+- `ticket_files.source`
+- `ticket_files.uploaded_by`
+- `ticket_files.supplement_id`
 
 升级过程是兼容式迁移，不会清空 `tickets`、`ticket_images`，也不会删除 `uploads/`。上线前仍建议先备份数据库和附件。
+
+## Nginx + HTTPS 正式部署
+
+测试阶段可以临时访问 `http://公网IP:8701`。正式给门店长期使用前，建议配置域名、Nginx 和 HTTPS，并让 uvicorn 只监听 `127.0.0.1:8701`，不要长期把 8701 端口直接暴露到公网。
+
+项目提供示例文件：
+
+```text
+deploy/nginx-store-request-tool.conf.example
+```
+
+示例包含 80 跳转 HTTPS、443 ssl、`proxy_pass http://127.0.0.1:8701`、`client_max_body_size 100M` 和常用安全头。证书路径和 `server_name request.example.com` 需要替换成自己的域名，可使用 Let's Encrypt / certbot 申请证书。国内服务器绑定域名通常需要先完成备案。
 
 ## 备份说明
 

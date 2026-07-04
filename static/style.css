@@ -167,6 +167,13 @@ strong {
   font-weight: 700;
 }
 
+.header-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 14px;
+}
+
 .subtle {
   margin-top: 8px;
 }
@@ -324,7 +331,9 @@ a:focus-visible {
 }
 
 .submit-action-bar .primary-button,
-.success-actions .primary-button {
+.success-actions .primary-button,
+.success-actions .secondary-button,
+.success-actions .ghost-button {
   width: 100%;
 }
 
@@ -368,6 +377,14 @@ a:focus-visible {
 
 .field-hint {
   font-size: 13px;
+}
+
+.inline-hint {
+  display: block;
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .file-control {
@@ -503,9 +520,15 @@ a:focus-visible {
 
 .success-actions {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: 10px;
   margin-top: 18px;
+}
+
+.query-shell {
+  width: min(100%, var(--admin-max));
+  margin: 0 auto;
+  padding: 22px 14px 42px;
 }
 
 .page-login {
@@ -677,9 +700,13 @@ a:focus-visible {
 
 .ticket-table {
   width: 100%;
-  min-width: 1720px;
+  min-width: 1840px;
   border-collapse: collapse;
   font-size: 14px;
+}
+
+.query-table {
+  min-width: 1480px;
 }
 
 .ticket-table th,
@@ -890,6 +917,42 @@ a:focus-visible {
   border-color: #f5b8b2;
 }
 
+.due-overdue {
+  background: var(--danger-bg);
+  color: var(--danger);
+  border-color: #f5b8b2;
+}
+
+.due-due-today {
+  background: var(--warn-bg);
+  color: var(--warn);
+  border-color: #edc979;
+}
+
+.due-not-due {
+  background: #eef3f7;
+  color: #365168;
+  border-color: #cbd6e2;
+}
+
+.due-unset {
+  background: #f2f4f7;
+  color: #667085;
+  border-color: #d0d5dd;
+}
+
+.due-completed-late {
+  background: #fff0eb;
+  color: #9a3412;
+  border-color: #fdba8c;
+}
+
+.due-completed-on-time {
+  background: var(--success-bg);
+  color: var(--success);
+  border-color: #a9ddbd;
+}
+
 .detail-header-badges {
   display: flex;
   flex-wrap: wrap;
@@ -1092,6 +1155,79 @@ dd {
   padding-top: 16px;
 }
 
+.supplement-summary {
+  margin-bottom: 14px;
+}
+
+.dashboard-card-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.dashboard-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.dashboard-panel {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--panel);
+  box-shadow: var(--shadow-card);
+  padding: 16px;
+}
+
+.dashboard-panel h2 {
+  margin-bottom: 12px;
+}
+
+.bar-row {
+  display: grid;
+  gap: 7px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.bar-row:last-child {
+  border-bottom: 0;
+}
+
+.bar-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.bar-top span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.bar-top strong {
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.bar-track {
+  height: 9px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #e4ebf2;
+}
+
+.bar-track span {
+  display: block;
+  height: 100%;
+  min-width: 4px;
+  border-radius: inherit;
+  background: var(--primary);
+}
+
 .compact-upload-card {
   margin-bottom: 12px;
   padding: 12px;
@@ -1202,6 +1338,11 @@ dd {
   .filter-bar,
   .stats-grid {
     grid-template-columns: 1fr 1fr;
+  }
+
+  .dashboard-card-grid,
+  .dashboard-grid {
+    grid-template-columns: 1fr;
   }
 
   .filter-keyword {
@@ -1315,6 +1456,8 @@ dd {
 
   .stats-grid,
   .filter-bar,
+  .dashboard-card-grid,
+  .dashboard-grid,
   .date-range {
     grid-template-columns: 1fr;
   }

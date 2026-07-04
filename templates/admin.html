@@ -14,12 +14,16 @@
       <p class="subtle">统一查看、筛选、处理门店需求</p>
     </div>
     <div class="admin-actions">
+      <a class="ghost-button compact" href="/admin">工单列表</a>
+      <a class="ghost-button compact" href="/admin/dashboard">统计看板</a>
       <span class="admin-user">当前账号：{{ admin_user }}</span>
       <a class="secondary-button export-button" href="{{ export_url }}">导出 Excel</a>
       <form class="account-action-form" method="post" action="/admin/logout">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <button class="ghost-button compact" type="submit">切换账号</button>
       </form>
       <form class="account-action-form" method="post" action="/admin/logout">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <button class="ghost-button compact" type="submit">退出登录</button>
       </form>
     </div>
@@ -116,6 +120,15 @@
             {% endfor %}
           </select>
         </label>
+        <label>
+          <span>时效</span>
+          <select name="due_status">
+            <option value="">全部</option>
+            {% for item in due_status_options %}
+            <option value="{{ item }}" {% if filters.get('due_status') == item %}selected{% endif %}>{{ item }}</option>
+            {% endfor %}
+          </select>
+        </label>
         <div class="date-range">
           <label>
             <span>开始日期</span>
@@ -162,6 +175,7 @@
             <th>问题说明摘要</th>
             <th>图片数 / 文件数</th>
             <th>当前状态</th>
+            <th>时效</th>
             <th>处理人</th>
             <th>完成时间</th>
             <th>最后更新时间</th>
@@ -190,13 +204,14 @@
               </div>
             </td>
             <td><span class="badge status-{{ ticket.status }}">{{ ticket.status }}</span></td>
+            <td><span class="badge due-{{ ticket.due_status_class }}">{{ ticket.due_status }}</span></td>
             <td>{{ ticket.assigned_to or '' }}</td>
             <td>{{ ticket.closed_at or '' }}</td>
             <td>{{ ticket.updated_at }}</td>
           </tr>
           {% else %}
           <tr>
-            <td class="empty-cell" colspan="16">
+            <td class="empty-cell" colspan="17">
               <strong>当前条件下暂无工单</strong>
               <span>可以调整筛选条件，或等待门店提交新的需求。</span>
             </td>

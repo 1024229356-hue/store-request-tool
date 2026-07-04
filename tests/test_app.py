@@ -4,6 +4,7 @@ import json
 import re
 import sqlite3
 import sys
+from datetime import date, timedelta
 from io import BytesIO
 from pathlib import Path
 from urllib.parse import quote
@@ -66,6 +67,7 @@ EXPECTED_EXPORT_HEADERS = [
     "最后更新时间",
     "处理时长小时",
     "是否超时",
+    "时效状态",
 ]
 
 
@@ -221,6 +223,20 @@ def logged_in_client(client, username=ADMIN_AUTH[0], password=ADMIN_AUTH[1]):
     return client
 
 
+def csrf_token_for(client, path="/admin"):
+    response = client.get(path)
+    assert response.status_code == 200
+    match = re.search(r'name="csrf_token" value="([^"]+)"', response.text)
+    assert match, response.text[:500]
+    return match.group(1)
+
+
+def admin_post(client, url, data=None, **kwargs):
+    payload = dict(data or {})
+    payload.setdefault("csrf_token", csrf_token_for(client))
+    return client.post(url, data=payload, **kwargs)
+
+
 def basic_auth_headers(username=ADMIN_AUTH[0], password=ADMIN_AUTH[1]):
     credentials = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
     return {"Authorization": f"Basic {credentials}"}
@@ -315,7 +331,7 @@ def test_cookie_login_logout_switch_account_and_operator_log(tmp_path, monkeypat
     assert "退出登录" in admin_page.text
     assert "切换账号" in admin_page.text
 
-    logout = client.post("/admin/logout", follow_redirects=False)
+    logout = admin_post(client, "/admin/logout", follow_redirects=False)
     assert logout.status_code == 303
     assert logout.headers["location"].startswith("/admin/login")
     assert "logged_out=1" in logout.headers["location"]
@@ -341,7 +357,8 @@ def test_cookie_login_logout_switch_account_and_operator_log(tmp_path, monkeypat
     assert "\u5f53\u524d\u8d26\u53f7\uff1acaigou" in caigou_page.text
     response = submit_ticket(client)
     assert response.status_code == 200
-    update_response = client.post(
+    update_response = admin_post(
+        client,
         "/admin/ticket/1",
         data={"status": "处理中", "assigned_to": "采购", "handler_note": "采购账号处理"},
         follow_redirects=False,
@@ -358,7 +375,7 @@ def test_legacy_admin_credentials_can_login_with_cookie_when_admin_users_missing
 
     assert_login_success(login_admin(client, "legacy-admin", "legacy-secret"))
     assert client.get("/admin").status_code == 200
-    client.post("/admin/logout", follow_redirects=False)
+    admin_post(client, "/admin/logout", follow_redirects=False)
     wrong_password = login_admin(client, "legacy-admin", "wrong-password")
     assert wrong_password.status_code == 400
     assert "用户名或密码不正确" in wrong_password.text
@@ -397,6 +414,7 @@ def test_admin_detail_can_add_images_and_files_as_supplemental_attachments(tmp_p
 
     upload_response = client.post(
         "/admin/ticket/1/attachments",
+        data={"csrf_token": csrf_token_for(client)},
         files=[
             ("new_images", ("proof.png", VALID_PNG, "image/png")),
             ("new_files", ("reply.xlsx", b"sku,qty\nA001,1\n", "application/octet-stream")),
@@ -429,7 +447,7 @@ def test_admin_detail_rejects_empty_supplemental_attachment_upload(tmp_path, mon
     response = submit_ticket(client)
     assert response.status_code == 200
 
-    upload_response = client.post("/admin/ticket/1/attachments")
+    upload_response = admin_post(client, "/admin/ticket/1/attachments")
 
     assert upload_response.status_code == 400
     assert "请选择要上传的附件" in upload_response.text
@@ -463,8 +481,8 @@ def test_admin_summary_counts_all_filtered_results_not_current_page(tmp_path, mo
     submit_ticket(client, urgency="当天必须处理", description="第一个")
     submit_ticket(client, urgency="普通", description="第二个")
     submit_ticket(client, urgency="普通", description="第三个")
-    client.post("/admin/ticket/2", data={"status": "处理中", "assigned_to": "采购", "handler_note": "处理中"})
-    client.post("/admin/ticket/3", data={"status": "已完成", "assigned_to": "采购", "handler_note": "已完成"})
+    admin_post(client, "/admin/ticket/2", data={"status": "处理中", "assigned_to": "采购", "handler_note": "处理中"})
+    admin_post(client, "/admin/ticket/3", data={"status": "已完成", "assigned_to": "采购", "handler_note": "已完成"})
 
     admin_page = client.get("/admin?page=1")
 
@@ -561,7 +579,7 @@ def test_admin_users_allows_multiple_accounts_and_logs_actual_operator(tmp_path,
     admin_page = client.get("/admin")
     assert admin_page.status_code == 200
     assert "\u5f53\u524d\u8d26\u53f7\uff1aadmin" in admin_page.text
-    client.post("/admin/logout", follow_redirects=False)
+    admin_post(client, "/admin/logout", follow_redirects=False)
     assert login_admin(client, "caigou", "wrong-password").status_code == 400
     assert login_admin(client, "legacy-admin", "legacy-secret").status_code == 400
     assert_login_success(login_admin(client, "caigou", "123456"))
@@ -572,7 +590,8 @@ def test_admin_users_allows_multiple_accounts_and_logs_actual_operator(tmp_path,
     response = submit_ticket(client)
     assert response.status_code == 200
 
-    update_response = client.post(
+    update_response = admin_post(
+        client,
         "/admin/ticket/1",
         data={"status": "处理中", "assigned_to": "采购", "handler_note": "采购账号处理"},
         follow_redirects=False,
@@ -589,7 +608,7 @@ def test_legacy_admin_credentials_still_work_when_admin_users_missing(tmp_path, 
 
     assert_login_success(login_admin(client, "legacy-admin", "legacy-secret"))
     assert client.get("/admin").status_code == 200
-    client.post("/admin/logout", follow_redirects=False)
+    admin_post(client, "/admin/logout", follow_redirects=False)
     assert login_admin(client, "legacy-admin", "wrong-password").status_code == 400
 
 
@@ -680,7 +699,8 @@ def test_submit_admin_security_lifecycle_export_and_persistence(tmp_path, monkey
 
     assert unauthenticated_client.get("/admin/ticket/1", follow_redirects=False).status_code == 303
     assert unauthenticated_client.post("/admin/ticket/1", data={"status": "处理中"}, follow_redirects=False).status_code == 303
-    update_response = client.post(
+    update_response = admin_post(
+        client,
         "/admin/ticket/1",
         data={"status": "已完成", "assigned_to": "采购", "handler_note": "已安排总部同事处理"},
         follow_redirects=False,
@@ -705,7 +725,8 @@ def test_submit_admin_security_lifecycle_export_and_persistence(tmp_path, monkey
     assert "处理日志" in detail_page.text
     assert protected_path in detail_page.text
 
-    reopen_response = client.post(
+    reopen_response = admin_post(
+        client,
         "/admin/ticket/1",
         data={"status": "处理中", "assigned_to": "采购", "handler_note": "重新打开"},
         follow_redirects=False,
@@ -872,7 +893,8 @@ def test_admin_can_delete_file_and_image_attachments_and_logs_actions(tmp_path, 
     logged_in_client(client)
 
     file_path.unlink()
-    file_delete = client.post(
+    file_delete = admin_post(
+        client,
         f"/admin/ticket/1/file/{ticket_file['id']}/delete",
         follow_redirects=False,
     )
@@ -880,7 +902,8 @@ def test_admin_can_delete_file_and_image_attachments_and_logs_actions(tmp_path, 
     assert rows_for(tmp_path, "ticket_files") == []
 
     image_path.unlink()
-    image_delete = client.post(
+    image_delete = admin_post(
+        client,
         f"/admin/ticket/1/image/{image['id']}/delete",
         follow_redirects=False,
     )
@@ -924,7 +947,8 @@ def test_admin_pagination_filters_handlers_and_keyword_search(tmp_path, monkeypa
         assert response.status_code == 200
 
     logged_in_client(client)
-    client.post(
+    admin_post(
+        client,
         "/admin/ticket/1",
         data={"status": "处理中", "assigned_to": "张三", "handler_note": "分配给张三"},
     )
@@ -1153,6 +1177,258 @@ def test_missing_and_invalid_config_files_fall_back_to_defaults(tmp_path, monkey
     assert main.load_app_config().max_file_count == 5
     assert main.load_app_config().max_total_file_upload_mb == 50
 
+
+def test_store_query_filters_by_store_paginates_and_hides_protected_links(tmp_path, monkeypatch):
+    client, _ = build_client(
+        tmp_path,
+        monkeypatch,
+        config_overrides={
+            "system.json": dict(DEFAULT_TEST_CONFIG["system.json"], store_query_default_days=30, store_query_page_size=2)
+        },
+    )
+    for index in range(3):
+        submit_ticket(client, store_name="南京门东店", description=f"南京查询工单 {index}", product_name=f"南京商品{index}")
+    submit_ticket_with_image_and_file(client, store_name="南昌万寿宫店", description="南昌不应出现", product_name="南昌商品")
+
+    empty_store = client.get("/query?keyword=南京")
+    assert empty_store.status_code == 400
+    assert "请选择门店" in empty_store.text
+
+    page = client.get("/query?store_name=南京门东店")
+    assert page.status_code == 200
+    assert "门店工单查询" in page.text
+    assert "南京查询工单" in page.text
+    assert "南昌不应出现" not in page.text
+    assert "当前第 1 页" in page.text
+    assert "page=2" in page.text
+    assert "/admin/files" not in page.text
+    assert "/admin/uploads" not in page.text
+    assert "补充资料" in page.text
+
+    keyword_page = client.get("/query?store_name=南京门东店&keyword=南京商品1")
+    assert "南京商品1" in keyword_page.text
+    assert "南京商品0" not in keyword_page.text
+
+    ticket_no = rows_for(tmp_path, "tickets")[0]["ticket_no"]
+    ticket_page = client.get(f"/query?store_name=南京门东店&ticket_no={ticket_no}")
+    assert ticket_no in ticket_page.text
+
+    empty_page = client.get("/query?store_name=山城巷店")
+    assert "当前门店暂无符合条件的工单。" in empty_page.text
+
+
+def test_store_supplement_records_sources_logs_and_status_transition(tmp_path, monkeypatch):
+    client, _ = build_client(
+        tmp_path,
+        monkeypatch,
+        config_overrides={
+            "system.json": dict(
+                DEFAULT_TEST_CONFIG["system.json"],
+                supplement_status_after_store_update="待处理",
+            )
+        },
+    )
+    submit_ticket(client, store_name="南京门东店", description="需要门店补充")
+    logged_in_client(client)
+    admin_post(
+        client,
+        "/admin/ticket/1",
+        data={"status": "待门店补充", "assigned_to": "总部商品", "handler_note": "请补图"},
+        follow_redirects=False,
+    )
+
+    supplement_page = client.get("/query/ticket/1/supplement?store_name=南京门东店")
+    assert supplement_page.status_code == 200
+    assert "门店补充资料" in supplement_page.text
+    assert "/admin/files" not in supplement_page.text
+
+    mismatch = client.get("/query/ticket/1/supplement?store_name=南昌万寿宫店")
+    assert mismatch.status_code == 403
+
+    empty = client.post(
+        "/query/ticket/1/supplement",
+        data={"store_name": "南京门东店", "submitter": "小李", "note": ""},
+    )
+    assert empty.status_code == 400
+    assert "请填写补充说明或上传附件" in empty.text
+
+    response = client.post(
+        "/query/ticket/1/supplement",
+        data={"store_name": "南京门东店", "submitter": "小李", "note": "已补充现场照片和表格"},
+        files=[
+            ("images", ("supplement.png", VALID_PNG, "image/png")),
+            ("files", ("supplement.xlsx", b"sku,qty\nA001,2\n", "application/octet-stream")),
+        ],
+    )
+    assert response.status_code == 200
+    assert "补充资料已提交，总部会继续处理。" in response.text
+    assert "返回查询结果" in response.text
+
+    supplements = rows_for(tmp_path, "ticket_supplements")
+    images = rows_for(tmp_path, "ticket_images")
+    files = rows_for(tmp_path, "ticket_files")
+    tickets = rows_for(tmp_path, "tickets")
+    logs = rows_for(tmp_path, "ticket_logs")
+    assert supplements[-1]["submitter"] == "小李"
+    assert supplements[-1]["image_count"] == 1
+    assert supplements[-1]["file_count"] == 1
+    assert images[-1]["source"] == "store_supplement"
+    assert images[-1]["uploaded_by"] == "小李"
+    assert files[-1]["source"] == "store_supplement"
+    assert files[-1]["uploaded_by"] == "小李"
+    assert tickets[0]["status"] == "待处理"
+    assert logs[-1]["action"] == "门店补充资料"
+    assert logs[-1]["operator"].startswith("门店:")
+    assert logs[-1]["old_status"] == "待门店补充"
+    assert logs[-1]["new_status"] == "待处理"
+
+
+def test_request_type_rules_validate_fields_attachments_and_missing_config(tmp_path, monkeypatch):
+    rules = {
+        "建单需求": {
+            "required_fields": ["brand", "product_name", "quantity"],
+            "require_image": False,
+            "require_file": False,
+            "require_any_attachment": True,
+            "description_hint": "请说明到货情况、采购单需求或建单原因",
+        },
+        "商品异常": {
+            "required_fields": ["product_name", "description"],
+            "require_image": True,
+            "require_file": False,
+            "require_any_attachment": False,
+            "description_hint": "请说明异常现象、影响范围和处理诉求",
+        },
+    }
+    client, _ = build_client(tmp_path, monkeypatch, config_overrides={"request_type_rules.json": rules})
+
+    submit_page = client.get("/submit")
+    assert "不同需求类型可能要求补充品牌、商品、数量或附件。" in submit_page.text
+    assert "data-request-type-rules" in submit_page.text
+
+    missing_brand = submit_ticket_with_file(client, request_type="建单需求", brand="", product_name="商品", quantity="1")
+    assert missing_brand.status_code == 400
+    assert "建单需求必须填写品牌。" in missing_brand.text
+
+    missing_attachment = submit_ticket(client, request_type="建单需求", brand="品牌", product_name="商品", quantity="1")
+    assert missing_attachment.status_code == 400
+    assert "建单需求必须上传图片或文件附件。" in missing_attachment.text
+
+    missing_image = submit_ticket(client, request_type="商品异常", product_name="商品异常商品")
+    assert missing_image.status_code == 400
+    assert "商品异常必须上传至少一张图片。" in missing_image.text
+
+    unconfigured = submit_ticket(client, request_type="系统问题", description="系统配置未覆盖的需求")
+    assert unconfigured.status_code == 200
+
+    missing_rules_client, _ = build_client(tmp_path / "missing-rules", monkeypatch)
+    assert submit_ticket(missing_rules_client, request_type="建单需求", brand="", product_name="", quantity="").status_code == 200
+
+
+def test_admin_dashboard_due_status_and_attachment_statistics(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch)
+    yesterday = (date.today() - timedelta(days=1)).isoformat()
+    today = date.today().isoformat()
+    tomorrow = (date.today() + timedelta(days=1)).isoformat()
+
+    submit_ticket_with_image(client, store_name="南京门东店", request_type="商品异常", expected_finish_date=yesterday, description="已超时工单")
+    submit_ticket_with_file(client, store_name="南京门东店", request_type="缺货需求", expected_finish_date=today, description="今日到期工单")
+    submit_ticket(client, store_name="南昌万寿宫店", request_type="新品需求", expected_finish_date=tomorrow, description="未到期工单")
+    submit_ticket(client, store_name="山城巷店", request_type="系统问题", expected_finish_date="", description="未设置工单")
+    logged_in_client(client)
+    admin_post(
+        client,
+        "/admin/ticket/3",
+        data={"status": "已完成", "assigned_to": "采购", "handler_note": "按时完成"},
+        follow_redirects=False,
+    )
+
+    dashboard_redirect = TestClient(__import__("main").app).get("/admin/dashboard", follow_redirects=False)
+    assert dashboard_redirect.status_code == 303
+
+    dashboard = client.get("/admin/dashboard")
+    assert dashboard.status_code == 200
+    assert "统计看板" in dashboard.text
+    assert "总工单数" in dashboard.text
+    assert "商品异常" in dashboard.text
+    assert "南京门东店" in dashboard.text
+    assert "采购" in dashboard.text
+    assert "超时工单" in dashboard.text
+    assert "有图片工单数" in dashboard.text
+    assert "有文件工单数" in dashboard.text
+    assert "无附件工单数" in dashboard.text
+
+    admin_page = client.get("/admin")
+    assert "已超时" in admin_page.text
+    assert "今日到期" in admin_page.text
+    assert "未设置" in admin_page.text
+    assert "按时完成" in admin_page.text
+
+    overdue_filter = client.get("/admin?due_status=已超时")
+    assert "已超时工单" in overdue_filter.text
+    assert "今日到期工单" not in overdue_filter.text
+
+    detail_page = client.get("/admin/ticket/1")
+    assert "该工单已超过期望完成时间，请优先处理。" in detail_page.text
+
+
+def test_session_security_secure_cookie_expiry_csrf_and_env_example(tmp_path, monkeypatch):
+    monkeypatch.setenv("SESSION_MAX_AGE_HOURS", "1")
+    monkeypatch.setenv("SESSION_COOKIE_SECURE", "true")
+    secure_client, _secure_main = build_client(tmp_path / "secure-cookie", monkeypatch)
+
+    login = login_admin(secure_client)
+    assert_login_success(login)
+    set_cookie = login.headers.get("set-cookie", "")
+    assert "Max-Age=3600" in set_cookie
+    assert "Secure" in set_cookie
+
+    monkeypatch.setenv("SESSION_COOKIE_SECURE", "false")
+    client, main = build_client(tmp_path / "csrf", monkeypatch)
+    assert_login_success(login_admin(client))
+
+    no_csrf = client.post(
+        "/admin/ticket/1",
+        data={"status": "处理中", "assigned_to": "采购", "handler_note": "缺少 csrf"},
+        follow_redirects=False,
+    )
+    assert no_csrf.status_code == 403
+
+    submit_ticket(client)
+    ok = admin_post(
+        client,
+        "/admin/ticket/1",
+        data={"status": "处理中", "assigned_to": "采购", "handler_note": "带 csrf"},
+        follow_redirects=False,
+    )
+    assert ok.status_code == 303
+
+    expired_token = main.create_admin_session(ADMIN_AUTH[0], issued_at=0, max_age_seconds=1)
+    expired_client = TestClient(main.app)
+    expired_client.cookies.set("admin_session", expired_token)
+    expired = expired_client.get("/admin", follow_redirects=False)
+    assert expired.status_code == 303
+
+    env_example = (PROJECT_DIR / ".env.example").read_text(encoding="utf-8")
+    assert "APP_ENV=development" in env_example
+    assert "SESSION_MAX_AGE_HOURS=12" in env_example
+    assert "SESSION_COOKIE_SECURE=false" in env_example
+
+
+def test_nginx_https_example_and_navigation_files_are_present(tmp_path, monkeypatch):
+    nginx = PROJECT_DIR / "deploy" / "nginx-store-request-tool.conf.example"
+    assert nginx.exists()
+    content = nginx.read_text(encoding="utf-8")
+    assert "listen 80" in content
+    assert "listen 443 ssl" in content
+    assert "server_name request.example.com" in content
+    assert "proxy_pass http://127.0.0.1:8701" in content
+    assert "client_max_body_size 100M" in content
+    assert "X-Frame-Options" in content
+    assert "certbot" in content
+
+    for template_name in ("query.html", "supplement.html", "dashboard.html"):
+        assert (PROJECT_DIR / "templates" / template_name).exists()
     config_dir = tmp_path / "config"
     config_dir.mkdir(parents=True, exist_ok=True)
     (config_dir / "stores.json").write_text("{bad json", encoding="utf-8")
@@ -1171,6 +1447,13 @@ def test_missing_and_invalid_config_files_fall_back_to_defaults(tmp_path, monkey
         ),
         encoding="utf-8",
     )
+    monkeypatch.setenv("STORE_REQUEST_DB_PATH", str(tmp_path / "tickets.db"))
+    monkeypatch.setenv("STORE_REQUEST_UPLOAD_DIR", str(tmp_path / "uploads"))
+    monkeypatch.setenv("STORE_REQUEST_CONFIG_DIR", str(config_dir))
+    monkeypatch.setenv("ADMIN_USERNAME", ADMIN_AUTH[0])
+    monkeypatch.setenv("ADMIN_PASSWORD", ADMIN_AUTH[1])
+    monkeypatch.setenv("SESSION_SECRET", "test-session-secret")
+    monkeypatch.syspath_prepend(str(PROJECT_DIR))
     sys.modules.pop("main", None)
     main = importlib.import_module("main")
     invalid_config_client = TestClient(main.app)

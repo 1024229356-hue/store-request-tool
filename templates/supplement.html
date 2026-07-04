@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>门店补充资料</title>
+  <link rel="stylesheet" href="/static/style.css?v=ui20260704">
+</head>
+<body class="page-submit">
+  <main class="mobile-shell">
+    <section class="page-header submit-hero">
+      <p class="eyebrow">门店工单</p>
+      <h1>门店补充资料</h1>
+      <p class="header-copy">工单号：{{ ticket.ticket_no }}，门店：{{ store_name }}</p>
+      <div class="detail-header-badges">
+        <span class="badge status-{{ ticket.status }}">{{ ticket.status }}</span>
+        <span class="badge due-{{ ticket.due_status_class }}">{{ ticket.due_status }}</span>
+      </div>
+    </section>
+
+    {% if success %}
+    <section class="success-panel">
+      <div class="success-mark">成功</div>
+      <p class="eyebrow">补充成功</p>
+      <h1>补充资料已提交，总部会继续处理。</h1>
+      <div class="success-actions">
+        <a class="primary-button" href="{{ query_url }}">返回查询结果</a>
+        <a class="ghost-button" href="{{ supplement_url }}">继续补充</a>
+      </div>
+    </section>
+    {% else %}
+    {% if error %}
+    <div class="alert alert-error">{{ error }}</div>
+    {% endif %}
+
+    <form class="form-stack" method="post" action="/query/ticket/{{ ticket.id }}/supplement" enctype="multipart/form-data">
+      <input type="hidden" name="store_name" value="{{ store_name }}">
+      <section class="form-card">
+        <div class="section-heading">
+          <h2>补充说明</h2>
+          <p>如果不上传图片或文件，请填写补充说明。</p>
+        </div>
+        <dl class="detail-grid supplement-summary">
+          <div><dt>工单号</dt><dd>{{ ticket.ticket_no }}</dd></div>
+          <div><dt>门店</dt><dd>{{ store_name }}</dd></div>
+          <div><dt>当前状态</dt><dd>{{ ticket.status }}</dd></div>
+        </dl>
+        <label>
+          <span>补充人 <strong>*</strong></span>
+          <input name="submitter" type="text" placeholder="请输入姓名或岗位" required>
+        </label>
+        <label>
+          <span>补充说明</span>
+          <textarea name="note" rows="6" placeholder="补充现场情况、单据编号、总部要求的信息或其他说明"></textarea>
+        </label>
+      </section>
+
+      <section class="form-card">
+        <div class="section-heading">
+          <h2>补充附件</h2>
+          <p>图片和文件会追加到原工单，总部后台可继续查看和处理。</p>
+        </div>
+
+        <div class="upload-card">
+          <div>
+            <h3>补充图片</h3>
+            <p class="field-hint">支持 {{ image_accept }}，最多 {{ max_image_count }} 张，单张不超过 {{ max_image_mb }}MB。</p>
+          </div>
+          <label class="file-control">
+            <span>选择图片</span>
+            <input name="images" type="file" accept="{{ image_accept }}" multiple data-extra-image-input>
+          </label>
+          <div class="upload-tools">
+            <button class="ghost-button compact upload-clear" type="button" data-clear-extra-images>清空图片</button>
+          </div>
+          <div class="upload-preview image-preview" data-extra-image-preview></div>
+        </div>
+
+        <div class="upload-card">
+          <div>
+            <h3>补充文件</h3>
+            <p class="field-hint">最多 {{ max_file_count }} 个，单个不超过 {{ max_file_mb }}MB，总大小不超过 {{ max_total_file_upload_mb }}MB。</p>
+          </div>
+          <label class="file-control">
+            <span>选择文件</span>
+            <input name="files" type="file" accept="{{ file_accept }}" multiple data-extra-file-input>
+          </label>
+          <div class="upload-tools">
+            <button class="ghost-button compact upload-clear" type="button" data-clear-extra-files>清空文件</button>
+          </div>
+          <div class="upload-preview file-preview" data-extra-file-preview></div>
+        </div>
+      </section>
+
+      <div class="submit-action-bar">
+        <button class="primary-button" type="submit">提交补充资料</button>
+      </div>
+    </form>
+    {% endif %}
+  </main>
+  <script src="/static/app.js?v=ui20260704"></script>
+</body>
+</html>

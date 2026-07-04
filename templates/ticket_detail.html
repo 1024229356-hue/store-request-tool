@@ -14,15 +14,20 @@
       <div class="detail-header-badges">
         <span class="badge status-{{ ticket.status }}">{{ ticket.status }}</span>
         <span class="badge urgency-{{ ticket.urgency }}">{{ ticket.urgency }}</span>
+        <span class="badge due-{{ ticket.due_status_class }}">{{ ticket.due_status }}</span>
       </div>
     </div>
     <div class="admin-actions">
       <span class="admin-user">当前账号：{{ admin_user }}</span>
+      <a class="ghost-button compact" href="/admin">工单列表</a>
+      <a class="ghost-button compact" href="/admin/dashboard">统计看板</a>
       <a class="ghost-button" href="{{ return_url }}">返回列表</a>
       <form class="account-action-form" method="post" action="/admin/logout">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <button class="ghost-button compact" type="submit">切换账号</button>
       </form>
       <form class="account-action-form" method="post" action="/admin/logout">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <button class="ghost-button compact" type="submit">退出登录</button>
       </form>
     </div>
@@ -37,6 +42,9 @@
     {% endif %}
     {% if upload_error %}
     <div class="alert alert-error">{{ upload_error }}</div>
+    {% endif %}
+    {% if ticket.due_status == '已超时' %}
+    <div class="alert alert-error">该工单已超过期望完成时间，请优先处理。</div>
     {% endif %}
 
     <section class="detail-layout">
@@ -71,6 +79,7 @@
               <dl class="detail-grid">
                 <div><dt>提交时间</dt><dd>{{ ticket.created_at }}</dd></div>
                 <div><dt>期望完成时间</dt><dd>{{ ticket.expected_finish_date or '-' }}</dd></div>
+                <div><dt>时效状态</dt><dd><span class="badge due-{{ ticket.due_status_class }}">{{ ticket.due_status }}</span></dd></div>
                 <div><dt>最后更新时间</dt><dd>{{ ticket.updated_at }}</dd></div>
                 <div><dt>完成时间</dt><dd>{{ ticket.closed_at or '-' }}</dd></div>
                 <div><dt>处理人</dt><dd>{{ ticket.assigned_to or '-' }}</dd></div>
@@ -97,6 +106,7 @@
                 <a class="ghost-button compact" href="{{ image.protected_url }}" target="_blank">查看图片</a>
                 <form method="post" action="/admin/ticket/{{ ticket.id }}/image/{{ image.id }}/delete" onsubmit="return confirm('确认删除这张图片吗？删除后不可恢复。');">
                   <input type="hidden" name="return_url" value="{{ return_url }}">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                   <button class="danger-button compact" type="submit">删除附件</button>
                 </form>
               </div>
@@ -120,6 +130,7 @@
                 <a class="ghost-button compact" href="{{ file.download_url }}">下载文件</a>
                 <form method="post" action="/admin/ticket/{{ ticket.id }}/file/{{ file.id }}/delete" onsubmit="return confirm('确认删除这个文件吗？删除后不可恢复。');">
                   <input type="hidden" name="return_url" value="{{ return_url }}">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                   <button class="danger-button compact" type="submit">删除文件</button>
                 </form>
               </div>
@@ -136,6 +147,7 @@
         <p class="panel-note">状态改为已完成会记录完成时间，请确认处理结果后保存。</p>
         <form method="post" action="/admin/ticket/{{ ticket.id }}">
           <input type="hidden" name="return_url" value="{{ return_url }}">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <label>
             <span>状态</span>
             <select name="status">
@@ -165,6 +177,7 @@
           <p class="panel-note">总部可上传处理凭证、截图、表格或供应商反馈文件。</p>
           <form method="post" action="/admin/ticket/{{ ticket.id }}/attachments" enctype="multipart/form-data">
             <input type="hidden" name="return_url" value="{{ return_url }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <div class="upload-card compact-upload-card">
               <div>
                 <h3>补充图片</h3>

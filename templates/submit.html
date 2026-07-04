@@ -17,6 +17,9 @@
         <span>总部处理</span>
         <span>状态留痕</span>
       </div>
+      <div class="header-actions">
+        <a class="ghost-button compact" href="/query">查询工单</a>
+      </div>
     </section>
 
     {% if error %}
@@ -47,12 +50,13 @@
 
           <label>
             <span>需求类型 <strong>*</strong></span>
-            <select name="request_type" required>
+            <select name="request_type" required data-request-type-select data-request-type-rules='{{ request_type_rules_json | e }}'>
               <option value="">请选择需求类型</option>
               {% for item in request_types %}
               <option value="{{ item }}" {% if values.get('request_type') == item %}selected{% endif %}>{{ item }}</option>
               {% endfor %}
             </select>
+            <small class="inline-hint" data-request-type-hint>不同需求类型可能要求补充品牌、商品、数量或附件。</small>
           </label>
 
           <label>

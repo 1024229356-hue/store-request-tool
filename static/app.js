@@ -12,6 +12,8 @@ document.addEventListener("DOMContentLoaded", () => {
   const extraFilePreview = document.querySelector("[data-extra-file-preview]");
   const clearExtraFilesButton = document.querySelector("[data-clear-extra-files]");
   const copyTicketButtons = document.querySelectorAll("[data-copy-ticket]");
+  const requestTypeSelect = document.querySelector("[data-request-type-select]");
+  const requestTypeHint = document.querySelector("[data-request-type-hint]");
 
   let selectedImages = [];
   let selectedFiles = [];
@@ -74,6 +76,20 @@ document.addEventListener("DOMContentLoaded", () => {
     window.setTimeout(() => {
       button.textContent = originalText;
     }, 1600);
+  }
+
+  function updateRequestTypeHint() {
+    if (!requestTypeSelect || !requestTypeHint) {
+      return;
+    }
+    let rules = {};
+    try {
+      rules = JSON.parse(requestTypeSelect.dataset.requestTypeRules || "{}");
+    } catch (_error) {
+      rules = {};
+    }
+    const selectedRule = rules[requestTypeSelect.value] || {};
+    requestTypeHint.textContent = selectedRule.description_hint || "不同需求类型可能要求补充品牌、商品、数量或附件。";
   }
 
   async function copyText(text) {
@@ -266,6 +282,11 @@ document.addEventListener("DOMContentLoaded", () => {
       syncInputFiles(extraFileInput, selectedExtraFiles);
       extraFilePreview.innerHTML = "";
     });
+  }
+
+  if (requestTypeSelect && requestTypeHint) {
+    requestTypeSelect.addEventListener("change", updateRequestTypeHint);
+    updateRequestTypeHint();
   }
 
   copyTicketButtons.forEach((button) => {
