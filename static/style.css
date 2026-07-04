@@ -463,6 +463,46 @@ a:focus-visible {
   font-size: 14px;
 }
 
+.inline-action-form,
+.record-delete-form,
+.hard-delete-form,
+.cleanup-delete-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.record-delete-form {
+  margin-top: 10px;
+}
+
+.hard-delete-form {
+  min-width: 190px;
+}
+
+.trash-section,
+.cleanup-section,
+.cleanup-preview-card {
+  display: grid;
+  gap: 16px;
+}
+
+.trash-table {
+  min-width: 1180px;
+}
+
+.cleanup-table {
+  min-width: 980px;
+}
+
+.cleanup-delete-form {
+  justify-content: flex-end;
+  border-top: 1px solid var(--line);
+  margin-top: 14px;
+  padding-top: 14px;
+}
+
 .submit-action-bar .primary-button,
 .success-actions .primary-button,
 .success-actions .secondary-button,

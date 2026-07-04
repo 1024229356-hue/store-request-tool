@@ -14,6 +14,12 @@
 
 {% block topbar_actions %}
 <a class="ghost-button compact" href="{{ return_url }}">返回列表</a>
+<form class="inline-action-form" method="post" action="/admin/ticket/{{ ticket.id }}/delete" onsubmit="return confirm('确认将该工单移入回收站吗？');">
+  <input type="hidden" name="return_url" value="{{ return_url }}">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <input type="hidden" name="delete_reason" value="后台手动移入回收站">
+  <button class="danger-button compact" type="submit">移入回收站</button>
+</form>
 {% endblock %}
 
 {% block main_class %}detail-shell{% endblock %}
@@ -136,6 +142,11 @@
             <span class="tag-chip">{{ participant.participant_type }}</span>
             <span class="tag-chip">{{ participant.role or '未设置角色' }}</span>
           </div>
+          <form class="record-delete-form" method="post" action="/admin/ticket/{{ ticket.id }}/participant/{{ participant.id }}/delete" onsubmit="return confirm('确认移除这个协作人吗？');">
+            <input type="hidden" name="return_url" value="{{ return_url }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button class="danger-button compact" type="submit">移除协作人</button>
+          </form>
         </article>
         {% endfor %}
       </div>
@@ -156,7 +167,7 @@
         </label>
         <label>
           <span>名称</span>
-          <input name="participant_name" type="text" placeholder="例如：总部商品、采购或供应商">
+          <input name="participant_name" type="text" placeholder="例如：总部部门、采购或供应商">
         </label>
         <label>
           <span>角色</span>
@@ -204,6 +215,11 @@
             </div>
             <button class="ghost-button compact" type="submit">更新子任务</button>
           </form>
+          <form class="record-delete-form" method="post" action="/admin/ticket/{{ ticket.id }}/task/{{ task.id }}/delete" onsubmit="return confirm('确认删除这个子任务吗？');">
+            <input type="hidden" name="return_url" value="{{ return_url }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button class="danger-button compact" type="submit">删除子任务</button>
+          </form>
         </article>
         {% endfor %}
       </div>
@@ -219,7 +235,7 @@
         </label>
         <label>
           <span>负责人</span>
-          <input name="assignee" type="text" placeholder="例如：总部商品">
+          <input name="assignee" type="text" placeholder="例如：总部同事">
         </label>
         <label>
           <span>状态</span>
@@ -255,6 +271,11 @@
             <span class="tag-chip">{{ '内部备注' if comment.visibility == 'internal' else '门店可见' }}</span>
           </div>
           <p>{{ comment.content }}</p>
+          <form class="record-delete-form" method="post" action="/admin/ticket/{{ ticket.id }}/comment/{{ comment.id }}/delete" onsubmit="return confirm('确认删除这条沟通记录吗？');">
+            <input type="hidden" name="return_url" value="{{ return_url }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button class="danger-button compact" type="submit">删除评论</button>
+          </form>
         </article>
         {% endfor %}
       </div>
@@ -277,6 +298,38 @@
         </label>
         <button class="primary-button compact" type="submit">发布沟通</button>
       </form>
+    </section>
+
+    <section class="detail-section work-card collaboration-section">
+      <div class="section-heading">
+        <h2>门店补充记录</h2>
+        <p>门店补充资料可在这里隐藏；附件文件仍由总部附件区统一处理。</p>
+      </div>
+      {% if supplements %}
+      <div class="record-list collaboration-list">
+        {% for supplement in supplements %}
+        <article class="record-item">
+          <div class="record-topline">
+            <strong>{{ supplement.submitter or '门店' }}</strong>
+            <span>{{ supplement.created_at }}</span>
+          </div>
+          <div class="tag-list">
+            <span class="tag-chip">{{ supplement.store_name }}</span>
+            <span class="tag-chip">图片 {{ supplement.image_count or 0 }}</span>
+            <span class="tag-chip">文件 {{ supplement.file_count or 0 }}</span>
+          </div>
+          <p>{{ supplement.note or '未填写补充说明。' }}</p>
+          <form class="record-delete-form" method="post" action="/admin/ticket/{{ ticket.id }}/supplement/{{ supplement.id }}/delete" onsubmit="return confirm('确认隐藏这条门店补充记录吗？');">
+            <input type="hidden" name="return_url" value="{{ return_url }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button class="danger-button compact" type="submit">隐藏补充记录</button>
+          </form>
+        </article>
+        {% endfor %}
+      </div>
+      {% else %}
+      <p class="empty-note">暂无门店补充记录。</p>
+      {% endif %}
     </section>
 
     <section class="detail-section work-card">

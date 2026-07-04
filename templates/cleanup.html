@@ -1,0 +1,119 @@
+{% set page_title = '测试数据清理' %}
+{% set page_subtitle = '先预览、后移入回收站，适合清理 Codex、自测和 smoke 工单。' %}
+{% set page_eyebrow = '运维清理' %}
+{% set current_menu = 'cleanup' %}
+{% extends "base_admin.html" %}
+
+{% block content %}
+{% if error %}
+<div class="alert alert-error">{{ error }}</div>
+{% endif %}
+{% if deleted_count %}
+<div class="alert alert-success">已将 {{ deleted_count }} 条工单移入回收站。</div>
+{% endif %}
+
+<section class="admin-section work-card cleanup-section">
+  <div class="section-heading admin-section-heading">
+    <h2>预览将删除的工单</h2>
+    <p>建议保留“只匹配测试数据”勾选。系统只会把匹配工单移入回收站，不会直接永久删除。</p>
+  </div>
+  <form class="filter-bar cleanup-form" method="post" action="/admin/cleanup/preview">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label>
+      <span>门店</span>
+      <select name="store_name">
+        <option value="">全部</option>
+        {% for store in stores %}
+        <option value="{{ store }}" {% if filters.get('store_name') == store %}selected{% endif %}>{{ store }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>
+      <span>提报人</span>
+      <input name="submitter" type="text" value="{{ filters.get('submitter', '') }}" placeholder="按提报人精确筛选">
+    </label>
+    <label class="filter-keyword">
+      <span>关键词</span>
+      <input name="keyword" type="search" value="{{ filters.get('keyword', '') }}" placeholder="Codex、smoke、测试说明">
+    </label>
+    <div class="date-range">
+      <label>
+        <span>开始日期</span>
+        <input name="date_start" type="date" value="{{ filters.get('date_start', '') }}">
+      </label>
+      <label>
+        <span>结束日期</span>
+        <input name="date_end" type="date" value="{{ filters.get('date_end', '') }}">
+      </label>
+    </div>
+    <label class="inline-check">
+      <input name="incomplete_only" type="checkbox" value="1" {% if filters.get('incomplete_only') %}checked{% endif %}>
+      <span>只清理未完成</span>
+    </label>
+    <label class="inline-check">
+      <input name="only_test" type="checkbox" value="1" {% if filters.get('only_test') or not previewed %}checked{% endif %}>
+      <span>只匹配测试数据</span>
+    </label>
+    <div class="filter-actions">
+      <button class="primary-button compact" type="submit">预览</button>
+      <a class="ghost-button compact" href="/admin/cleanup">重置</a>
+    </div>
+  </form>
+</section>
+
+<section class="table-wrap work-card cleanup-preview-card">
+  <div class="section-heading admin-section-heading">
+    <h2>预览结果</h2>
+    <p>{% if previewed %}当前条件匹配 {{ preview_tickets|length }} 条工单。{% else %}填写条件后先点击预览。{% endif %}</p>
+  </div>
+  <table class="ticket-table erp-table cleanup-table">
+    <thead>
+      <tr>
+        <th>工单号</th>
+        <th>提交时间</th>
+        <th>门店</th>
+        <th>提报人</th>
+        <th>状态</th>
+        <th>问题说明摘要</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for ticket in preview_tickets %}
+      <tr>
+        <td>{{ ticket.ticket_no }}</td>
+        <td>{{ ticket.created_at }}</td>
+        <td>{{ ticket.store_name }}</td>
+        <td>{{ ticket.submitter }}</td>
+        <td><span class="badge status-badge status-{{ ticket.status }}">{{ ticket.status }}</span></td>
+        <td class="summary-cell"><div class="summary-text">{{ ticket.description_summary }}</div></td>
+      </tr>
+      {% else %}
+      <tr>
+        <td class="empty-cell" colspan="6">
+          <strong>{% if previewed %}没有匹配工单{% else %}尚未预览{% endif %}</strong>
+          <span>批量清理前需要先确认筛选条件。</span>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  {% if previewed and preview_tickets %}
+  <form class="cleanup-delete-form" method="post" action="/admin/cleanup/delete" onsubmit="return confirm('确认将预览结果中的工单移入回收站吗？');">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="store_name" value="{{ filters.get('store_name', '') }}">
+    <input type="hidden" name="submitter" value="{{ filters.get('submitter', '') }}">
+    <input type="hidden" name="keyword" value="{{ filters.get('keyword', '') }}">
+    <input type="hidden" name="date_start" value="{{ filters.get('date_start', '') }}">
+    <input type="hidden" name="date_end" value="{{ filters.get('date_end', '') }}">
+    <input type="hidden" name="incomplete_only" value="{{ filters.get('incomplete_only', '') }}">
+    <input type="hidden" name="only_test" value="{{ filters.get('only_test', '') }}">
+    <label class="inline-check">
+      <input name="confirm_cleanup" type="checkbox" value="1" required>
+      <span>确认将以上工单移入回收站</span>
+    </label>
+    <button class="danger-button" type="submit">批量移入回收站</button>
+  </form>
+  {% endif %}
+</section>
+{% endblock %}

@@ -12,7 +12,7 @@
 <section class="admin-section work-card embedded-admin-section">
   <div class="section-heading">
     <h2>新增嵌入页面</h2>
-    <p>小型页面可上传单个 HTML；大型页面建议上传 ZIP 资源包，ZIP 根目录必须包含 index.html，可包含 assets 图片、CSS、JS。</p>
+    <p>小型页面可上传单个 HTML；大型页面建议上传 ZIP 资源包，推荐入口命名为 index.html；如果根目录只有一个 HTML，系统会自动识别。</p>
   </div>
   <form class="embedded-form" method="post" action="/admin/embedded-pages" enctype="multipart/form-data">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -31,7 +31,7 @@
     <label>
       <span>HTML / ZIP 文件</span>
       <input name="html_file" type="file" accept=".html,.zip" required>
-      <small class="inline-hint">单 HTML 最大 {{ max_embedded_html_mb }}MB；ZIP 最大 {{ max_embedded_zip_mb }}MB，根目录必须包含 index.html。</small>
+      <small class="inline-hint">单 HTML 最大 {{ max_embedded_html_mb }}MB；ZIP 最大 {{ max_embedded_zip_mb }}MB，可包含 assets 图片、CSS、JS。</small>
     </label>
     <label class="inline-check">
       <input name="enabled" type="checkbox" value="1" checked>
@@ -63,6 +63,7 @@
           <th>预览</th>
           <th>替换文件</th>
           <th>启用/停用</th>
+          <th>删除</th>
         </tr>
       </thead>
       <tbody>
@@ -99,10 +100,17 @@
               <button class="ghost-button compact" type="submit">{{ '停用' if page.enabled else '启用' }}</button>
             </form>
           </td>
+          <td>
+            <form method="post" action="/admin/embedded-pages/{{ page.page_key }}/delete" onsubmit="return confirm('确认将该嵌入页面移入回收站吗？');">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <input type="hidden" name="delete_reason" value="后台手动移入回收站">
+              <button class="danger-button compact" type="submit">移入回收站</button>
+            </form>
+          </td>
         </tr>
         {% else %}
         <tr>
-          <td class="empty-cell" colspan="13">
+          <td class="empty-cell" colspan="14">
             <strong>暂无嵌入页面</strong>
             <span>新增页面后会出现在这里，启用状态下也会进入左侧扩展页面导航。</span>
           </td>

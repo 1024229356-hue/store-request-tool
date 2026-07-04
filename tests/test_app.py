@@ -1268,6 +1268,225 @@ def test_admin_can_delete_file_and_image_attachments_and_logs_actions(tmp_path, 
     assert "删除图片" in detail_page.text
 
 
+def test_ticket_soft_delete_restore_hard_delete_and_filters(tmp_path, monkeypatch):
+    client, main = build_client(tmp_path, monkeypatch)
+    submit_ticket_with_image_and_file(
+        client,
+        image_filename="delete-me.png",
+        file_filename="delete-me.xlsx",
+        description="Codex 待删除测试工单",
+    )
+    ticket_no = rows_for(tmp_path, "tickets")[0]["ticket_no"]
+    image_path = tmp_path / rows_for(tmp_path, "ticket_images")[0]["image_path"]
+    file_path = tmp_path / rows_for(tmp_path, "ticket_files")[0]["file_path"]
+    assert image_path.exists()
+    assert file_path.exists()
+
+    logged_in_client(client)
+    assert ticket_no in client.get("/admin").text
+    assert ticket_no in client.get("/query?store_name=南京门东店").text
+    workbook = load_workbook(BytesIO(client.get("/admin/export").content))
+    assert ticket_no in {cell.value for cell in workbook.active["A"]}
+
+    no_login = TestClient(main.app)
+    unauthenticated_delete = no_login.post("/admin/ticket/1/delete", data={"delete_reason": "no login"}, follow_redirects=False)
+    assert unauthenticated_delete.status_code == 303
+    assert unauthenticated_delete.headers["location"].startswith("/admin/login")
+
+    missing_csrf = client.post("/admin/ticket/1/delete", data={"delete_reason": "missing csrf"}, follow_redirects=False)
+    assert missing_csrf.status_code == 403
+
+    delete_response = admin_post(
+        client,
+        "/admin/ticket/1/delete",
+        data={"delete_reason": "测试数据清理"},
+        follow_redirects=False,
+    )
+    assert delete_response.status_code == 303
+    assert delete_response.headers["location"] == "/admin"
+    deleted_ticket = rows_for(tmp_path, "tickets")[0]
+    assert deleted_ticket["deleted_at"]
+    assert deleted_ticket["deleted_by"] == ADMIN_AUTH[0]
+    assert deleted_ticket["delete_reason"] == "测试数据清理"
+
+    assert ticket_no not in client.get("/admin").text
+    assert ticket_no not in client.get("/query?store_name=南京门东店").text
+    deleted_workbook = load_workbook(BytesIO(client.get("/admin/export").content))
+    assert ticket_no not in {cell.value for cell in deleted_workbook.active["A"]}
+    trash_page = client.get("/admin/trash")
+    assert trash_page.status_code == 200
+    assert ticket_no in trash_page.text
+    assert "测试数据清理" in trash_page.text
+
+    restore_response = admin_post(client, "/admin/ticket/1/restore", follow_redirects=False)
+    assert restore_response.status_code == 303
+    assert rows_for(tmp_path, "tickets")[0]["deleted_at"] is None
+    assert ticket_no in client.get("/admin").text
+
+    admin_post(client, "/admin/ticket/1/delete", data={"delete_reason": "永久删除前置"}, follow_redirects=False)
+    hard_delete = admin_post(
+        client,
+        "/admin/ticket/1/hard-delete",
+        data={"confirm_delete": "1"},
+        follow_redirects=False,
+    )
+    assert hard_delete.status_code == 303
+    assert rows_for(tmp_path, "tickets") == []
+    assert rows_for(tmp_path, "ticket_images") == []
+    assert rows_for(tmp_path, "ticket_files") == []
+    assert not image_path.exists()
+    assert not file_path.exists()
+
+
+def test_admin_can_soft_delete_collaboration_items_and_supplements(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch)
+    submit_ticket(client)
+    logged_in_client(client)
+
+    admin_post(
+        client,
+        "/admin/ticket/1/comments",
+        data={"content": "公开评论会被删除", "visibility": "public"},
+        follow_redirects=False,
+    )
+    admin_post(
+        client,
+        "/admin/ticket/1/tasks",
+        data={"title": "删除前子任务", "assignee": "采购", "status": "待处理", "due_date": "2026-07-06"},
+        follow_redirects=False,
+    )
+    admin_post(
+        client,
+        "/admin/ticket/1/participants",
+        data={"participant_type": "team", "participant_name": "临时协作人甲", "role": "协作处理"},
+        follow_redirects=False,
+    )
+    client.post(
+        "/query/ticket/1/supplement",
+        data={"store_name": "南京门东店", "submitter": "小李", "note": "这条补充会被隐藏"},
+    )
+    assert "公开评论会被删除" in client.get("/admin/ticket/1").text
+    assert "删除前子任务" in client.get("/admin/ticket/1").text
+    assert "临时协作人甲" in client.get("/admin/ticket/1").text
+    assert "这条补充会被隐藏" in client.get("/query/ticket/1?store_name=南京门东店").text
+
+    comment_id = rows_for(tmp_path, "ticket_comments")[0]["id"]
+    task_id = rows_for(tmp_path, "ticket_tasks")[0]["id"]
+    participant_id = rows_for(tmp_path, "ticket_participants")[0]["id"]
+    supplement_id = rows_for(tmp_path, "ticket_supplements")[0]["id"]
+
+    assert admin_post(client, f"/admin/ticket/1/comment/{comment_id}/delete", follow_redirects=False).status_code == 303
+    assert admin_post(client, f"/admin/ticket/1/task/{task_id}/delete", follow_redirects=False).status_code == 303
+    assert admin_post(client, f"/admin/ticket/1/participant/{participant_id}/delete", follow_redirects=False).status_code == 303
+    assert admin_post(client, f"/admin/ticket/1/supplement/{supplement_id}/delete", follow_redirects=False).status_code == 303
+
+    admin_detail = client.get("/admin/ticket/1").text
+    store_detail = client.get("/query/ticket/1?store_name=南京门东店").text
+    assert "公开评论会被删除" not in admin_detail
+    assert "删除前子任务" not in admin_detail
+    assert "临时协作人甲" not in admin_detail
+    assert "这条补充会被隐藏" not in store_detail
+    assert rows_for(tmp_path, "ticket_comments")[0]["deleted_at"]
+    assert rows_for(tmp_path, "ticket_tasks")[0]["deleted_at"]
+    assert rows_for(tmp_path, "ticket_participants")[0]["deleted_at"]
+    assert rows_for(tmp_path, "ticket_supplements")[0]["deleted_at"]
+    actions = [row["action"] for row in rows_for(tmp_path, "ticket_logs")]
+    assert "删除评论" in actions
+    assert "删除子任务" in actions
+    assert "移除协作人" in actions
+    assert "隐藏门店补充记录" in actions
+
+
+def test_embedded_page_soft_delete_restore_and_hard_delete(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch)
+    logged_in_client(client)
+    csrf_token = csrf_token_for(client, "/admin/embedded-pages")
+    create = client.post(
+        "/admin/embedded-pages",
+        data={
+            "csrf_token": csrf_token,
+            "page_key": "trash-report",
+            "title": "待删除扩展页",
+            "nav_label": "待删除扩展",
+            "enabled": "1",
+        },
+        files={"html_file": ("report.html", b"<h1>trash report</h1>", "text/html")},
+        follow_redirects=False,
+    )
+    assert create.status_code == 303
+    page_dir = tmp_path / "embedded_pages" / "trash-report"
+    assert page_dir.is_dir()
+    assert "待删除扩展" in client.get("/admin/dashboard").text
+    assert client.get("/admin/embed/trash-report").status_code == 200
+
+    delete = admin_post(
+        client,
+        "/admin/embedded-pages/trash-report/delete",
+        data={"delete_reason": "测试扩展页清理"},
+        follow_redirects=False,
+    )
+    assert delete.status_code == 303
+    deleted_page = rows_for(tmp_path, "embedded_pages")[0]
+    assert deleted_page["deleted_at"]
+    assert deleted_page["enabled"] == 0
+    assert "待删除扩展" not in client.get("/admin/dashboard").text
+    assert client.get("/admin/embed/trash-report").status_code == 404
+    assert "trash-report" in client.get("/admin/trash").text
+
+    restore = admin_post(client, "/admin/embedded-pages/trash-report/restore", follow_redirects=False)
+    assert restore.status_code == 303
+    restored_page = rows_for(tmp_path, "embedded_pages")[0]
+    assert restored_page["deleted_at"] is None
+    assert restored_page["enabled"] == 1
+    assert client.get("/admin/embed/trash-report").status_code == 200
+
+    admin_post(client, "/admin/embedded-pages/trash-report/delete", follow_redirects=False)
+    hard_delete = admin_post(
+        client,
+        "/admin/embedded-pages/trash-report/hard-delete",
+        data={"confirm_delete": "1"},
+        follow_redirects=False,
+    )
+    assert hard_delete.status_code == 303
+    assert rows_for(tmp_path, "embedded_pages") == []
+    assert not page_dir.exists()
+
+
+def test_cleanup_preview_and_delete_soft_deletes_matching_test_tickets(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch)
+    submit_ticket(client, description="Codex smoke cleanup ticket")
+    submit_ticket(client, description="正式运营工单")
+    logged_in_client(client)
+
+    cleanup_page = client.get("/admin/cleanup")
+    assert cleanup_page.status_code == 200
+    assert "预览将删除的工单" in cleanup_page.text
+
+    preview = admin_post(
+        client,
+        "/admin/cleanup/preview",
+        data={"keyword": "Codex", "only_test": "1"},
+    )
+    assert preview.status_code == 200
+    assert "Codex smoke cleanup ticket" in preview.text
+    assert "正式运营工单" not in preview.text
+
+    delete = admin_post(
+        client,
+        "/admin/cleanup/delete",
+        data={"keyword": "Codex", "only_test": "1", "confirm_cleanup": "1"},
+        follow_redirects=False,
+    )
+    assert delete.status_code == 303
+    tickets = rows_for(tmp_path, "tickets")
+    assert tickets[0]["deleted_at"]
+    assert tickets[0]["delete_reason"] == "批量清理测试数据"
+    assert tickets[1]["deleted_at"] is None
+    admin_page = client.get("/admin").text
+    assert "Codex smoke cleanup ticket" not in admin_page
+    assert "正式运营工单" in admin_page
+
+
 def test_admin_pagination_filters_handlers_and_keyword_search(tmp_path, monkeypatch):
     client, _ = build_client(
         tmp_path,
@@ -1403,8 +1622,20 @@ def test_legacy_database_is_migrated_without_losing_existing_rows(tmp_path, monk
     client = TestClient(main.app)
 
     with sqlite3.connect(db_path) as connection:
-        ticket_columns = {row[1] for row in connection.execute("PRAGMA table_info(tickets)").fetchall()}
-        embedded_columns = {row[1] for row in connection.execute("PRAGMA table_info(embedded_pages)").fetchall()}
+        soft_delete_tables = [
+            "tickets",
+            "ticket_supplements",
+            "ticket_participants",
+            "ticket_comments",
+            "ticket_tasks",
+            "embedded_pages",
+        ]
+        migrated_columns = {
+            table: {row[1] for row in connection.execute(f"PRAGMA table_info({table})").fetchall()}
+            for table in soft_delete_tables
+        }
+        ticket_columns = migrated_columns["tickets"]
+        embedded_columns = migrated_columns["embedded_pages"]
         tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()}
         ticket_count = connection.execute("SELECT COUNT(*) FROM tickets").fetchone()[0]
         image_count = connection.execute("SELECT COUNT(*) FROM ticket_images").fetchone()[0]
@@ -1422,6 +1653,8 @@ def test_legacy_database_is_migrated_without_losing_existing_rows(tmp_path, monk
     assert "ticket_tasks" in tables
     assert "embedded_pages" in tables
     assert {"storage_type", "entry_file", "file_size"}.issubset(embedded_columns)
+    for table in soft_delete_tables:
+        assert {"deleted_at", "deleted_by", "delete_reason"}.issubset(migrated_columns[table])
     assert ticket_count == 1
     assert image_count == 1
     assert migrated_stores == [(1, "南京门东店")]
@@ -2132,11 +2365,30 @@ def test_embedded_zip_upload_security_validation(tmp_path, monkeypatch):
                 "enabled": "1",
             },
             files={"html_file": (f"{page_key}.zip", make_zip_bytes(entries), "application/zip")},
+            follow_redirects=False,
         )
 
-    no_index = upload_zip("missing-index", {"assets/style.css": "body {}"})
-    assert no_index.status_code == 400
-    assert "index.html" in no_index.text
+    single_html = upload_zip(
+        "single-html",
+        {
+            "线下门店每日运营日报_2026-06-30.html": "<h1>单文件日报</h1>",
+            "assets/style.css": "body {}",
+        },
+    )
+    assert single_html.status_code == 303
+    index_file = tmp_path / "embedded_pages" / "single-html" / "index.html"
+    original_file = tmp_path / "embedded_pages" / "single-html" / "线下门店每日运营日报_2026-06-30.html"
+    assert index_file.read_text(encoding="utf-8") == "<h1>单文件日报</h1>"
+    assert not original_file.exists()
+    assert client.get("/admin/embed-content/single-html/index.html").text == "<h1>单文件日报</h1>"
+
+    multiple_html = upload_zip("multiple-html", {"daily.html": "<h1>A</h1>", "summary.html": "<h1>B</h1>"})
+    assert multiple_html.status_code == 400
+    assert "ZIP 根目录包含多个 HTML 文件，请将入口文件命名为 index.html。" in multiple_html.text
+
+    no_html = upload_zip("missing-html", {"assets/style.css": "body {}"})
+    assert no_html.status_code == 400
+    assert "ZIP 根目录必须包含 index.html 或一个 HTML 文件。" in no_html.text
 
     traversal = upload_zip("bad-path", {"index.html": "<h1>ok</h1>", "../evil.txt": "bad"})
     assert traversal.status_code == 400
@@ -2146,8 +2398,8 @@ def test_embedded_zip_upload_security_validation(tmp_path, monkeypatch):
     assert blocked_extension.status_code == 400
     assert "exe" in blocked_extension.text
 
-    assert rows_for(tmp_path, "embedded_pages") == []
-    assert not (tmp_path / "embedded_pages").exists()
+    rows = rows_for(tmp_path, "embedded_pages")
+    assert [row["page_key"] for row in rows] == ["single-html"]
 
 
 def test_session_security_secure_cookie_expiry_csrf_and_env_example(tmp_path, monkeypatch):

@@ -36,6 +36,12 @@
         <a class="sidebar-link {% if current_menu == 'embedded-pages' %}active{% endif %}" href="/admin/embedded-pages">
           <span>嵌入页面管理</span>
         </a>
+        <a class="sidebar-link {% if current_menu == 'trash' %}active{% endif %}" href="/admin/trash">
+          <span>回收站</span>
+        </a>
+        <a class="sidebar-link {% if current_menu == 'cleanup' %}active{% endif %}" href="/admin/cleanup">
+          <span>测试数据清理</span>
+        </a>
         {% set embedded_pages = embedded_nav_pages() %}
         {% if embedded_pages %}
         <div class="sidebar-nav-group">

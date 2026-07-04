@@ -161,6 +161,7 @@ class PreparedEmbeddedUpload:
     entry_file: str
     file_size: int
     content: bytes
+    source_entry_file: str = "index.html"
 
 EXCEL_HEADERS = [
     "工单号",
@@ -521,6 +522,12 @@ def add_column_if_missing(
         connection.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}")
 
 
+def add_soft_delete_columns(connection: sqlite3.Connection, table_name: str) -> None:
+    add_column_if_missing(connection, table_name, "deleted_at", "TEXT")
+    add_column_if_missing(connection, table_name, "deleted_by", "TEXT")
+    add_column_if_missing(connection, table_name, "delete_reason", "TEXT")
+
+
 MULTI_VALUE_SPLIT_RE = re.compile(r"[,\uFF0C\u3001;\uFF1B]+")
 EMBEDDED_PAGE_KEY_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
@@ -630,6 +637,7 @@ def init_db() -> None:
         )
         add_column_if_missing(connection, "tickets", "assigned_to", "TEXT")
         add_column_if_missing(connection, "tickets", "closed_at", "TEXT")
+        add_soft_delete_columns(connection, "tickets")
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS ticket_stores (
@@ -836,6 +844,14 @@ def init_db() -> None:
         add_column_if_missing(connection, "embedded_pages", "storage_type", "TEXT NOT NULL DEFAULT 'html'")
         add_column_if_missing(connection, "embedded_pages", "entry_file", "TEXT NOT NULL DEFAULT 'index.html'")
         add_column_if_missing(connection, "embedded_pages", "file_size", "INTEGER NOT NULL DEFAULT 0")
+        for table_name in (
+            "ticket_supplements",
+            "ticket_participants",
+            "ticket_comments",
+            "ticket_tasks",
+        ):
+            add_soft_delete_columns(connection, table_name)
+        add_soft_delete_columns(connection, "embedded_pages")
         backfill_ticket_relations(connection)
 
 
@@ -1057,6 +1073,24 @@ def resolve_upload_file(filename: str) -> Optional[Path]:
     if not target.is_file():
         return None
     return target
+
+
+def active_ticket_image_exists(filename: str) -> bool:
+    clean_filename = safe_uploaded_name(filename)
+    if not clean_filename:
+        return False
+    with get_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT 1
+            FROM ticket_images
+            JOIN tickets ON tickets.id = ticket_images.ticket_id
+            WHERE tickets.deleted_at IS NULL
+              AND (ticket_images.image_path = ? OR ticket_images.image_path = ?)
+            """,
+            (clean_filename, f"uploads/{clean_filename}"),
+        ).fetchone()
+    return bool(row)
 
 
 def generate_ticket_no(connection: sqlite3.Connection) -> str:
@@ -1484,8 +1518,14 @@ def create_ticket_with_images(
 
 
 def build_ticket_where(filters: Dict[str, str]) -> Tuple[str, List[str]]:
+    include_deleted = str(filters.get("__include_deleted") or "").strip() == "1"
+    deleted_only = str(filters.get("__deleted_only") or "").strip() == "1"
     clauses: List[str] = []
     params: List[str] = []
+    if deleted_only:
+        clauses.append("tickets.deleted_at IS NOT NULL")
+    elif not include_deleted:
+        clauses.append("tickets.deleted_at IS NULL")
 
     exact_fields = {
         "ticket_no": "ticket_no",
@@ -1647,7 +1687,7 @@ def fetch_tickets(
                 tickets.id, ticket_no, created_at, updated_at, store_name, submitter,
                 request_type, urgency, brand, product_name, sku_barcode,
                 quantity, description, expected_finish_date, status, assigned_to,
-                handler_note, closed_at,
+                handler_note, closed_at, deleted_at, deleted_by, delete_reason,
                 COALESCE(image_counts.image_count, 0) AS image_count,
                 COALESCE(file_counts.file_count, 0) AS file_count
             FROM tickets
@@ -1708,9 +1748,10 @@ def fetch_ticket_page(filters: Dict[str, str], sort: str, config: AppConfig, pag
     }
 
 
-def fetch_ticket(ticket_id: int) -> Optional[Dict[str, object]]:
+def fetch_ticket(ticket_id: int, include_deleted: bool = False) -> Optional[Dict[str, object]]:
+    deleted_sql = "" if include_deleted else " AND deleted_at IS NULL"
     with get_connection() as connection:
-        row = connection.execute("SELECT * FROM tickets WHERE id = ?", (ticket_id,)).fetchone()
+        row = connection.execute(f"SELECT * FROM tickets WHERE id = ?{deleted_sql}", (ticket_id,)).fetchone()
     if not row:
         return None
     tickets = attach_ticket_relations([dict(row)])
@@ -1727,6 +1768,7 @@ def fetch_store_ticket(ticket_id: int, store_name: str) -> Optional[Dict[str, ob
             SELECT tickets.*
             FROM tickets
             WHERE tickets.id = ?
+              AND tickets.deleted_at IS NULL
               AND EXISTS (
                   SELECT 1
                   FROM ticket_stores
@@ -1751,6 +1793,7 @@ def fetch_store_ticket_supplements(ticket_id: int) -> List[Dict[str, object]]:
             SELECT id, ticket_id, store_name, submitter, note, image_count, file_count, created_at
             FROM ticket_supplements
             WHERE ticket_id = ?
+              AND deleted_at IS NULL
             ORDER BY created_at DESC, id DESC
             """,
             (ticket_id,),
@@ -1770,7 +1813,19 @@ def fetch_store_visible_logs(ticket_id: int) -> List[Dict[str, object]]:
             """,
             (ticket_id,),
         ).fetchall()
-    return [dict(row) for row in rows]
+        supplement_count = int(
+            connection.execute(
+                "SELECT COUNT(*) AS total FROM ticket_supplements WHERE ticket_id = ? AND deleted_at IS NULL",
+                (ticket_id,),
+            ).fetchone()["total"]
+            or 0
+        )
+    logs = [dict(row) for row in rows]
+    if supplement_count == 0:
+        for log in logs:
+            if str(log.get("action") or "") == "门店补充资料":
+                log["note"] = "相关门店补充记录已移入回收站"
+    return logs
 
 
 def fetch_ticket_attachment_counts(ticket_id: int) -> Dict[str, object]:
@@ -1788,6 +1843,7 @@ def fetch_ticket_attachment_counts(ticket_id: int) -> Dict[str, object]:
             SELECT COUNT(*) AS total, MAX(created_at) AS latest_created_at
             FROM ticket_supplements
             WHERE ticket_id = ?
+              AND deleted_at IS NULL
             """,
             (ticket_id,),
         ).fetchone()
@@ -1838,14 +1894,15 @@ def fetch_ticket_files(ticket_id: int) -> List[Dict[str, object]]:
 
 def fetch_ticket_file(file_id: int, ticket_id: Optional[int] = None) -> Optional[Dict[str, object]]:
     sql = """
-        SELECT id, ticket_id, original_filename, stored_filename, file_path,
+        SELECT ticket_files.id, ticket_files.ticket_id, original_filename, stored_filename, file_path,
                file_ext, file_size, uploaded_at, source, uploaded_by, supplement_id
         FROM ticket_files
-        WHERE id = ?
+        JOIN tickets ON tickets.id = ticket_files.ticket_id
+        WHERE ticket_files.id = ? AND tickets.deleted_at IS NULL
     """
     params: List[object] = [file_id]
     if ticket_id is not None:
-        sql += " AND ticket_id = ?"
+        sql += " AND ticket_files.ticket_id = ?"
         params.append(ticket_id)
     with get_connection() as connection:
         row = connection.execute(sql, params).fetchone()
@@ -1859,6 +1916,12 @@ def fetch_ticket_image(image_id: int, ticket_id: int) -> Optional[Dict[str, obje
             SELECT id, ticket_id, image_path, uploaded_at, source, uploaded_by, supplement_id
             FROM ticket_images
             WHERE id = ? AND ticket_id = ?
+              AND EXISTS (
+                  SELECT 1
+                  FROM tickets
+                  WHERE tickets.id = ticket_images.ticket_id
+                    AND tickets.deleted_at IS NULL
+              )
             """,
             (image_id, ticket_id),
         ).fetchone()
@@ -1877,7 +1940,48 @@ def fetch_ticket_logs(ticket_id: int) -> List[Dict[str, object]]:
             """,
             (ticket_id,),
         ).fetchall()
-    return [dict(row) for row in rows]
+        active_counts = {
+            "comments": int(
+                connection.execute(
+                    "SELECT COUNT(*) AS total FROM ticket_comments WHERE ticket_id = ? AND deleted_at IS NULL",
+                    (ticket_id,),
+                ).fetchone()["total"]
+                or 0
+            ),
+            "tasks": int(
+                connection.execute(
+                    "SELECT COUNT(*) AS total FROM ticket_tasks WHERE ticket_id = ? AND deleted_at IS NULL",
+                    (ticket_id,),
+                ).fetchone()["total"]
+                or 0
+            ),
+            "participants": int(
+                connection.execute(
+                    "SELECT COUNT(*) AS total FROM ticket_participants WHERE ticket_id = ? AND deleted_at IS NULL",
+                    (ticket_id,),
+                ).fetchone()["total"]
+                or 0
+            ),
+            "supplements": int(
+                connection.execute(
+                    "SELECT COUNT(*) AS total FROM ticket_supplements WHERE ticket_id = ? AND deleted_at IS NULL",
+                    (ticket_id,),
+                ).fetchone()["total"]
+                or 0
+            ),
+        }
+    logs = [dict(row) for row in rows]
+    for log in logs:
+        action = str(log.get("action") or "")
+        if action in {"新增评论", "门店评论"} and active_counts["comments"] == 0:
+            log["note"] = "相关沟通记录已移入回收站"
+        elif action in {"新增子任务", "更新子任务"} and active_counts["tasks"] == 0:
+            log["note"] = "相关子任务已移入回收站"
+        elif action == "新增协作人" and active_counts["participants"] == 0:
+            log["note"] = "相关协作人已移入回收站"
+        elif action == "门店补充资料" and active_counts["supplements"] == 0:
+            log["note"] = "相关门店补充记录已移入回收站"
+    return logs
 
 
 def fetch_ticket_participants(ticket_id: int) -> List[Dict[str, object]]:
@@ -1887,6 +1991,7 @@ def fetch_ticket_participants(ticket_id: int) -> List[Dict[str, object]]:
             SELECT id, ticket_id, participant_type, participant_name, role, created_at
             FROM ticket_participants
             WHERE ticket_id = ?
+              AND deleted_at IS NULL
             ORDER BY id ASC
             """,
             (ticket_id,),
@@ -1895,7 +2000,7 @@ def fetch_ticket_participants(ticket_id: int) -> List[Dict[str, object]]:
 
 
 def fetch_ticket_comments(ticket_id: int, public_only: bool = False) -> List[Dict[str, object]]:
-    clauses = ["ticket_id = ?"]
+    clauses = ["ticket_id = ?", "deleted_at IS NULL"]
     params: List[object] = [ticket_id]
     if public_only:
         clauses.append("visibility = ?")
@@ -1922,6 +2027,7 @@ def fetch_ticket_tasks(ticket_id: int) -> List[Dict[str, object]]:
                    completed_at, created_at, updated_at
             FROM ticket_tasks
             WHERE ticket_id = ?
+              AND deleted_at IS NULL
             ORDER BY
                 CASE status
                     WHEN '待处理' THEN 0
@@ -2073,9 +2179,13 @@ def enrich_embedded_page(page: Dict[str, object]) -> Dict[str, object]:
     return page
 
 
-def fetch_embedded_pages(enabled_only: bool = False) -> List[Dict[str, object]]:
+def fetch_embedded_pages(enabled_only: bool = False, deleted_only: bool = False) -> List[Dict[str, object]]:
     clauses: List[str] = []
     params: List[object] = []
+    if deleted_only:
+        clauses.append("deleted_at IS NOT NULL")
+    else:
+        clauses.append("deleted_at IS NULL")
     if enabled_only:
         clauses.append("enabled = 1")
     where_sql = "WHERE " + " AND ".join(clauses) if clauses else ""
@@ -2083,7 +2193,8 @@ def fetch_embedded_pages(enabled_only: bool = False) -> List[Dict[str, object]]:
         rows = connection.execute(
             f"""
             SELECT id, page_key, title, nav_label, filename, storage_type,
-                   entry_file, file_size, enabled, created_at, updated_at, updated_by
+                   entry_file, file_size, enabled, created_at, updated_at, updated_by,
+                   deleted_at, deleted_by, delete_reason
             FROM embedded_pages
             {where_sql}
             ORDER BY nav_label ASC, id ASC
@@ -2100,19 +2211,22 @@ def fetch_enabled_embedded_pages() -> List[Dict[str, object]]:
     return fetch_embedded_pages(enabled_only=True)
 
 
-def fetch_embedded_page(page_key: str, enabled_only: bool = False) -> Optional[Dict[str, object]]:
+def fetch_embedded_page(page_key: str, enabled_only: bool = False, include_deleted: bool = False) -> Optional[Dict[str, object]]:
     clean_key = page_key.strip()
     if not is_valid_embedded_page_key(clean_key):
         return None
     clauses = ["page_key = ?"]
     params: List[object] = [clean_key]
+    if not include_deleted:
+        clauses.append("deleted_at IS NULL")
     if enabled_only:
         clauses.append("enabled = 1")
     with get_connection() as connection:
         row = connection.execute(
             f"""
             SELECT id, page_key, title, nav_label, filename, storage_type,
-                   entry_file, file_size, enabled, created_at, updated_at, updated_by
+                   entry_file, file_size, enabled, created_at, updated_at, updated_by,
+                   deleted_at, deleted_by, delete_reason
             FROM embedded_pages
             WHERE {" AND ".join(clauses)}
             """,
@@ -2149,7 +2263,23 @@ def validate_embedded_zip_member(filename: str) -> Optional[str]:
     return "/".join(parts)
 
 
-def validate_embedded_zip_content(content: bytes) -> None:
+def select_embedded_zip_entry_file(safe_files: List[str]) -> str:
+    root_html_files = [
+        file_path
+        for file_path in safe_files
+        if "/" not in file_path and file_path.lower().endswith(".html")
+    ]
+    index_files = [file_path for file_path in root_html_files if file_path.lower() == "index.html"]
+    if index_files:
+        return index_files[0]
+    if len(root_html_files) == 1:
+        return root_html_files[0]
+    if len(root_html_files) > 1:
+        raise ValueError("ZIP 根目录包含多个 HTML 文件，请将入口文件命名为 index.html。")
+    raise ValueError("ZIP 根目录必须包含 index.html 或一个 HTML 文件。")
+
+
+def validate_embedded_zip_content(content: bytes) -> str:
     try:
         with zipfile.ZipFile(BytesIO(content)) as archive:
             safe_files: List[str] = []
@@ -2157,8 +2287,7 @@ def validate_embedded_zip_content(content: bytes) -> None:
                 member_path = validate_embedded_zip_member(info.filename)
                 if member_path:
                     safe_files.append(member_path)
-            if "index.html" not in safe_files:
-                raise ValueError("ZIP 根目录必须包含 index.html。")
+            return select_embedded_zip_entry_file(safe_files)
     except zipfile.BadZipFile as exc:
         raise ValueError("ZIP 文件无法读取，请重新打包后上传。") from exc
 
@@ -2180,8 +2309,8 @@ async def prepare_embedded_upload_file(html_file: Optional[UploadFile], config: 
             raise ValueError(f"ZIP 文件不能超过 {config.max_embedded_zip_mb}MB。")
         if not content:
             raise ValueError("ZIP 文件内容不能为空。")
-        validate_embedded_zip_content(content)
-        return PreparedEmbeddedUpload("zip", "index.html", len(content), content)
+        source_entry_file = validate_embedded_zip_content(content)
+        return PreparedEmbeddedUpload("zip", "index.html", len(content), content, source_entry_file)
     raise ValueError("只允许上传 .html 或 .zip 文件。")
 
 
@@ -2208,7 +2337,8 @@ def write_embedded_upload_to_temp_dir(target_dir: Path, upload: PreparedEmbedded
             member_path = validate_embedded_zip_member(info.filename)
             if not member_path:
                 continue
-            target = (target_dir / member_path).resolve()
+            output_path = upload.entry_file if member_path == upload.source_entry_file else member_path
+            target = (target_dir / output_path).resolve()
             try:
                 target.relative_to(target_dir.resolve())
             except ValueError as exc:
@@ -2337,6 +2467,57 @@ def set_embedded_page_enabled(page_key: str, enabled: bool, updated_by: str) -> 
         )
 
 
+def soft_delete_embedded_page(page_key: str, deleted_by: str, delete_reason: str = "") -> None:
+    page = fetch_embedded_page(page_key)
+    if not page:
+        raise HTTPException(status_code=404, detail="嵌入页面不存在")
+    timestamp = now_text()
+    with get_connection() as connection:
+        connection.execute(
+            """
+            UPDATE embedded_pages
+            SET deleted_at = ?, deleted_by = ?, delete_reason = ?,
+                enabled = 0, updated_at = ?, updated_by = ?
+            WHERE page_key = ? AND deleted_at IS NULL
+            """,
+            (timestamp, deleted_by, delete_reason.strip(), timestamp, deleted_by, page_key.strip()),
+        )
+
+
+def restore_embedded_page(page_key: str, updated_by: str) -> None:
+    page = fetch_embedded_page(page_key, include_deleted=True)
+    if not page or not page.get("deleted_at"):
+        raise HTTPException(status_code=404, detail="回收站中没有该嵌入页面")
+    timestamp = now_text()
+    with get_connection() as connection:
+        connection.execute(
+            """
+            UPDATE embedded_pages
+            SET deleted_at = NULL, deleted_by = NULL, delete_reason = NULL,
+                enabled = 1, updated_at = ?, updated_by = ?
+            WHERE page_key = ?
+            """,
+            (timestamp, updated_by, page_key.strip()),
+        )
+
+
+def hard_delete_embedded_page(page_key: str) -> None:
+    page = fetch_embedded_page(page_key, include_deleted=True)
+    if not page or not page.get("deleted_at"):
+        raise HTTPException(status_code=404, detail="只能永久删除回收站中的嵌入页面")
+    page_dir = embedded_page_dir(page_key)
+    legacy_file = legacy_embedded_html_path(page_key, page.get("filename"))
+    with get_connection() as connection:
+        connection.execute("DELETE FROM embedded_pages WHERE page_key = ?", (page_key.strip(),))
+    if page_dir and page_dir.exists():
+        shutil.rmtree(page_dir, ignore_errors=True)
+    if legacy_file and legacy_file.exists():
+        try:
+            legacy_file.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def insert_ticket_log(
     connection: sqlite3.Connection,
     ticket_id: int,
@@ -2369,6 +2550,141 @@ def insert_ticket_log(
             created_at,
         ),
     )
+
+
+def soft_delete_ticket(ticket_id: int, deleted_by: str, delete_reason: str = "") -> None:
+    ticket = fetch_ticket(ticket_id)
+    if not ticket:
+        raise HTTPException(status_code=404, detail="工单不存在或已删除")
+    reason = delete_reason.strip()
+    timestamp = now_text()
+    with get_connection() as connection:
+        connection.execute(
+            """
+            UPDATE tickets
+            SET deleted_at = ?, deleted_by = ?, delete_reason = ?, updated_at = ?
+            WHERE id = ? AND deleted_at IS NULL
+            """,
+            (timestamp, deleted_by, reason, timestamp, ticket_id),
+        )
+        insert_ticket_log(connection, ticket_id, "删除工单", reason, deleted_by, timestamp)
+    try:
+        create_notification_event(
+            event_type="ticket_deleted",
+            ticket_id=ticket_id,
+            ticket_no=str(ticket.get("ticket_no") or ""),
+            store_name=str(ticket.get("store_name") or ""),
+            title=f"工单已删除：{ticket.get('ticket_no')}",
+            content=reason,
+            severity="warning",
+            created_by=deleted_by,
+        )
+    except Exception:
+        pass
+
+
+def restore_ticket(ticket_id: int, operator: str) -> None:
+    ticket = fetch_ticket(ticket_id, include_deleted=True)
+    if not ticket or not ticket.get("deleted_at"):
+        raise HTTPException(status_code=404, detail="回收站中没有该工单")
+    timestamp = now_text()
+    with get_connection() as connection:
+        connection.execute(
+            """
+            UPDATE tickets
+            SET deleted_at = NULL, deleted_by = NULL, delete_reason = NULL, updated_at = ?
+            WHERE id = ?
+            """,
+            (timestamp, ticket_id),
+        )
+        insert_ticket_log(connection, ticket_id, "恢复工单", "", operator, timestamp)
+
+
+def hard_delete_ticket(ticket_id: int, operator: str) -> None:
+    ticket = fetch_ticket(ticket_id, include_deleted=True)
+    if not ticket or not ticket.get("deleted_at"):
+        raise HTTPException(status_code=404, detail="只能永久删除回收站中的工单")
+    with get_connection() as connection:
+        image_rows = connection.execute("SELECT image_path FROM ticket_images WHERE ticket_id = ?", (ticket_id,)).fetchall()
+        file_rows = connection.execute("SELECT stored_filename FROM ticket_files WHERE ticket_id = ?", (ticket_id,)).fetchall()
+        for table_name in (
+            "ticket_images",
+            "ticket_files",
+            "ticket_supplements",
+            "ticket_comments",
+            "ticket_tasks",
+            "ticket_participants",
+            "ticket_logs",
+            "notification_reads",
+        ):
+            if table_name == "notification_reads":
+                connection.execute(
+                    "DELETE FROM notification_reads WHERE event_id IN (SELECT id FROM notification_events WHERE ticket_id = ?)",
+                    (ticket_id,),
+                )
+            else:
+                connection.execute(f"DELETE FROM {table_name} WHERE ticket_id = ?", (ticket_id,))
+        connection.execute("DELETE FROM notification_events WHERE ticket_id = ?", (ticket_id,))
+        connection.execute("DELETE FROM ticket_stores WHERE ticket_id = ?", (ticket_id,))
+        connection.execute("DELETE FROM ticket_brands WHERE ticket_id = ?", (ticket_id,))
+        connection.execute("DELETE FROM tickets WHERE id = ?", (ticket_id,))
+    for row in image_rows:
+        target = resolve_upload_path(image_filename(str(row["image_path"] or "")))
+        if target:
+            try:
+                target.unlink(missing_ok=True)
+            except OSError:
+                pass
+    for row in file_rows:
+        target = resolve_upload_path(safe_uploaded_name(str(row["stored_filename"] or "")))
+        if target:
+            try:
+                target.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def soft_delete_ticket_child(
+    table_name: str,
+    item_id: int,
+    ticket_id: int,
+    deleted_by: str,
+    action: str,
+    note_column: str,
+    fallback_note: str = "",
+) -> None:
+    allowed_tables = {
+        "ticket_comments",
+        "ticket_tasks",
+        "ticket_participants",
+        "ticket_supplements",
+    }
+    if table_name not in allowed_tables:
+        raise ValueError("不支持的删除对象")
+    ticket = fetch_ticket(ticket_id)
+    if not ticket:
+        raise HTTPException(status_code=404, detail="工单不存在")
+    timestamp = now_text()
+    with get_connection() as connection:
+        row = connection.execute(
+            f"SELECT * FROM {table_name} WHERE id = ? AND ticket_id = ? AND deleted_at IS NULL",
+            (item_id, ticket_id),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="记录不存在或已删除")
+        note = str(row[note_column] if note_column in row.keys() else fallback_note or "").strip()
+        if table_name == "ticket_participants":
+            role = str(row["role"] or "").strip()
+            note = f"{row['participant_name']} {role}".strip()
+        connection.execute(
+            f"""
+            UPDATE {table_name}
+            SET deleted_at = ?, deleted_by = ?, delete_reason = ?
+            WHERE id = ? AND ticket_id = ?
+            """,
+            (timestamp, deleted_by, note[:200], item_id, ticket_id),
+        )
+        insert_ticket_log(connection, ticket_id, action, f"记录 ID {item_id} 已移入回收站", deleted_by, timestamp)
 
 
 def add_ticket_attachments(
@@ -2782,7 +3098,7 @@ def fetch_notifications(
     for notification in notifications:
         ticket_id = notification.get("ticket_id")
         notification["is_read"] = bool(notification.get("is_read"))
-        notification["detail_url"] = f"/admin/ticket/{ticket_id}" if ticket_id else ""
+        notification["detail_url"] = f"/admin/ticket/{ticket_id}" if ticket_id and fetch_ticket(int(ticket_id)) else ""
     return notifications
 
 
@@ -2996,6 +3312,72 @@ def fetch_store_query_page(
         "prev_page": max(current_page - 1, 1),
         "next_page": min(current_page + 1, total_pages),
     }
+
+
+TEST_DATA_KEYWORDS = ("codex", "smoke", "test", "测试")
+
+
+def fetch_deleted_tickets() -> List[Dict[str, object]]:
+    return fetch_tickets({"__deleted_only": "1"}, "newest", load_app_config())
+
+
+def fetch_deleted_embedded_pages() -> List[Dict[str, object]]:
+    return fetch_embedded_pages(deleted_only=True)
+
+
+def ticket_matches_test_keyword(ticket: Dict[str, object]) -> bool:
+    searchable_values = [
+        ticket.get("ticket_no"),
+        ticket.get("store_name"),
+        ticket.get("submitter"),
+        ticket.get("request_type"),
+        ticket.get("brand"),
+        ticket.get("product_name"),
+        ticket.get("sku_barcode"),
+        ticket.get("description"),
+        ticket.get("handler_note"),
+    ]
+    haystack = " ".join(str(value or "") for value in searchable_values).lower()
+    return any(keyword in haystack for keyword in TEST_DATA_KEYWORDS)
+
+
+def cleanup_filters_from_form(
+    store_name: str = "",
+    submitter: str = "",
+    keyword: str = "",
+    date_start: str = "",
+    date_end: str = "",
+    incomplete_only: str = "",
+    only_test: str = "",
+) -> Dict[str, str]:
+    return {
+        "store_name": store_name.strip(),
+        "submitter": submitter.strip(),
+        "keyword": keyword.strip(),
+        "date_start": date_start.strip(),
+        "date_end": date_end.strip(),
+        "incomplete_only": "1" if incomplete_only in {"1", "true", "on", "yes"} else "",
+        "only_test": "1" if only_test in {"1", "true", "on", "yes"} else "",
+    }
+
+
+def cleanup_ticket_filters(filters: Dict[str, str]) -> Dict[str, str]:
+    return {
+        "store_name": str(filters.get("store_name") or "").strip(),
+        "submitter": str(filters.get("submitter") or "").strip(),
+        "keyword": str(filters.get("keyword") or "").strip(),
+        "date_start": str(filters.get("date_start") or "").strip(),
+        "date_end": str(filters.get("date_end") or "").strip(),
+    }
+
+
+def fetch_cleanup_candidates(filters: Dict[str, str]) -> List[Dict[str, object]]:
+    tickets = fetch_tickets(cleanup_ticket_filters(filters), "newest", load_app_config())
+    if filters.get("incomplete_only"):
+        tickets = [ticket for ticket in tickets if ticket.get("status") != COMPLETED_STATUS]
+    if filters.get("only_test"):
+        tickets = [ticket for ticket in tickets if ticket_matches_test_keyword(ticket)]
+    return tickets
 
 
 def percent_value(count: int, total: int) -> int:
@@ -3254,6 +3636,7 @@ def create_app() -> FastAPI:
         images = fetch_ticket_images(ticket_id)
         files = fetch_ticket_files(ticket_id)
         logs = fetch_ticket_logs(ticket_id)
+        supplements = fetch_store_ticket_supplements(ticket_id)
         participants = fetch_ticket_participants(ticket_id)
         comments = fetch_ticket_comments(ticket_id)
         tasks = fetch_ticket_tasks(ticket_id)
@@ -3269,6 +3652,7 @@ def create_app() -> FastAPI:
                 "statuses": config.statuses,
                 "handlers": config.handlers,
                 "logs": logs,
+                "supplements": supplements,
                 "participants": participants,
                 "comments": comments,
                 "tasks": tasks,
@@ -3306,6 +3690,48 @@ def create_app() -> FastAPI:
                 "error": error,
                 "max_embedded_html_mb": config.max_embedded_html_mb,
                 "max_embedded_zip_mb": config.max_embedded_zip_mb,
+                "admin_user": admin,
+                "csrf_token": current_csrf_token(request),
+            },
+            status_code=status_code,
+        )
+
+    def render_trash_page(request: Request, admin: str) -> HTMLResponse:
+        return templates.TemplateResponse(
+            request,
+            "trash.html",
+            {
+                "request": request,
+                "deleted_tickets": fetch_deleted_tickets(),
+                "deleted_embedded_pages": fetch_deleted_embedded_pages(),
+                "admin_user": admin,
+                "csrf_token": current_csrf_token(request),
+            },
+        )
+
+    def render_cleanup_page(
+        request: Request,
+        admin: str,
+        filters: Optional[Dict[str, str]] = None,
+        preview_tickets: Optional[List[Dict[str, object]]] = None,
+        previewed: bool = False,
+        deleted_count: int = 0,
+        error: str = "",
+        status_code: int = 200,
+    ) -> HTMLResponse:
+        config = load_app_config()
+        active_filters = filters or cleanup_filters_from_form()
+        return templates.TemplateResponse(
+            request,
+            "cleanup.html",
+            {
+                "request": request,
+                "stores": config.stores,
+                "filters": active_filters,
+                "preview_tickets": preview_tickets or [],
+                "previewed": previewed,
+                "deleted_count": deleted_count,
+                "error": error,
                 "admin_user": admin,
                 "csrf_token": current_csrf_token(request),
             },
@@ -3938,6 +4364,75 @@ def create_app() -> FastAPI:
             },
         )
 
+    @app.get("/admin/trash", response_class=HTMLResponse)
+    def admin_trash(request: Request, admin: str = Depends(require_admin)) -> HTMLResponse:
+        return render_trash_page(request, admin)
+
+    @app.get("/admin/cleanup", response_class=HTMLResponse)
+    def admin_cleanup(
+        request: Request,
+        admin: str = Depends(require_admin),
+        deleted_count: int = Query(0),
+    ) -> HTMLResponse:
+        return render_cleanup_page(request, admin, deleted_count=max(deleted_count, 0))
+
+    @app.post("/admin/cleanup/preview", response_class=HTMLResponse)
+    def admin_cleanup_preview(
+        request: Request,
+        admin: str = Depends(require_admin),
+        store_name: str = Form(""),
+        submitter: str = Form(""),
+        keyword: str = Form(""),
+        date_start: str = Form(""),
+        date_end: str = Form(""),
+        incomplete_only: str = Form(""),
+        only_test: str = Form(""),
+        csrf_token: str = Form(""),
+    ) -> HTMLResponse:
+        require_admin_csrf(request, csrf_token)
+        filters = cleanup_filters_from_form(
+            store_name,
+            submitter,
+            keyword,
+            date_start,
+            date_end,
+            incomplete_only,
+            only_test,
+        )
+        tickets = fetch_cleanup_candidates(filters)
+        return render_cleanup_page(request, admin, filters=filters, preview_tickets=tickets, previewed=True)
+
+    @app.post("/admin/cleanup/delete")
+    def admin_cleanup_delete(
+        request: Request,
+        admin: str = Depends(require_admin),
+        store_name: str = Form(""),
+        submitter: str = Form(""),
+        keyword: str = Form(""),
+        date_start: str = Form(""),
+        date_end: str = Form(""),
+        incomplete_only: str = Form(""),
+        only_test: str = Form(""),
+        confirm_cleanup: str = Form(""),
+        csrf_token: str = Form(""),
+    ) -> RedirectResponse:
+        require_admin_csrf(request, csrf_token)
+        if confirm_cleanup not in {"1", "true", "on", "yes"}:
+            raise HTTPException(status_code=400, detail="请先确认批量清理。")
+        filters = cleanup_filters_from_form(
+            store_name,
+            submitter,
+            keyword,
+            date_start,
+            date_end,
+            incomplete_only,
+            only_test,
+        )
+        candidates = fetch_cleanup_candidates(filters)
+        for ticket in candidates:
+            soft_delete_ticket(int(ticket["id"]), admin, "批量清理测试数据")
+        return RedirectResponse(url=f"/admin/cleanup?deleted_count={len(candidates)}", status_code=303)
+
     @app.get("/admin/embedded-pages", response_class=HTMLResponse)
     def embedded_pages_admin(request: Request, admin: str = Depends(require_admin)) -> HTMLResponse:
         return render_embedded_pages_admin(request, admin)
@@ -3997,6 +4492,43 @@ def create_app() -> FastAPI:
         require_admin_csrf(request, csrf_token)
         set_embedded_page_enabled(page_key, enabled in {"1", "true", "on", "yes"}, admin)
         return RedirectResponse(url="/admin/embedded-pages", status_code=303)
+
+    @app.post("/admin/embedded-pages/{page_key}/delete")
+    def delete_embedded_page_route(
+        request: Request,
+        page_key: str,
+        admin: str = Depends(require_admin),
+        delete_reason: str = Form(""),
+        csrf_token: str = Form(""),
+    ) -> RedirectResponse:
+        require_admin_csrf(request, csrf_token)
+        soft_delete_embedded_page(page_key, admin, delete_reason)
+        return RedirectResponse(url="/admin/embedded-pages", status_code=303)
+
+    @app.post("/admin/embedded-pages/{page_key}/restore")
+    def restore_embedded_page_route(
+        request: Request,
+        page_key: str,
+        admin: str = Depends(require_admin),
+        csrf_token: str = Form(""),
+    ) -> RedirectResponse:
+        require_admin_csrf(request, csrf_token)
+        restore_embedded_page(page_key, admin)
+        return RedirectResponse(url="/admin/trash", status_code=303)
+
+    @app.post("/admin/embedded-pages/{page_key}/hard-delete")
+    def hard_delete_embedded_page_route(
+        request: Request,
+        page_key: str,
+        _admin: str = Depends(require_admin),
+        confirm_delete: str = Form(""),
+        csrf_token: str = Form(""),
+    ) -> RedirectResponse:
+        require_admin_csrf(request, csrf_token)
+        if confirm_delete not in {"1", "true", "on", "yes"}:
+            raise HTTPException(status_code=400, detail="请确认永久删除。")
+        hard_delete_embedded_page(page_key)
+        return RedirectResponse(url="/admin/trash", status_code=303)
 
     def embedded_page_content_response(page_key: str, resource_path: str, _admin: str) -> FileResponse:
         page = fetch_embedded_page(page_key, enabled_only=True)
@@ -4117,6 +4649,44 @@ def create_app() -> FastAPI:
             return_url=return_url,
         )
 
+    @app.post("/admin/ticket/{ticket_id}/delete")
+    def delete_ticket_route(
+        request: Request,
+        ticket_id: int,
+        admin: str = Depends(require_admin),
+        delete_reason: str = Form(""),
+        return_url: str = Form(""),
+        csrf_token: str = Form(""),
+    ) -> RedirectResponse:
+        require_admin_csrf(request, csrf_token)
+        soft_delete_ticket(ticket_id, admin, delete_reason)
+        return RedirectResponse(url=safe_admin_return_url(return_url or "/admin"), status_code=303)
+
+    @app.post("/admin/ticket/{ticket_id}/restore")
+    def restore_ticket_route(
+        request: Request,
+        ticket_id: int,
+        admin: str = Depends(require_admin),
+        csrf_token: str = Form(""),
+    ) -> RedirectResponse:
+        require_admin_csrf(request, csrf_token)
+        restore_ticket(ticket_id, admin)
+        return RedirectResponse(url="/admin/trash", status_code=303)
+
+    @app.post("/admin/ticket/{ticket_id}/hard-delete")
+    def hard_delete_ticket_route(
+        request: Request,
+        ticket_id: int,
+        admin: str = Depends(require_admin),
+        confirm_delete: str = Form(""),
+        csrf_token: str = Form(""),
+    ) -> RedirectResponse:
+        require_admin_csrf(request, csrf_token)
+        if confirm_delete not in {"1", "true", "on", "yes"}:
+            raise HTTPException(status_code=400, detail="请确认永久删除。")
+        hard_delete_ticket(ticket_id, admin)
+        return RedirectResponse(url="/admin/trash", status_code=303)
+
     @app.post("/admin/ticket/{ticket_id}/participants")
     def add_ticket_participant_route(
         request: Request,
@@ -4136,6 +4706,26 @@ def create_app() -> FastAPI:
             create_ticket_participant(ticket, participant_type, participant_name, role, admin)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return RedirectResponse(url=build_ticket_detail_url(ticket_id, return_url, saved="1"), status_code=303)
+
+    @app.post("/admin/ticket/{ticket_id}/participant/{participant_id}/delete")
+    def delete_ticket_participant_route(
+        request: Request,
+        ticket_id: int,
+        participant_id: int,
+        admin: str = Depends(require_admin),
+        return_url: str = Form(""),
+        csrf_token: str = Form(""),
+    ) -> RedirectResponse:
+        require_admin_csrf(request, csrf_token)
+        soft_delete_ticket_child(
+            "ticket_participants",
+            participant_id,
+            ticket_id,
+            admin,
+            "移除协作人",
+            "participant_name",
+        )
         return RedirectResponse(url=build_ticket_detail_url(ticket_id, return_url, saved="1"), status_code=303)
 
     @app.post("/admin/ticket/{ticket_id}/comments")
@@ -4158,6 +4748,19 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return RedirectResponse(url=build_ticket_detail_url(ticket_id, return_url, saved="1"), status_code=303)
 
+    @app.post("/admin/ticket/{ticket_id}/comment/{comment_id}/delete")
+    def delete_ticket_comment_route(
+        request: Request,
+        ticket_id: int,
+        comment_id: int,
+        admin: str = Depends(require_admin),
+        return_url: str = Form(""),
+        csrf_token: str = Form(""),
+    ) -> RedirectResponse:
+        require_admin_csrf(request, csrf_token)
+        soft_delete_ticket_child("ticket_comments", comment_id, ticket_id, admin, "删除评论", "content")
+        return RedirectResponse(url=build_ticket_detail_url(ticket_id, return_url, saved="1"), status_code=303)
+
     @app.post("/admin/ticket/{ticket_id}/tasks")
     def add_ticket_task_route(
         request: Request,
@@ -4178,6 +4781,19 @@ def create_app() -> FastAPI:
             create_ticket_task(ticket, title, assignee, status, due_date, admin)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return RedirectResponse(url=build_ticket_detail_url(ticket_id, return_url, saved="1"), status_code=303)
+
+    @app.post("/admin/ticket/{ticket_id}/task/{task_id}/delete")
+    def delete_ticket_task_route(
+        request: Request,
+        ticket_id: int,
+        task_id: int,
+        admin: str = Depends(require_admin),
+        return_url: str = Form(""),
+        csrf_token: str = Form(""),
+    ) -> RedirectResponse:
+        require_admin_csrf(request, csrf_token)
+        soft_delete_ticket_child("ticket_tasks", task_id, ticket_id, admin, "删除子任务", "title")
         return RedirectResponse(url=build_ticket_detail_url(ticket_id, return_url, saved="1"), status_code=303)
 
     @app.post("/admin/ticket/{ticket_id}/tasks/{task_id}")
@@ -4203,6 +4819,27 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return RedirectResponse(url=build_ticket_detail_url(ticket_id, return_url, saved="1"), status_code=303)
 
+    @app.post("/admin/ticket/{ticket_id}/supplement/{supplement_id}/delete")
+    def delete_ticket_supplement_route(
+        request: Request,
+        ticket_id: int,
+        supplement_id: int,
+        admin: str = Depends(require_admin),
+        return_url: str = Form(""),
+        csrf_token: str = Form(""),
+    ) -> RedirectResponse:
+        require_admin_csrf(request, csrf_token)
+        soft_delete_ticket_child(
+            "ticket_supplements",
+            supplement_id,
+            ticket_id,
+            admin,
+            "隐藏门店补充记录",
+            "note",
+            "门店补充资料",
+        )
+        return RedirectResponse(url=build_ticket_detail_url(ticket_id, return_url, saved="1"), status_code=303)
+
     @app.post("/admin/ticket/{ticket_id}")
     def update_ticket(
         request: Request,
@@ -4226,7 +4863,10 @@ def create_app() -> FastAPI:
         should_notify_need_supplement = False
         notification_ticket: Optional[Dict[str, object]] = None
         with get_connection() as connection:
-            old_row = connection.execute("SELECT * FROM tickets WHERE id = ?", (ticket_id,)).fetchone()
+            old_row = connection.execute(
+                "SELECT * FROM tickets WHERE id = ? AND deleted_at IS NULL",
+                (ticket_id,),
+            ).fetchone()
             if not old_row:
                 raise HTTPException(status_code=404, detail="工单不存在")
             old_ticket = dict(old_row)
@@ -4407,7 +5047,7 @@ def create_app() -> FastAPI:
     @app.get("/admin/uploads/{filename:path}")
     def protected_upload(filename: str, _admin: str = Depends(require_admin)) -> FileResponse:
         target = resolve_upload_file(filename)
-        if not target:
+        if not target or not active_ticket_image_exists(filename):
             raise HTTPException(status_code=404, detail="图片不存在")
         return FileResponse(target)
 

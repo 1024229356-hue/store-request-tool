@@ -1,0 +1,127 @@
+{% set page_title = '回收站' %}
+{% set page_subtitle = '已删除内容先在这里保留，确认无误后再永久删除。' %}
+{% set page_eyebrow = '运维清理' %}
+{% set current_menu = 'trash' %}
+{% extends "base_admin.html" %}
+
+{% block content %}
+<section class="admin-section work-card trash-section">
+  <div class="section-heading admin-section-heading">
+    <h2>已删除工单</h2>
+    <p>恢复后会重新出现在后台列表、门店查询和 Excel 导出中；永久删除会移除数据库记录和对应附件文件。</p>
+  </div>
+  <div class="table-wrap">
+    <table class="ticket-table erp-table trash-table">
+      <thead>
+        <tr>
+          <th>工单号</th>
+          <th>门店</th>
+          <th>提报人</th>
+          <th>状态</th>
+          <th>删除时间</th>
+          <th>删除人</th>
+          <th>删除原因</th>
+          <th>恢复</th>
+          <th>永久删除</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for ticket in deleted_tickets %}
+        <tr>
+          <td>{{ ticket.ticket_no }}</td>
+          <td>{{ ticket.store_name }}</td>
+          <td>{{ ticket.submitter }}</td>
+          <td><span class="badge status-badge status-{{ ticket.status }}">{{ ticket.status }}</span></td>
+          <td>{{ ticket.deleted_at }}</td>
+          <td>{{ ticket.deleted_by or '-' }}</td>
+          <td>{{ ticket.delete_reason or '-' }}</td>
+          <td>
+            <form method="post" action="/admin/ticket/{{ ticket.id }}/restore">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <button class="ghost-button compact" type="submit">恢复</button>
+            </form>
+          </td>
+          <td>
+            <form class="hard-delete-form" method="post" action="/admin/ticket/{{ ticket.id }}/hard-delete" onsubmit="return confirm('确认永久删除该工单及其附件吗？此操作不可恢复。');">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <label class="inline-check">
+                <input name="confirm_delete" type="checkbox" value="1" required>
+                <span>确认</span>
+              </label>
+              <button class="danger-button compact" type="submit">永久删除</button>
+            </form>
+          </td>
+        </tr>
+        {% else %}
+        <tr>
+          <td class="empty-cell" colspan="9">
+            <strong>暂无已删除工单</strong>
+            <span>工单移入回收站后会显示在这里。</span>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="admin-section work-card trash-section">
+  <div class="section-heading admin-section-heading">
+    <h2>已删除嵌入页面</h2>
+    <p>恢复后会重新启用并出现在扩展页面导航中；永久删除会移除页面记录和对应资源目录。</p>
+  </div>
+  <div class="table-wrap">
+    <table class="ticket-table erp-table trash-table">
+      <thead>
+        <tr>
+          <th>page_key</th>
+          <th>页面标题</th>
+          <th>存储类型</th>
+          <th>文件大小</th>
+          <th>删除时间</th>
+          <th>删除人</th>
+          <th>删除原因</th>
+          <th>恢复</th>
+          <th>永久删除</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for page in deleted_embedded_pages %}
+        <tr>
+          <td>{{ page.page_key }}</td>
+          <td>{{ page.title }}</td>
+          <td>{{ page.storage_label }}</td>
+          <td>{{ page.file_size_label }}</td>
+          <td>{{ page.deleted_at }}</td>
+          <td>{{ page.deleted_by or '-' }}</td>
+          <td>{{ page.delete_reason or '-' }}</td>
+          <td>
+            <form method="post" action="/admin/embedded-pages/{{ page.page_key }}/restore">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <button class="ghost-button compact" type="submit">恢复</button>
+            </form>
+          </td>
+          <td>
+            <form class="hard-delete-form" method="post" action="/admin/embedded-pages/{{ page.page_key }}/hard-delete" onsubmit="return confirm('确认永久删除该嵌入页面及资源目录吗？此操作不可恢复。');">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <label class="inline-check">
+                <input name="confirm_delete" type="checkbox" value="1" required>
+                <span>确认</span>
+              </label>
+              <button class="danger-button compact" type="submit">永久删除</button>
+            </form>
+          </td>
+        </tr>
+        {% else %}
+        <tr>
+          <td class="empty-cell" colspan="9">
+            <strong>暂无已删除嵌入页面</strong>
+            <span>嵌入页面移入回收站后会显示在这里。</span>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}
