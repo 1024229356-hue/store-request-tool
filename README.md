@@ -60,7 +60,7 @@ SESSION_COOKIE_SECURE=true
 - 账号设置：http://127.0.0.1:8701/admin/account
 - 系统设置：http://127.0.0.1:8701/admin/system
 
-后台侧边栏品牌使用 `static/img/zhiyang-logo.png`。如本地还没有该文件，请把真实的止痒商店 logo 保存到这个路径；页面会保留文字兜底，但正式使用前建议放入真实图片。
+Logo 文件位置：`static/img/zhiyang-logo.png`。后台侧边栏和公开页面顶部都会引用这个 Logo；如果需要更换 Logo，只替换这个文件即可。不要删除 `static/img/zhiyang-logo.png`，否则页面会回退为文字展示。
 
 门店公开端页面统一使用顶部导航：`/submit` 可进入“查询工单、返回业务总览、返回工单管理”，`/query` 可进入“提交新工单、返回业务总览、返回工单管理”，工单详情页可返回查询结果、提交新工单或返回门店查询。
 

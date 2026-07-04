@@ -122,7 +122,7 @@ strong {
 }
 
 .public-brand {
-  display: inline-flex;
+  display: flex;
   align-items: center;
   min-width: 0;
   gap: 10px;
@@ -130,19 +130,11 @@ strong {
   text-decoration: none;
 }
 
-.public-brand-mark {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex: 0 0 38px;
-  width: 38px;
-  height: 38px;
-  border-radius: var(--radius-lg);
-  background: #fff;
-  border: 1px solid var(--line);
-  color: var(--primary);
-  font-weight: 900;
-  box-shadow: var(--shadow-soft);
+.public-logo-img {
+  flex: 0 0 auto;
+  width: 36px;
+  height: 36px;
+  object-fit: contain;
 }
 
 .public-brand strong,
@@ -659,10 +651,9 @@ a:focus-visible {
 }
 
 .sidebar-brand {
-  display: grid;
-  grid-template-columns: 40px minmax(0, 1fr);
-  gap: 10px;
+  display: flex;
   align-items: center;
+  gap: 12px;
   padding: 6px 8px 14px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.1);
   text-decoration: none;
@@ -673,24 +664,26 @@ a:focus-visible {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 40px;
-  height: 40px;
+  flex: 0 0 42px;
+  width: 42px;
+  height: 42px;
   overflow: hidden;
-  border-radius: var(--radius-lg);
-  border: 1px solid rgba(255, 255, 255, 0.18);
-  background: #fff;
+  border-radius: 10px;
+  background: transparent;
   color: #fff;
   font-weight: 900;
 }
 
-.sidebar-logo img {
+.sidebar-logo-img {
   position: relative;
   z-index: 1;
   display: block;
-  width: 100%;
-  height: 100%;
+  width: 42px;
+  height: 42px;
   object-fit: contain;
+  border-radius: 10px;
   background: #fff;
+  padding: 4px;
 }
 
 .sidebar-logo-fallback {

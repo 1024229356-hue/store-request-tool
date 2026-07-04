@@ -1525,6 +1525,7 @@ def test_navigation_branding_export_links_and_public_topbar(tmp_path, monkeypatc
     query_page = client.get("/query")
     assert query_page.status_code == 200
     assert "public-topbar" in query_page.text
+    assert "/static/img/zhiyang-logo.png" in query_page.text
     assert "提交新工单" in query_page.text
     assert "返回业务总览" in query_page.text
     assert "返回工单管理" in query_page.text
@@ -1533,6 +1534,7 @@ def test_navigation_branding_export_links_and_public_topbar(tmp_path, monkeypatc
     submit_page = client.get("/submit")
     assert submit_page.status_code == 200
     assert "public-topbar" in submit_page.text
+    assert "/static/img/zhiyang-logo.png" in submit_page.text
     assert "查询工单" in submit_page.text
     assert "返回业务总览" in submit_page.text
     assert "返回工单管理" in submit_page.text
@@ -1541,9 +1543,21 @@ def test_navigation_branding_export_links_and_public_topbar(tmp_path, monkeypatc
     detail_page = client.get("/query/ticket/1?store_name=南京门东店")
     assert detail_page.status_code == 200
     assert "public-topbar" in detail_page.text
+    assert "/static/img/zhiyang-logo.png" in detail_page.text
     assert "返回查询结果" in detail_page.text
     assert "提交新工单" in detail_page.text
     assert "返回门店查询" in detail_page.text
+
+
+def test_zhiyang_logo_asset_and_styles_are_present():
+    style = (PROJECT_DIR / "static" / "style.css").read_text(encoding="utf-8")
+    logo_path = PROJECT_DIR / "static" / "img" / "zhiyang-logo.png"
+
+    assert logo_path.is_file()
+    assert logo_path.stat().st_size > 0
+    assert ".sidebar-logo-img" in style
+    assert ".public-logo-img" in style
+    assert "object-fit: contain" in style
 
 
 def test_session_security_secure_cookie_expiry_csrf_and_env_example(tmp_path, monkeypatch):
