@@ -16,5 +16,6 @@
   "max_embedded_zip_mb": 100,
   "store_query_default_days": 30,
   "store_query_page_size": 20,
-  "supplement_status_after_store_update": "待处理"
+  "supplement_status_after_store_update": "待处理",
+  "max_bulk_schedule_count": 200
 }

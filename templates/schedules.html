@@ -12,7 +12,9 @@
 {% endblock %}
 
 {% block content %}
-{% if saved %}<div class="alert alert-success">排班已保存。</div>{% endif %}
+{% if saved_count or created_count or updated_count or skipped_count %}
+<div class="alert alert-success">已保存 {{ saved_count }} 条排班，其中新增 {{ created_count }} 条，更新 {{ updated_count }} 条，跳过 {{ skipped_count }} 条。</div>
+{% elif saved %}<div class="alert alert-success">排班已保存。</div>{% endif %}
 {% if deleted %}<div class="alert alert-success">排班已删除。</div>{% endif %}
 {% if error %}<div class="alert alert-error">{{ error }}</div>{% endif %}
 
@@ -57,9 +59,9 @@
 <section class="admin-section work-card">
   <div class="section-heading admin-section-heading">
     <h2>新增 / 修改排班</h2>
-    <p>同一员工同一天只能有一个班次，重复保存会更新原排班。</p>
+    <p>同一员工同一天已有排班时，可按本次选择覆盖更新。</p>
   </div>
-  <form class="schedule-form" method="post" action="/admin/schedules">
+  <form class="schedule-form schedule-bulk-form" method="post" action="/admin/schedules" data-schedule-bulk-form data-max-bulk-schedule-count="{{ context.max_bulk_schedule_count }}">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <label>
       <span>门店</span>
@@ -69,15 +71,47 @@
         {% endfor %}
       </select>
     </label>
-    <label>
-      <span>员工</span>
-      <select name="employee_id" required>
+
+    <div class="schedule-bulk-section full-span">
+      <div class="schedule-bulk-section-head">
+        <span>员工</span>
+        <div class="schedule-bulk-tools">
+          <button class="ghost-button compact" type="button" data-select-all-employees>全选员工</button>
+          <button class="ghost-button compact" type="button" data-clear-employees>清空员工</button>
+        </div>
+      </div>
+      <div class="schedule-employee-choice-grid">
         {% for employee in context.employees if employee.status == '在职' %}
-        <option value="{{ employee.id }}">{{ employee.employee_name }}（{{ employee.store_name }}）</option>
+        <label class="choice-chip schedule-employee-chip">
+          <input type="checkbox" name="employee_ids" value="{{ employee.id }}">
+          <span>{{ employee.employee_name }}{% if employee.role %}<small>{{ employee.role }}</small>{% endif %}</span>
+        </label>
+        {% else %}
+        <p class="empty-note">当前门店暂无在职员工。</p>
         {% endfor %}
-      </select>
-    </label>
-    <label><span>日期</span><input name="schedule_date" type="date" value="{{ context.filters.month }}-01" required></label>
+      </div>
+    </div>
+
+    <div class="schedule-bulk-section full-span">
+      <div class="schedule-bulk-section-head">
+        <span>日期</span>
+        <div class="schedule-bulk-tools">
+          <button class="ghost-button compact" type="button" data-select-all-schedule-dates>全选本月</button>
+          <button class="ghost-button compact" type="button" data-select-weekdays>只选工作日</button>
+          <button class="ghost-button compact" type="button" data-select-weekends>只选周末</button>
+          <button class="ghost-button compact" type="button" data-clear-schedule-dates>清空日期</button>
+        </div>
+      </div>
+      <div class="schedule-date-choice-grid">
+        {% for day in context.days %}
+        <label class="choice-chip schedule-date-chip {% if day.is_weekend %}weekend{% endif %} {% if day.is_today %}today{% endif %}" data-weekend="{{ '1' if day.is_weekend else '0' }}">
+          <input type="checkbox" name="schedule_dates" value="{{ day.date }}">
+          <span>{{ day.day }}<small>{{ day.weekday }}</small></span>
+        </label>
+        {% endfor %}
+      </div>
+    </div>
+
     <label>
       <span>班次</span>
       <select name="shift_type_id" required>
@@ -87,7 +121,12 @@
       </select>
     </label>
     <label><span>备注</span><input name="note" placeholder="可填写交接、特殊安排"></label>
-    <button class="primary-button compact" type="submit">保存排班</button>
+    <label class="checkbox-line schedule-overwrite-line">
+      <input type="checkbox" name="overwrite_existing" value="1" checked>
+      <span>如果员工当天已有排班，则覆盖为本次选择的班次</span>
+    </label>
+    <div class="schedule-bulk-summary" data-schedule-bulk-summary>已选 0 名员工 × 0 天 = 将生成 0 条排班</div>
+    <button class="primary-button compact" type="submit">批量保存排班</button>
   </form>
 </section>
 

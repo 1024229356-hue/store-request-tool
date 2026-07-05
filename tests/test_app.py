@@ -45,6 +45,7 @@ DEFAULT_TEST_CONFIG = {
         "max_total_file_upload_mb": 50,
         "max_embedded_html_mb": 20,
         "max_embedded_zip_mb": 100,
+        "max_bulk_schedule_count": 200,
     },
 }
 
@@ -2103,6 +2104,220 @@ def test_schedule_admin_pages_auth_defaults_and_navigation(tmp_path, monkeypatch
     public_query = client.get("/query")
     assert public_query.status_code == 200
     assert 'href="/schedule"' in public_query.text
+
+
+def create_schedule_employee(client, name, store_name="南京门东店", role="店员", status="在职"):
+    return admin_post(
+        client,
+        "/admin/employees",
+        data={"employee_name": name, "store_name": store_name, "role": role, "phone": "", "status": status},
+        follow_redirects=False,
+    )
+
+
+def test_schedule_page_exposes_bulk_employee_and_date_controls(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch)
+    logged_in_client(client)
+    create_schedule_employee(client, "王早班", role="店员")
+    create_schedule_employee(client, "张晚班", role="值班员")
+
+    page = client.get("/admin/schedules?store_name=南京门东店&month=2026-07")
+
+    assert page.status_code == 200
+    assert "schedule-bulk-form" in page.text
+    assert 'name="employee_ids"' in page.text
+    assert 'name="schedule_dates"' in page.text
+    assert 'value="2026-07-01"' in page.text
+    assert 'value="2026-07-31"' in page.text
+    assert "data-select-all-employees" in page.text
+    assert "data-clear-employees" in page.text
+    assert "data-select-all-schedule-dates" in page.text
+    assert "data-select-weekdays" in page.text
+    assert "data-select-weekends" in page.text
+    assert "data-clear-schedule-dates" in page.text
+    assert "schedule-bulk-summary" in page.text
+    assert "王早班" in page.text
+    assert "值班员" in page.text
+
+
+def test_bulk_schedule_creates_updates_and_skips_existing_rows(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch)
+    logged_in_client(client)
+    create_schedule_employee(client, "王早班")
+    create_schedule_employee(client, "张晚班")
+
+    create_bulk = admin_post(
+        client,
+        "/admin/schedules",
+        data={
+            "store_name": "南京门东店",
+            "employee_ids": ["1", "2"],
+            "schedule_dates": ["2026-07-06", "2026-07-07", "2026-07-08"],
+            "shift_type_id": "1",
+            "note": "批量早班",
+            "overwrite_existing": "1",
+        },
+        follow_redirects=False,
+    )
+
+    assert create_bulk.status_code == 303
+    assert "store_name=%E5%8D%97%E4%BA%AC%E9%97%A8%E4%B8%9C%E5%BA%97" in create_bulk.headers["location"]
+    assert "month=2026-07" in create_bulk.headers["location"]
+    assert "saved_count=6" in create_bulk.headers["location"]
+    schedules = sorted(rows_for(tmp_path, "store_schedules"), key=lambda row: (row["employee_id"], row["schedule_date"]))
+    assert len(schedules) == 6
+    assert {row["shift_type_id"] for row in schedules} == {1}
+    assert {row["note"] for row in schedules} == {"批量早班"}
+    success_page = client.get(create_bulk.headers["location"])
+    assert "已保存 6 条排班" in success_page.text
+    assert "新增 6 条" in success_page.text
+
+    update_bulk = admin_post(
+        client,
+        "/admin/schedules",
+        data={
+            "store_name": "南京门东店",
+            "employee_ids": ["1", "2"],
+            "schedule_dates": ["2026-07-06", "2026-07-07", "2026-07-08"],
+            "shift_type_id": "2",
+            "note": "批量晚班",
+            "overwrite_existing": "1",
+        },
+        follow_redirects=False,
+    )
+
+    assert update_bulk.status_code == 303
+    assert "updated_count=6" in update_bulk.headers["location"]
+    updated = rows_for(tmp_path, "store_schedules")
+    assert len(updated) == 6
+    assert {row["shift_type_id"] for row in updated} == {2}
+    assert {row["note"] for row in updated} == {"批量晚班"}
+
+    skip_bulk = admin_post(
+        client,
+        "/admin/schedules",
+        data={
+            "store_name": "南京门东店",
+            "employee_ids": ["1", "2"],
+            "schedule_dates": ["2026-07-06", "2026-07-07", "2026-07-08"],
+            "shift_type_id": "3",
+            "note": "不覆盖",
+        },
+        follow_redirects=False,
+    )
+
+    assert skip_bulk.status_code == 303
+    assert "skipped_count=6" in skip_bulk.headers["location"]
+    skipped = rows_for(tmp_path, "store_schedules")
+    assert len(skipped) == 6
+    assert {row["shift_type_id"] for row in skipped} == {2}
+    assert "跳过 6 条" in client.get(skip_bulk.headers["location"]).text
+
+
+def test_bulk_schedule_validation_errors_return_schedule_page(tmp_path, monkeypatch):
+    client, _ = build_client(
+        tmp_path,
+        monkeypatch,
+        config_overrides={"system.json": dict(DEFAULT_TEST_CONFIG["system.json"], max_bulk_schedule_count=2)},
+    )
+    logged_in_client(client)
+    create_schedule_employee(client, "王早班")
+    create_schedule_employee(client, "张晚班")
+    create_schedule_employee(client, "跨店员工", store_name="南昌万寿宫店")
+
+    missing_employees = admin_post(
+        client,
+        "/admin/schedules",
+        data={"store_name": "南京门东店", "schedule_dates": ["2026-07-06"], "shift_type_id": "1"},
+        follow_redirects=False,
+    )
+    assert missing_employees.status_code == 303
+    missing_employees_page = client.get(missing_employees.headers["location"])
+    assert "请选择至少 1 名员工" in missing_employees_page.text
+    assert "alert-error" in missing_employees_page.text
+    assert '{"detail":' not in missing_employees_page.text
+
+    missing_dates = admin_post(
+        client,
+        "/admin/schedules",
+        data={"store_name": "南京门东店", "employee_ids": ["1"], "shift_type_id": "1"},
+        follow_redirects=False,
+    )
+    assert missing_dates.status_code == 303
+    assert "请选择至少 1 个日期" in client.get(missing_dates.headers["location"]).text
+
+    too_many = admin_post(
+        client,
+        "/admin/schedules",
+        data={
+            "store_name": "南京门东店",
+            "employee_ids": ["1", "2"],
+            "schedule_dates": ["2026-07-06", "2026-07-07"],
+            "shift_type_id": "1",
+            "overwrite_existing": "1",
+        },
+        follow_redirects=False,
+    )
+    assert too_many.status_code == 303
+    assert "一次最多批量生成 2 条排班，请减少员工或日期数量。" in client.get(too_many.headers["location"]).text
+
+    wrong_store = admin_post(
+        client,
+        "/admin/schedules",
+        data={
+            "store_name": "南京门东店",
+            "employee_ids": ["3"],
+            "schedule_dates": ["2026-07-06"],
+            "shift_type_id": "1",
+        },
+        follow_redirects=False,
+    )
+    assert wrong_store.status_code == 303
+    assert "员工必须属于该门店" in client.get(wrong_store.headers["location"]).text
+
+
+def test_bulk_schedule_security_keeps_public_schedule_read_only(tmp_path, monkeypatch):
+    client, main = build_client(tmp_path, monkeypatch)
+    logged_in_client(client)
+    create_schedule_employee(client, "王早班")
+
+    missing_csrf = client.post(
+        "/admin/schedules",
+        data={
+            "store_name": "南京门东店",
+            "employee_ids": ["1"],
+            "schedule_dates": ["2026-07-06"],
+            "shift_type_id": "1",
+        },
+        follow_redirects=False,
+    )
+    assert missing_csrf.status_code == 403
+
+    unauthenticated = TestClient(main.app).post(
+        "/admin/schedules",
+        data={
+            "store_name": "南京门东店",
+            "employee_ids": ["1"],
+            "schedule_dates": ["2026-07-06"],
+            "shift_type_id": "1",
+        },
+        follow_redirects=False,
+    )
+    assert unauthenticated.status_code == 303
+    assert unauthenticated.headers["location"].startswith("/admin/login")
+
+    public_post = client.post(
+        "/schedule",
+        data={
+            "store_name": "南京门东店",
+            "employee_ids": ["1"],
+            "schedule_dates": ["2026-07-06"],
+            "shift_type_id": "1",
+        },
+        follow_redirects=False,
+    )
+    assert public_post.status_code == 405
+    assert rows_for(tmp_path, "store_schedules") == []
 
 
 def test_employee_and_shift_type_management_lifecycle(tmp_path, monkeypatch):

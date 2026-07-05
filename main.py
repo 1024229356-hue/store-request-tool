@@ -97,6 +97,7 @@ DEFAULT_SYSTEM = {
     "store_query_default_days": 30,
     "store_query_page_size": 20,
     "supplement_status_after_store_update": "待处理",
+    "max_bulk_schedule_count": 200,
 }
 COMPLETED_STATUS = "已完成"
 BLOCKED_FILE_EXTENSIONS = {"exe", "bat", "cmd", "js", "py", "sh", "php", "jar", "msi"}
@@ -151,6 +152,7 @@ class AppConfig:
     store_query_default_days: int
     store_query_page_size: int
     supplement_status_after_store_update: str
+    max_bulk_schedule_count: int
 
     @property
     def max_image_bytes(self) -> int:
@@ -1180,6 +1182,7 @@ def load_system_config(statuses: List[str]) -> Dict[str, object]:
         "max_embedded_zip_mb",
         "store_query_default_days",
         "store_query_page_size",
+        "max_bulk_schedule_count",
     ):
         system[key] = positive_int_config(system, key)
 
@@ -1241,6 +1244,7 @@ def load_app_config() -> AppConfig:
         store_query_default_days=int(system["store_query_default_days"]),
         store_query_page_size=int(system["store_query_page_size"]),
         supplement_status_after_store_update=str(system["supplement_status_after_store_update"]),
+        max_bulk_schedule_count=int(system["max_bulk_schedule_count"]),
     )
 
 
@@ -2680,7 +2684,17 @@ def disable_shift_type(shift_type_id: int) -> None:
         connection.execute("UPDATE shift_types SET is_active = 0, updated_at = ? WHERE id = ?", (now_text(), shift_type_id))
 
 
-def schedule_redirect_url(store_name: str, month: str, saved: int = 0, deleted: int = 0, error: str = "") -> str:
+def schedule_redirect_url(
+    store_name: str,
+    month: str,
+    saved: int = 0,
+    deleted: int = 0,
+    error: str = "",
+    saved_count: int = 0,
+    created_count: int = 0,
+    updated_count: int = 0,
+    skipped_count: int = 0,
+) -> str:
     try:
         normalized_month = normalize_month(month)
     except ValueError:
@@ -2688,6 +2702,14 @@ def schedule_redirect_url(store_name: str, month: str, saved: int = 0, deleted: 
     params = {"store_name": store_name.strip(), "month": normalized_month}
     if saved:
         params["saved"] = str(saved)
+    if saved_count:
+        params["saved_count"] = str(saved_count)
+    if created_count:
+        params["created_count"] = str(created_count)
+    if updated_count:
+        params["updated_count"] = str(updated_count)
+    if skipped_count:
+        params["skipped_count"] = str(skipped_count)
     if deleted:
         params["deleted"] = str(deleted)
     if error:
@@ -2770,6 +2792,7 @@ def fetch_schedule_context(store_name: str, month: str, employee_status: str, co
         "schedule_map": schedule_map,
         "daily_store_counts": daily_store_counts,
         "stats": stats,
+        "max_bulk_schedule_count": config.max_bulk_schedule_count,
         "export_url": "/admin/schedules/export?" + urlencode({key: value for key, value in filters.items() if value and key != "employee_status"}),
     }
 
@@ -2854,6 +2877,102 @@ def upsert_schedule(store_name: str, employee_id: int, schedule_date: str, shift
         schedule_id = int(cursor.lastrowid)
         insert_schedule_log(connection, schedule_id, "新增排班", "", new_value, operator, timestamp)
         return schedule_id
+
+
+def existing_schedule_for(employee_id: int, schedule_date: str) -> Optional[Dict[str, object]]:
+    with get_connection() as connection:
+        row = connection.execute(
+            "SELECT * FROM store_schedules WHERE employee_id = ? AND schedule_date = ?",
+            (employee_id, schedule_date),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def normalize_schedule_employee_ids(employee_ids: Optional[List[int]], employee_id: int = 0) -> List[int]:
+    raw_ids = list(employee_ids or [])
+    if not raw_ids and employee_id:
+        raw_ids = [employee_id]
+    clean_ids: List[int] = []
+    for raw_id in raw_ids:
+        try:
+            clean_id = int(raw_id)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("员工不存在。") from exc
+        if clean_id > 0 and clean_id not in clean_ids:
+            clean_ids.append(clean_id)
+    if not clean_ids:
+        raise ValueError("请选择至少 1 名员工。")
+    return clean_ids
+
+
+def normalize_schedule_dates(schedule_dates: Optional[List[str]], schedule_date: str = "") -> List[str]:
+    raw_dates = list(schedule_dates or [])
+    if not raw_dates and schedule_date.strip():
+        raw_dates = [schedule_date]
+    clean_dates: List[str] = []
+    for raw_date in raw_dates:
+        clean_date = normalize_schedule_date(str(raw_date or ""))
+        if clean_date not in clean_dates:
+            clean_dates.append(clean_date)
+    if not clean_dates:
+        raise ValueError("请选择至少 1 个日期。")
+    return clean_dates
+
+
+def bulk_upsert_schedules(
+    store_name: str,
+    employee_ids: List[int],
+    schedule_dates: List[str],
+    shift_type_id: int,
+    note: str,
+    overwrite_existing: bool,
+    operator: str,
+    max_bulk_count: int,
+) -> Dict[str, int]:
+    clean_store = store_name.strip()
+    if not clean_store:
+        raise ValueError("请选择有效门店。")
+    total_count = len(employee_ids) * len(schedule_dates)
+    if total_count <= 0:
+        raise ValueError("请选择至少 1 名员工和 1 个日期。")
+    if total_count > max_bulk_count:
+        raise ValueError(f"一次最多批量生成 {max_bulk_count} 条排班，请减少员工或日期数量。")
+    shift_type = fetch_shift_type(shift_type_id)
+    if not shift_type:
+        raise ValueError("班次不存在。")
+    if int(shift_type.get("is_active") or 0) != 1:
+        raise ValueError("班次必须启用。")
+    for selected_employee_id in employee_ids:
+        employee = fetch_employee(selected_employee_id)
+        if not employee:
+            raise ValueError("员工不存在。")
+        if str(employee.get("store_name") or "") != clean_store:
+            raise ValueError("员工必须属于该门店。")
+        if str(employee.get("status") or "") != "在职":
+            raise ValueError("员工必须是在职状态。")
+
+    created_count = 0
+    updated_count = 0
+    skipped_count = 0
+    for selected_employee_id in employee_ids:
+        for selected_date in schedule_dates:
+            existing = existing_schedule_for(selected_employee_id, selected_date)
+            if existing and not overwrite_existing:
+                skipped_count += 1
+                continue
+            upsert_schedule(clean_store, selected_employee_id, selected_date, shift_type_id, note, operator)
+            if existing:
+                updated_count += 1
+            else:
+                created_count += 1
+
+    return {
+        "created_count": created_count,
+        "updated_count": updated_count,
+        "skipped_count": skipped_count,
+        "saved_count": created_count + updated_count,
+        "total_count": total_count,
+    }
 
 
 def delete_schedule(schedule_id: int, operator: str) -> Dict[str, object]:
@@ -5127,6 +5246,10 @@ def create_app() -> FastAPI:
         month: str = "",
         employee_status: str = "",
         saved: int = 0,
+        saved_count: int = 0,
+        created_count: int = 0,
+        updated_count: int = 0,
+        skipped_count: int = 0,
         deleted: int = 0,
         error: str = "",
         status_code: int = 200,
@@ -5142,6 +5265,10 @@ def create_app() -> FastAPI:
                 "context": context,
                 "employee_statuses": EMPLOYEE_STATUSES,
                 "saved": max(saved, 0),
+                "saved_count": max(saved_count, 0),
+                "created_count": max(created_count, 0),
+                "updated_count": max(updated_count, 0),
+                "skipped_count": max(skipped_count, 0),
                 "deleted": max(deleted, 0),
                 "error": error,
                 "admin_user": admin,
@@ -5912,32 +6039,73 @@ def create_app() -> FastAPI:
         month: str = Query(""),
         employee_status: str = Query(""),
         saved: int = Query(0),
+        saved_count: int = Query(0),
+        created_count: int = Query(0),
+        updated_count: int = Query(0),
+        skipped_count: int = Query(0),
         deleted: int = Query(0),
         error: str = Query(""),
     ) -> HTMLResponse:
-        return render_schedules_page(request, admin, store_name, month, employee_status, saved, deleted, error=error)
+        return render_schedules_page(
+            request,
+            admin,
+            store_name,
+            month,
+            employee_status,
+            saved,
+            saved_count,
+            created_count,
+            updated_count,
+            skipped_count,
+            deleted,
+            error=error,
+        )
 
     @app.post("/admin/schedules")
     def create_schedule_route(
         request: Request,
         admin: str = Depends(require_admin),
         store_name: str = Form(""),
-        employee_id: str = Form(""),
+        employee_ids: Optional[List[int]] = Form(None),
+        schedule_dates: Optional[List[str]] = Form(None),
+        employee_id: int = Form(0),
         schedule_date: str = Form(""),
-        shift_type_id: str = Form(""),
+        shift_type_id: int = Form(0),
         note: str = Form(""),
+        overwrite_existing: str = Form(""),
         csrf_token: str = Form(""),
     ) -> RedirectResponse:
         require_admin_csrf(request, csrf_token)
+        month_for_return = datetime.now().strftime("%Y-%m")
         try:
-            clean_employee_id = int(employee_id or 0)
-            clean_shift_type_id = int(shift_type_id or 0)
-            upsert_schedule(store_name, clean_employee_id, schedule_date, clean_shift_type_id, note, admin)
+            config = load_app_config()
+            clean_employee_ids = normalize_schedule_employee_ids(employee_ids, employee_id)
+            clean_dates = normalize_schedule_dates(schedule_dates, schedule_date)
+            month_for_return = clean_dates[0][:7]
+            is_legacy_single_submission = not employee_ids and not schedule_dates and bool(employee_id and schedule_date.strip())
+            result = bulk_upsert_schedules(
+                store_name,
+                clean_employee_ids,
+                clean_dates,
+                shift_type_id,
+                note,
+                is_legacy_single_submission or overwrite_existing in {"1", "true", "on", "yes"},
+                admin,
+                config.max_bulk_schedule_count,
+            )
         except (ValueError, HTTPException) as exc:
-            month_for_return = schedule_date[:7] if len(schedule_date) >= 7 else datetime.now().strftime("%Y-%m")
             return RedirectResponse(url=schedule_redirect_url(store_name, month_for_return, error=form_error_message(exc)), status_code=303)
-        month = schedule_date[:7] if len(schedule_date) >= 7 else datetime.now().strftime("%Y-%m")
-        return RedirectResponse(url=schedule_redirect_url(store_name, month, saved=1), status_code=303)
+        return RedirectResponse(
+            url=schedule_redirect_url(
+                store_name,
+                month_for_return,
+                saved_count=result["saved_count"],
+                created_count=result["created_count"],
+                updated_count=result["updated_count"],
+                skipped_count=result["skipped_count"],
+            ),
+            status_code=303,
+        )
 
     @app.post("/admin/schedules/{schedule_id}/delete")
     def delete_schedule_route(

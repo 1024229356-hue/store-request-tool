@@ -24,6 +24,14 @@ document.addEventListener("DOMContentLoaded", () => {
   const notificationToasts = document.querySelector("[data-notification-toasts]");
   const modalOpenButtons = Array.from(document.querySelectorAll("[data-modal-open]"));
   const modalCloseButtons = Array.from(document.querySelectorAll("[data-modal-close]"));
+  const scheduleBulkForm = document.querySelector("[data-schedule-bulk-form]");
+  const scheduleBulkSummary = document.querySelector("[data-schedule-bulk-summary]");
+  const selectAllEmployeesButton = document.querySelector("[data-select-all-employees]");
+  const clearEmployeesButton = document.querySelector("[data-clear-employees]");
+  const selectAllScheduleDatesButton = document.querySelector("[data-select-all-schedule-dates]");
+  const selectWeekdaysButton = document.querySelector("[data-select-weekdays]");
+  const selectWeekendsButton = document.querySelector("[data-select-weekends]");
+  const clearScheduleDatesButton = document.querySelector("[data-clear-schedule-dates]");
 
   let selectedImages = [];
   let selectedFiles = [];
@@ -116,6 +124,42 @@ document.addEventListener("DOMContentLoaded", () => {
     }
     modal.classList.remove("is-open");
     modal.hidden = true;
+  }
+
+  function scheduleEmployeeInputs() {
+    return scheduleBulkForm ? Array.from(scheduleBulkForm.querySelectorAll('input[name="employee_ids"]')) : [];
+  }
+
+  function scheduleDateInputs() {
+    return scheduleBulkForm ? Array.from(scheduleBulkForm.querySelectorAll('input[name="schedule_dates"]')) : [];
+  }
+
+  function updateScheduleBulkSummary() {
+    if (!scheduleBulkForm || !scheduleBulkSummary) {
+      return;
+    }
+    const employeeCount = scheduleEmployeeInputs().filter((input) => input.checked).length;
+    const dateCount = scheduleDateInputs().filter((input) => input.checked).length;
+    const total = employeeCount * dateCount;
+    const maxCount = Number(scheduleBulkForm.dataset.maxBulkScheduleCount || 0);
+    scheduleBulkSummary.textContent = `已选 ${employeeCount} 名员工 × ${dateCount} 天 = 将生成 ${total} 条排班`;
+    scheduleBulkSummary.classList.toggle("is-over-limit", Boolean(maxCount && total > maxCount));
+  }
+
+  function setScheduleInputsChecked(inputs, checked) {
+    inputs.forEach((input) => {
+      input.checked = checked;
+    });
+    updateScheduleBulkSummary();
+  }
+
+  function setScheduleDatesByWeekend(weekendOnly) {
+    scheduleDateInputs().forEach((input) => {
+      const chip = input.closest("[data-weekend]");
+      const isWeekend = chip ? chip.dataset.weekend === "1" : false;
+      input.checked = weekendOnly ? isWeekend : !isWeekend;
+    });
+    updateScheduleBulkSummary();
   }
 
   function updateRequestTypeHint() {
@@ -719,6 +763,40 @@ document.addEventListener("DOMContentLoaded", () => {
   if (requestTypeSelect && requestTypeHint) {
     requestTypeSelect.addEventListener("change", updateRequestTypeHint);
     updateRequestTypeHint();
+  }
+
+  if (scheduleBulkForm) {
+    scheduleEmployeeInputs().forEach((input) => input.addEventListener("change", updateScheduleBulkSummary));
+    scheduleDateInputs().forEach((input) => input.addEventListener("change", updateScheduleBulkSummary));
+    if (selectAllEmployeesButton) {
+      selectAllEmployeesButton.addEventListener("click", () => setScheduleInputsChecked(scheduleEmployeeInputs(), true));
+    }
+    if (clearEmployeesButton) {
+      clearEmployeesButton.addEventListener("click", () => setScheduleInputsChecked(scheduleEmployeeInputs(), false));
+    }
+    if (selectAllScheduleDatesButton) {
+      selectAllScheduleDatesButton.addEventListener("click", () => setScheduleInputsChecked(scheduleDateInputs(), true));
+    }
+    if (selectWeekdaysButton) {
+      selectWeekdaysButton.addEventListener("click", () => setScheduleDatesByWeekend(false));
+    }
+    if (selectWeekendsButton) {
+      selectWeekendsButton.addEventListener("click", () => setScheduleDatesByWeekend(true));
+    }
+    if (clearScheduleDatesButton) {
+      clearScheduleDatesButton.addEventListener("click", () => setScheduleInputsChecked(scheduleDateInputs(), false));
+    }
+    scheduleBulkForm.addEventListener("submit", (event) => {
+      const employeeCount = scheduleEmployeeInputs().filter((input) => input.checked).length;
+      const dateCount = scheduleDateInputs().filter((input) => input.checked).length;
+      const total = employeeCount * dateCount;
+      const maxCount = Number(scheduleBulkForm.dataset.maxBulkScheduleCount || 0);
+      if (maxCount && total > maxCount) {
+        event.preventDefault();
+        window.alert(`一次最多批量生成 ${maxCount} 条排班，请减少员工或日期数量。`);
+      }
+    });
+    updateScheduleBulkSummary();
   }
 
   modalOpenButtons.forEach((button) => {
