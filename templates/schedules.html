@@ -22,8 +22,8 @@
   <div class="schedule-hero-card schedule-action-layer schedule-workspace-card ops-card">
     <div>
       <p class="eyebrow">运营排班工作台</p>
-      <h2>{{ context.filters.month }} · {{ context.filters.store_name or '全部门店' }}</h2>
-      <p class="subtle">排班操作只面向具体门店；查看区支持单店和全店经营视图。</p>
+      <h2>{{ context.filters.month }} · {{ context.filters.store_names_text }}</h2>
+      <p class="subtle">排班操作只面向单个具体门店；查看、看板和导出支持单店、多店和全店。</p>
     </div>
     <div class="schedule-action-buttons">
       <a class="quick-action-button compact" href="{{ context.export_url }}">导出排班 Excel</a>
@@ -43,13 +43,38 @@
     {% endif %}
   </div>
 
-  <div class="schedule-kpi-grid">
-    <article class="ops-card metric-card"><span>当前月份排班天数</span><strong>{{ context.stats.scheduled_day_count }}</strong></article>
-    <article class="ops-card metric-card"><span>员工数</span><strong>{{ context.stats.employee_count }}</strong></article>
-    <article class="ops-card metric-card"><span>当前月份总工时</span><strong>{{ context.stats.total_hours }}</strong></article>
-    <article class="ops-card metric-card"><span>未排班日期数</span><strong>{{ context.stats.unscheduled_day_count }}</strong></article>
-    <article class="ops-card metric-card"><span>休息班次数</span><strong>{{ context.stats.rest_shift_count }}</strong></article>
+  <div class="schedule-kpi-grid schedule-dashboard-card">
+    <article class="ops-card metric-card"><span>当月已排工时</span><strong>{{ context.dashboard.total_hours }}</strong><small>当前月份总工时</small></article>
+    <article class="ops-card metric-card"><span>截至当前日期已排工时</span><strong>{{ context.dashboard.scheduled_until_today_hours }}</strong></article>
+    <article class="ops-card metric-card"><span>当月排班人次</span><strong>{{ context.dashboard.person_time_count }}</strong></article>
+    <article class="ops-card metric-card"><span>当月排班人数</span><strong>{{ context.dashboard.employee_count }}</strong></article>
+    <article class="ops-card metric-card"><span>休息班次数</span><strong>{{ context.dashboard.rest_shift_count }}</strong></article>
+    <article class="ops-card metric-card"><span>自定义/加班班次数</span><strong>{{ context.dashboard.custom_shift_count }}</strong></article>
   </div>
+  <section class="schedule-dashboard-detail ops-card">
+    <div class="section-heading admin-section-heading">
+      <h2>排班看板</h2>
+      <p>指标随当前筛选变化；这里统计的是已排计划工时，不是打卡实际工时。</p>
+    </div>
+    <div class="schedule-dashboard-bars">
+      <div>
+        <strong>各门店工时排行</strong>
+        {% for item in context.dashboard.store_rank %}
+        <div class="dashboard-bar-row"><span>{{ item.store_name }}</span><i style="width: {{ item.percent }}%"></i><em>{{ item.hours }} 小时</em></div>
+        {% else %}
+        <small class="empty-note">当前筛选暂无排班。</small>
+        {% endfor %}
+      </div>
+      <div>
+        <strong>各班次分布</strong>
+        {% for item in context.dashboard.shift_distribution %}
+        <div class="dashboard-bar-row"><span>{{ item.shift_name }}</span><i style="width: {{ item.percent }}%"></i><em>{{ item.count }} 次</em></div>
+        {% else %}
+        <small class="empty-note">当前筛选暂无班次。</small>
+        {% endfor %}
+      </div>
+    </div>
+  </section>
 
   <details class="schedule-filter-card schedule-filter-layer schedule-workspace-card ops-card" id="schedule-filters" open>
     <summary>
@@ -57,25 +82,33 @@
       <small>按门店、月份、员工状态和视图模式查看排班。</small>
     </summary>
     <form class="schedule-filter-grid schedule-filter" method="get" action="/admin/schedules#schedule-view" data-feedback-form data-preserve-scroll data-clean-empty-query data-loading-label="筛选中...">
-      <label>
-        <span>门店</span>
-        <select name="store_name">
-          <option value="" {% if context.scope == 'all' %}selected{% endif %}>全部门店</option>
+      <div class="schedule-filter-employees full-span">
+        <span>门店筛选 · 已选 {{ context.selected_store_count }} 个门店</span>
+        <div class="schedule-filter-chip-grid compact-chip-grid">
+          <label class="choice-chip compact-chip">
+            <input type="checkbox" name="store_names" value="__all__" {% if context.is_all_stores %}checked{% endif %}>
+            <span>全部门店</span>
+          </label>
           {% for store in context.stores %}
-          <option value="{{ store }}" {% if context.filters.store_name == store %}selected{% endif %}>{{ store }}</option>
+          <label class="choice-chip compact-chip">
+            <input type="checkbox" name="store_names" value="{{ store }}" {% if store in context.selected_store_names %}checked{% endif %}>
+            <span>{{ store }}</span>
+          </label>
           {% endfor %}
-        </select>
-      </label>
+        </div>
+      </div>
       <label><span>月份</span><input name="month" type="month" value="{{ context.filters.month }}"></label>
-      <label>
+      <div class="schedule-filter-employees">
         <span>员工状态</span>
-        <select name="employee_status">
-          <option value="">全部</option>
+        <div class="schedule-filter-chip-grid compact-chip-grid">
           {% for item in employee_statuses %}
-          <option value="{{ item }}" {% if context.filters.employee_status == item %}selected{% endif %}>{{ item }}</option>
+          <label class="choice-chip compact-chip">
+            <input type="checkbox" name="employee_statuses" value="{{ item }}" {% if item in context.filters.employee_statuses %}checked{% endif %}>
+            <span>{{ item }}</span>
+          </label>
           {% endfor %}
-        </select>
-      </label>
+        </div>
+      </div>
       <label>
         <span>页面视图</span>
         <select name="view_mode">
@@ -87,21 +120,27 @@
       </label>
       <label>
         <span>员工范围</span>
-        <select name="employee_scope">
+        <select name="employee_scopes">
           <option value="all" {% if context.employee_scope == 'all' %}selected{% endif %}>全部可排员工</option>
           <option value="primary" {% if context.employee_scope == 'primary' %}selected{% endif %}>主门店员工</option>
           <option value="support" {% if context.employee_scope == 'support' %}selected{% endif %}>跨店支援员工</option>
         </select>
       </label>
-      <label>
-        <span>班次</span>
-        <select name="shift_type_id">
-          <option value="">全部班次</option>
+      <div class="schedule-filter-employees full-span">
+        <span>班次筛选</span>
+        <div class="schedule-filter-chip-grid compact-chip-grid">
           {% for shift in context.all_shift_types %}
-          <option value="{{ shift.id }}" {% if context.filters.shift_type_id == shift.id|string %}selected{% endif %}>{{ shift.shift_name }}</option>
+          <label class="choice-chip compact-chip">
+            <input type="checkbox" name="shift_type_ids" value="{{ shift.id }}" {% if shift.id|string in context.filters.shift_type_ids %}checked{% endif %}>
+            <span>{{ shift.shift_name }}<small>{{ shift.store_label }}</small></span>
+          </label>
           {% endfor %}
-        </select>
-      </label>
+          <label class="choice-chip compact-chip">
+            <input type="checkbox" name="shift_type_ids" value="custom" {% if context.filters.include_custom_shift %}checked{% endif %}>
+            <span>自定义时间</span>
+          </label>
+        </div>
+      </div>
       {% if context.view == 'employee' %}
       <div class="schedule-filter-employees full-span">
         <span>员工筛选</span>
@@ -132,7 +171,7 @@
       </span>
     </summary>
     {% if not context.form_store %}
-    <div class="alert alert-error">请选择具体门店后进行排班操作。</div>
+    <div class="alert alert-error">{% if context.is_multi_store %}当前为多门店查看模式，请选择单个门店后进行排班。{% else %}请选择具体门店后进行排班操作。{% endif %}</div>
     {% else %}
     <form class="schedule-form schedule-bulk-form" method="post" action="/admin/schedules" data-schedule-bulk-form data-feedback-form data-preserve-scroll data-loading-label="保存中..." data-max-bulk-schedule-count="{{ context.max_bulk_schedule_count }}">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -191,13 +230,26 @@
       </div>
 
       <label>
+        <span>排班方式</span>
+        <select name="schedule_mode" data-custom-schedule-mode>
+          <option value="shift">选择已有班次</option>
+          <option value="custom">自定义时间</option>
+        </select>
+      </label>
+      <label>
         <span>班次</span>
-        <select name="shift_type_id" required data-shift-select>
+        <select name="shift_type_id" data-shift-select>
           {% for shift in context.shift_types %}
-          <option value="{{ shift.id }}" data-shift-name="{{ shift.shift_name }}">{{ shift.shift_name }} {{ shift.start_time or '' }}-{{ shift.end_time or '' }}</option>
+          <option value="{{ shift.id }}" data-shift-name="{{ shift.shift_name }}">{{ shift.shift_name }} {{ shift.start_time or '' }}-{{ shift.end_time or '' }} · {{ shift.store_label }}</option>
           {% endfor %}
         </select>
       </label>
+      <div class="custom-schedule-fields full-span" data-custom-schedule-fields hidden>
+        <label><span>自定义名称</span><input name="custom_label" placeholder="加班 / 盘点 / 临时支援"></label>
+        <label><span>自定义开始</span><input name="custom_start_time" type="time"></label>
+        <label><span>自定义结束</span><input name="custom_end_time" type="time"></label>
+        <label><span>自定义工时</span><input name="custom_duration_hours" type="number" min="0" step="0.25" placeholder="留空自动计算"></label>
+      </div>
       <label><span>备注</span><input name="note" placeholder="可填写交接、特殊安排"></label>
       <label class="checkbox-line schedule-overwrite-line">
         <input type="checkbox" name="overwrite_existing" value="1" checked>
@@ -249,7 +301,7 @@
         <details class="calendar-day-detail">
           <summary>当天详情</summary>
           {% for schedule in item.rows %}
-          <button class="schedule-calendar-shift" type="button" data-schedule-edit style="--shift-color: {{ schedule.color or '#64748b' }}">
+          <button class="schedule-calendar-shift {% if schedule.is_custom_time %}custom-shift-badge{% endif %}" type="button" data-schedule-edit style="--shift-color: {{ schedule.color or '#64748b' }}">
             <span>{{ schedule.employee_name }}</span>
             <strong>{{ schedule.shift_name }}</strong>
             <small>{{ schedule.store_name }} · {{ schedule.duration_hours or 0 }} 小时</small>
@@ -355,7 +407,7 @@
             {% endif %}
             <td class="schedule-cell {% if day.is_weekend %}schedule-weekend{% endif %} {% if day.is_today %}schedule-today{% endif %}">
               {% if schedule %}
-              <span class="shift-badge" style="--shift-color: {{ schedule.color or '#64748b' }}">{{ schedule.shift_name }}</span>
+              <span class="shift-badge {% if schedule.is_custom_time %}custom-shift-badge{% endif %}" style="--shift-color: {{ schedule.color or '#64748b' }}">{{ schedule.shift_name }}</span>
               {% if schedule.note %}<small>{{ schedule.note }}</small>{% endif %}
               <form method="post" action="/admin/schedules/{{ schedule.id }}/delete" onsubmit="return confirm('确认删除这条排班吗？');" data-feedback-form data-preserve-scroll data-loading-label="删除中...">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -386,7 +438,7 @@
       {% set counts = context.daily_store_counts.get(day.date, {}) %}
       <div>
         <strong>{{ day.date }} {{ day.weekday }}</strong>
-        <span>{{ context.filters.store_name or '全部门店' }}：{{ counts.get(context.filters.store_name, 0) if context.filters.store_name else counts.values() | sum }} 人</span>
+        <span>{{ context.filters.store_names_text }}：{{ counts.get(context.filters.store_name, 0) if context.filters.store_name else counts.values() | sum }} 人</span>
       </div>
       {% endfor %}
     </div>

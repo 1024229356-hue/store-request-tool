@@ -2516,6 +2516,11 @@ a:focus-visible {
   white-space: nowrap;
 }
 
+.custom-shift-badge {
+  --shift-color: #f97316;
+  border-style: dashed;
+}
+
 .hours-summary {
   min-width: 86px;
   background: #f8fafc;
@@ -2607,6 +2612,41 @@ a:focus-visible {
 
 .schedule-kpi-grid .metric-card {
   padding: 14px;
+}
+
+.schedule-dashboard-detail,
+.store-business-hours-card {
+  border-radius: 12px;
+}
+
+.schedule-dashboard-bars {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 16px;
+}
+
+.dashboard-bar-row {
+  display: grid;
+  grid-template-columns: minmax(96px, 140px) 1fr auto;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.dashboard-bar-row i {
+  display: block;
+  min-width: 4px;
+  height: 9px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #2563eb, #14b8a6);
+}
+
+.dashboard-bar-row em {
+  color: var(--text);
+  font-style: normal;
+  white-space: nowrap;
 }
 
 .schedule-filter-layer {
@@ -3054,6 +3094,26 @@ a:focus-visible {
 .schedule-filter-employees {
   display: grid;
   gap: 8px;
+}
+
+.custom-schedule-fields {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.custom-schedule-fields[hidden] {
+  display: none;
+}
+
+.compact-chip-grid {
+  max-height: 132px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.compact-chip {
+  padding: 7px 9px;
 }
 
 .store-summary-calendar {

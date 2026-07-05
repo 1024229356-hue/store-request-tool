@@ -18,22 +18,101 @@
     <div>
       <p class="eyebrow">班次主数据</p>
       <h2>卡片化班次设置</h2>
-      <p class="subtle">按名称、时间段、工时、颜色和启用状态维护班次。卡片保留拖拽排序标记，后续可扩展顺序保存。</p>
+      <p class="subtle">按门店维护班次和营业时间；旧班次作为通用班次继续可用。</p>
     </div>
   </div>
+
+  <details class="schedule-filter-card schedule-workspace-card ops-card" open>
+    <summary>
+      <span>筛选班次</span>
+      <small>已选 {{ selected_store_count }} 个门店</small>
+    </summary>
+    <form class="schedule-filter-grid" method="get" action="/admin/shift-types" data-feedback-form data-preserve-scroll data-clean-empty-query>
+      <div class="schedule-filter-employees full-span">
+        <span>门店筛选</span>
+        <div class="schedule-filter-chip-grid compact-chip-grid">
+          <label class="choice-chip compact-chip">
+            <input type="checkbox" name="store_names" value="__all__" {% if not selected_store_names %}checked{% endif %}>
+            <span>全部门店</span>
+          </label>
+          {% for store in stores %}
+          <label class="choice-chip compact-chip">
+            <input type="checkbox" name="store_names" value="{{ store }}" {% if store in selected_store_names %}checked{% endif %}>
+            <span>{{ store }}</span>
+          </label>
+          {% endfor %}
+        </div>
+      </div>
+      <label>
+        <span>状态</span>
+        <select name="status">
+          <option value="all" {% if status_filter == 'all' %}selected{% endif %}>全部</option>
+          <option value="active" {% if status_filter == 'active' %}selected{% endif %}>启用</option>
+          <option value="inactive" {% if status_filter == 'inactive' %}selected{% endif %}>停用</option>
+        </select>
+      </label>
+      <label>
+        <span>班次范围</span>
+        <select name="global_scope">
+          <option value="all" {% if global_scope == 'all' %}selected{% endif %}>全部</option>
+          <option value="global" {% if global_scope == 'global' %}selected{% endif %}>通用班次</option>
+          <option value="store" {% if global_scope == 'store' %}selected{% endif %}>门店班次</option>
+        </select>
+      </label>
+      <div class="schedule-filter-actions">
+        <button class="primary-button compact" type="submit">查看班次</button>
+        <a class="ghost-button compact" href="/admin/shift-types">重置</a>
+      </div>
+    </form>
+  </details>
+
+  <section class="store-business-hours-card admin-section ops-card">
+    <div class="section-heading admin-section-heading">
+      <h2>门店营业时间</h2>
+      <p>选择单个门店后维护营业开始与结束时间，新建门店班次时可参考。</p>
+    </div>
+    {% if selected_business_store %}
+    {% if not selected_business_hours %}
+    <div class="alert alert-info">当前门店未配置营业时间，请先在班次设置中维护。</div>
+    {% endif %}
+    <form class="schedule-form" method="post" action="/admin/shift-types/business-hours" data-feedback-form data-preserve-scroll data-loading-label="保存中...">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="store_name" value="{{ selected_business_store }}">
+      <label><span>门店</span><input value="{{ selected_business_store }}" disabled></label>
+      <label><span>营业开始</span><input name="business_start_time" type="time" value="{{ selected_business_hours.business_start_time or '' }}"></label>
+      <label><span>营业结束</span><input name="business_end_time" type="time" value="{{ selected_business_hours.business_end_time or '' }}"></label>
+      <button class="primary-button compact" type="submit">保存营业时间</button>
+    </form>
+    {% else %}
+    <div class="alert alert-info">请选择单个门店后维护营业时间。</div>
+    {% endif %}
+  </section>
 
   <section class="admin-section ops-card">
     <div class="section-heading admin-section-heading">
       <h2>新增班次</h2>
-      <p>默认班次已自动初始化，班次名称不能重复。</p>
+      <p>门店班次允许不同门店同名；同一门店或通用范围内名称不能重复。</p>
     </div>
     <form class="schedule-form" method="post" action="/admin/shift-types" data-feedback-form data-loading-label="保存中...">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label>
+        <span>所属门店</span>
+        <select name="store_name">
+          <option value="">请选择门店</option>
+          {% for store in stores %}
+          <option value="{{ store }}" {% if selected_business_store == store %}selected{% endif %}>{{ store }}</option>
+          {% endfor %}
+        </select>
+      </label>
       <label><span>班次名称</span><input name="shift_name" required></label>
       <label><span>开始时间</span><input name="start_time" type="time"></label>
       <label><span>结束时间</span><input name="end_time" type="time"></label>
       <label><span>工时</span><input name="duration_hours" type="number" min="0" step="0.5" value="0"></label>
       <label><span>颜色</span><input name="color" type="color" value="#2563eb"></label>
+      <label class="inline-check">
+        <input name="is_global" type="checkbox" value="1">
+        <span>通用班次</span>
+      </label>
       <button class="primary-button compact" type="submit">新增班次</button>
     </form>
   </section>
@@ -46,7 +125,7 @@
           <span class="shift-color-dot" style="--shift-color: {{ shift.color or '#64748b' }}"></span>
           <div>
             <h3>{{ shift.shift_name }}</h3>
-            <p>{{ shift.duration_hours or 0 }} 小时</p>
+            <p>{{ shift.store_label }} · {{ shift.duration_hours or 0 }} 小时</p>
           </div>
         </div>
         <span class="shift-status-pill {{ 'active' if shift.is_active else 'inactive' }}">{{ '启用' if shift.is_active else '停用' }}</span>
@@ -58,11 +137,24 @@
       </div>
       <form class="schedule-row-form shift-card-form" method="post" action="/admin/shift-types/{{ shift.id }}/update" data-feedback-form data-loading-label="保存中...">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <label>
+          <span>门店</span>
+          <select name="store_name">
+            <option value="">通用班次</option>
+            {% for store in stores %}
+            <option value="{{ store }}" {% if shift.store_name == store %}selected{% endif %}>{{ store }}</option>
+            {% endfor %}
+          </select>
+        </label>
         <label><span>班次名称</span><input name="shift_name" value="{{ shift.shift_name }}" aria-label="班次名称"></label>
         <label><span>开始</span><input name="start_time" type="time" value="{{ shift.start_time or '' }}" aria-label="开始时间"></label>
         <label><span>结束</span><input name="end_time" type="time" value="{{ shift.end_time or '' }}" aria-label="结束时间"></label>
         <label><span>工时</span><input name="duration_hours" type="number" min="0" step="0.5" value="{{ shift.duration_hours or 0 }}" aria-label="工时"></label>
         <label><span>颜色</span><input name="color" type="color" value="{{ shift.color or '#64748b' }}" aria-label="颜色"></label>
+        <label class="inline-check">
+          <input name="is_global" type="checkbox" value="1" {% if shift.is_global %}checked{% endif %}>
+          <span>通用</span>
+        </label>
         <label class="inline-check">
           <input name="is_active" type="checkbox" value="1" {% if shift.is_active %}checked{% endif %}>
           <span>启用</span>

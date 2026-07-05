@@ -14,7 +14,7 @@ import uuid
 import zipfile
 from collections import Counter
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from io import BytesIO
 from pathlib import Path, PurePosixPath
 import re
@@ -749,6 +749,63 @@ def normalize_employee_record_scope(value: str) -> str:
     return clean_value if clean_value in {"active", "archive", "trash"} else "active"
 
 
+def normalize_schedule_store_filter(
+    raw_store_names: Optional[List[object]],
+    legacy_store_name: str,
+    config: AppConfig,
+    default_to_first: bool = True,
+) -> Tuple[List[str], bool, bool]:
+    explicit_multi = raw_store_names is not None
+    raw_values = clean_multi_value_list(raw_store_names)
+    if any(value in {"__all__", "全部门店", "all"} for value in raw_values):
+        return [], True, False
+    valid_stores = set(config.stores)
+    selected_stores: List[str] = []
+    has_invalid = False
+    for store_name in raw_values:
+        if store_name in valid_stores and store_name not in selected_stores:
+            selected_stores.append(store_name)
+        elif store_name:
+            has_invalid = True
+    if selected_stores:
+        return selected_stores, False, has_invalid
+    if explicit_multi:
+        return [], True, has_invalid
+
+    legacy_store = legacy_store_name.strip()
+    if legacy_store:
+        if legacy_store in valid_stores:
+            return [legacy_store], False, False
+        return [], False, True
+    if default_to_first and config.stores:
+        return [config.stores[0]], False, False
+    return [], True, False
+
+
+def normalize_employee_status_filters(values: Optional[List[object]], legacy_status: str = "") -> Tuple[List[str], bool]:
+    raw_values = clean_multi_value_list(values)
+    if not raw_values and legacy_status.strip():
+        raw_values = [legacy_status.strip()]
+    clean_statuses: List[str] = []
+    has_invalid = False
+    for status in raw_values:
+        if status in EMPLOYEE_STATUSES and status not in clean_statuses:
+            clean_statuses.append(status)
+        elif status:
+            has_invalid = True
+    return clean_statuses, has_invalid
+
+
+def normalize_employee_scope_filter(values: Optional[List[object]], legacy_scope: str = "all") -> str:
+    scopes = [normalize_employee_scope(value) for value in clean_multi_value_list(values)]
+    scopes = [scope for scope in scopes if scope in {"primary", "support", "all"}]
+    if not scopes:
+        return normalize_employee_scope(legacy_scope)
+    if "all" in scopes or {"primary", "support"}.issubset(set(scopes)):
+        return "all"
+    return scopes[0]
+
+
 def parse_optional_int(value: object) -> Optional[int]:
     clean_value = str(value or "").strip()
     if not clean_value:
@@ -778,6 +835,39 @@ def parse_optional_int_list(values: Optional[List[object]]) -> Tuple[List[int], 
         if parsed not in parsed_values:
             parsed_values.append(parsed)
     return parsed_values, has_invalid
+
+
+def clean_multi_value_list(values: Optional[List[object]]) -> List[str]:
+    clean_values: List[str] = []
+    for value in values or []:
+        for item in split_multi_value_text(value):
+            clean_item = str(item or "").strip()
+            if clean_item and clean_item not in clean_values:
+                clean_values.append(clean_item)
+    return clean_values
+
+
+def parse_shift_filter_values(values: Optional[List[object]], legacy_value: object = "") -> Tuple[List[int], bool, bool]:
+    raw_values = list(values or [])
+    if not raw_values and str(legacy_value or "").strip():
+        raw_values = [legacy_value]
+    parsed_values: List[int] = []
+    include_custom = False
+    has_invalid = False
+    for value in raw_values:
+        clean_value = str(value or "").strip()
+        if not clean_value:
+            continue
+        if clean_value == "custom":
+            include_custom = True
+            continue
+        parsed = parse_optional_positive_int(clean_value)
+        if parsed is None:
+            has_invalid = True
+            continue
+        if parsed not in parsed_values:
+            parsed_values.append(parsed)
+    return parsed_values, include_custom, has_invalid
 
 
 def combine_error_messages(*messages: str) -> str:
@@ -863,12 +953,117 @@ def ensure_default_shift_types(connection: sqlite3.Connection) -> None:
             """
             INSERT INTO shift_types (
                 shift_name, start_time, end_time, duration_hours,
-                color, is_active, created_at, updated_at
+                color, is_active, store_name, is_global,
+                business_start_time, business_end_time, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+            VALUES (?, ?, ?, ?, ?, 1, '', 1, '', '', ?, ?)
             """,
             (shift_name, start_time, end_time, duration_hours, color, timestamp, timestamp),
         )
+
+
+def shift_types_has_unique_name_constraint(connection: sqlite3.Connection) -> bool:
+    if not table_exists(connection, "shift_types"):
+        return False
+    for index_row in connection.execute("PRAGMA index_list(shift_types)").fetchall():
+        if int(index_row["unique"] or 0) != 1:
+            continue
+        index_name = str(index_row["name"] or "")
+        columns = [str(row["name"] or "") for row in connection.execute(f"PRAGMA index_info({index_name})").fetchall()]
+        if columns == ["shift_name"]:
+            return True
+    return False
+
+
+def recreate_shift_types_without_unique_name(connection: sqlite3.Connection) -> None:
+    if not shift_types_has_unique_name_constraint(connection):
+        return
+    backup_table = f"shift_types_unique_backup_{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
+    source_columns = {
+        str(row["name"])
+        for row in connection.execute("PRAGMA table_info(shift_types)").fetchall()
+    }
+
+    def source_expr(column_name: str, fallback: str) -> str:
+        return column_name if column_name in source_columns else fallback
+
+    connection.execute(f"ALTER TABLE shift_types RENAME TO {backup_table}")
+    connection.execute(
+        """
+        CREATE TABLE shift_types (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            shift_name TEXT NOT NULL,
+            store_name TEXT,
+            is_global INTEGER DEFAULT 0,
+            business_start_time TEXT,
+            business_end_time TEXT,
+            start_time TEXT,
+            end_time TEXT,
+            duration_hours REAL DEFAULT 0,
+            color TEXT,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        f"""
+        INSERT INTO shift_types (
+            id, shift_name, store_name, is_global, business_start_time, business_end_time,
+            start_time, end_time, duration_hours, color, is_active, created_at, updated_at
+        )
+        SELECT
+            {source_expr('id', 'NULL')},
+            {source_expr('shift_name', "''")},
+            {source_expr('store_name', "''")},
+            {source_expr('is_global', '1')},
+            {source_expr('business_start_time', "''")},
+            {source_expr('business_end_time', "''")},
+            {source_expr('start_time', "''")},
+            {source_expr('end_time', "''")},
+            {source_expr('duration_hours', '0')},
+            {source_expr('color', "''")},
+            {source_expr('is_active', '1')},
+            {source_expr('created_at', "datetime('now')")},
+            {source_expr('updated_at', "datetime('now')")}
+        FROM {backup_table}
+        ORDER BY id
+        """
+    )
+    connection.execute(f"DROP TABLE {backup_table}")
+
+
+def ensure_schedule_schema_migrations(connection: sqlite3.Connection) -> None:
+    add_column_if_missing(connection, "shift_types", "store_name", "TEXT")
+    add_column_if_missing(connection, "shift_types", "is_global", "INTEGER DEFAULT 0")
+    add_column_if_missing(connection, "shift_types", "business_start_time", "TEXT")
+    add_column_if_missing(connection, "shift_types", "business_end_time", "TEXT")
+    recreate_shift_types_without_unique_name(connection)
+    connection.execute(
+        """
+        UPDATE shift_types
+        SET is_global = 1, store_name = COALESCE(store_name, '')
+        WHERE COALESCE(store_name, '') = ''
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS store_business_hours (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            store_name TEXT NOT NULL UNIQUE,
+            business_start_time TEXT,
+            business_end_time TEXT,
+            created_at TEXT,
+            updated_at TEXT
+        )
+        """
+    )
+    add_column_if_missing(connection, "store_schedules", "is_custom_time", "INTEGER DEFAULT 0")
+    add_column_if_missing(connection, "store_schedules", "custom_start_time", "TEXT")
+    add_column_if_missing(connection, "store_schedules", "custom_end_time", "TEXT")
+    add_column_if_missing(connection, "store_schedules", "custom_duration_hours", "REAL")
+    add_column_if_missing(connection, "store_schedules", "custom_label", "TEXT")
 
 
 def init_db() -> None:
@@ -1122,7 +1317,11 @@ def init_db() -> None:
             """
             CREATE TABLE IF NOT EXISTS shift_types (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                shift_name TEXT NOT NULL UNIQUE,
+                shift_name TEXT NOT NULL,
+                store_name TEXT,
+                is_global INTEGER DEFAULT 0,
+                business_start_time TEXT,
+                business_end_time TEXT,
                 start_time TEXT,
                 end_time TEXT,
                 duration_hours REAL DEFAULT 0,
@@ -1140,8 +1339,13 @@ def init_db() -> None:
                 store_name TEXT NOT NULL,
                 employee_id INTEGER NOT NULL,
                 schedule_date TEXT NOT NULL,
-                shift_type_id INTEGER NOT NULL,
+                shift_type_id INTEGER NOT NULL DEFAULT 0,
                 note TEXT,
+                is_custom_time INTEGER DEFAULT 0,
+                custom_start_time TEXT,
+                custom_end_time TEXT,
+                custom_duration_hours REAL,
+                custom_label TEXT,
                 created_by TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
@@ -1197,6 +1401,10 @@ def init_db() -> None:
         connection.execute("CREATE INDEX IF NOT EXISTS idx_employee_store_map_store_name ON employee_store_map(store_name)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_store_schedules_store_name ON store_schedules(store_name)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_store_schedules_schedule_date ON store_schedules(schedule_date)")
+        ensure_schedule_schema_migrations(connection)
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_shift_types_store_name ON shift_types(store_name)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_shift_types_is_global ON shift_types(is_global)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_store_business_hours_store_name ON store_business_hours(store_name)")
         add_column_if_missing(connection, "embedded_pages", "storage_type", "TEXT NOT NULL DEFAULT 'html'")
         add_column_if_missing(connection, "embedded_pages", "entry_file", "TEXT NOT NULL DEFAULT 'index.html'")
         add_column_if_missing(connection, "embedded_pages", "file_size", "INTEGER NOT NULL DEFAULT 0")
@@ -2775,6 +2983,22 @@ def annotate_schedule_employee(employee: Dict[str, object], selected_store: str)
     return annotated
 
 
+def annotate_schedule_employee_for_stores(employee: Dict[str, object], selected_stores: List[str]) -> Dict[str, object]:
+    if len(selected_stores) == 1:
+        return annotate_schedule_employee(employee, selected_stores[0])
+    store_names = list(employee.get("store_names") or [])
+    selected_store_set = set(selected_stores)
+    primary_store = str(employee.get("primary_store_name") or employee.get("store_name") or (store_names[0] if store_names else "")).strip()
+    matching_stores = [store_name for store_name in store_names if not selected_store_set or store_name in selected_store_set]
+    annotated = dict(employee)
+    annotated["primary_store"] = primary_store
+    annotated["is_current_store_employee"] = bool(matching_stores or not selected_store_set)
+    annotated["is_primary_store_employee"] = bool(not selected_store_set or primary_store in selected_store_set)
+    annotated["is_support_store_employee"] = bool(selected_store_set and matching_stores and primary_store not in selected_store_set)
+    annotated["is_cross_store_visible"] = annotated["is_support_store_employee"]
+    return annotated
+
+
 def build_schedule_employee_summaries(
     employees: List[Dict[str, object]],
     rows: List[Dict[str, object]],
@@ -2831,6 +3055,68 @@ def build_schedule_calendar_summary(days: List[Dict[str, object]], rows: List[Di
             }
         )
     return summary
+
+
+def build_schedule_dashboard(rows: List[Dict[str, object]], month: str) -> Dict[str, object]:
+    normalized_month = normalize_month(month)
+    year, month_number = [int(part) for part in normalized_month.split("-")]
+    last_day = calendar.monthrange(year, month_number)[1]
+    today = datetime.now().date()
+    month_start = date(year, month_number, 1)
+    month_end = date(year, month_number, last_day)
+    if month_end < today:
+        cutoff_date = month_end
+    elif month_start > today:
+        cutoff_date = None
+    else:
+        cutoff_date = today
+
+    total_hours = round(sum(float(row.get("duration_hours") or 0) for row in rows), 2)
+    cutoff_hours = round(
+        sum(
+            float(row.get("duration_hours") or 0)
+            for row in rows
+            if cutoff_date is not None and str(row.get("schedule_date") or "") <= cutoff_date.strftime("%Y-%m-%d")
+        ),
+        2,
+    )
+    store_hours: Dict[str, float] = {}
+    shift_distribution: Dict[str, int] = {}
+    for row in rows:
+        store_name = str(row.get("store_name") or "未设置门店")
+        shift_name = str(row.get("shift_name") or "未设置班次")
+        if int(row.get("is_custom_time") or 0) == 1:
+            shift_name = "自定义"
+        store_hours[store_name] = round(store_hours.get(store_name, 0.0) + float(row.get("duration_hours") or 0), 2)
+        shift_distribution[shift_name] = shift_distribution.get(shift_name, 0) + 1
+    max_store_hours = max(store_hours.values(), default=0)
+    store_rank = [
+        {
+            "store_name": store_name,
+            "hours": hours,
+            "percent": round((hours / max_store_hours * 100), 2) if max_store_hours else 0,
+        }
+        for store_name, hours in sorted(store_hours.items(), key=lambda item: item[1], reverse=True)
+    ]
+    total_shift_count = max(sum(shift_distribution.values()), 1)
+    shift_distribution_items = [
+        {
+            "shift_name": shift_name,
+            "count": count,
+            "percent": round(count / total_shift_count * 100, 2),
+        }
+        for shift_name, count in sorted(shift_distribution.items(), key=lambda item: item[1], reverse=True)
+    ]
+    return {
+        "total_hours": total_hours,
+        "scheduled_until_today_hours": cutoff_hours,
+        "person_time_count": len(rows),
+        "employee_count": len({int(row["employee_id"]) for row in rows}),
+        "rest_shift_count": sum(1 for row in rows if "休息" in str(row.get("shift_name") or "")),
+        "custom_shift_count": sum(1 for row in rows if int(row.get("is_custom_time") or 0) == 1),
+        "store_rank": store_rank,
+        "shift_distribution": shift_distribution_items,
+    }
 
 
 def normalize_employee_store_data(
@@ -2968,16 +3254,35 @@ def fetch_schedulable_employees(
     employee_scope: str = "all",
     selected_employee_ids: Optional[List[int]] = None,
 ) -> List[Dict[str, object]]:
-    clean_store = store_name.strip()
-    status_filter = employee_status.strip() or "在职"
-    employees = fetch_employees(clean_store, status_filter, scope="active") if clean_store else fetch_employees("", status_filter, scope="active")
+    statuses = [employee_status.strip()] if employee_status.strip() else ["在职"]
+    return fetch_schedulable_employees_for_stores(
+        [store_name.strip()] if store_name.strip() else [],
+        statuses,
+        employee_scope,
+        selected_employee_ids,
+    )
+
+
+def fetch_schedulable_employees_for_stores(
+    store_names: List[str],
+    employee_statuses: Optional[List[str]] = None,
+    employee_scope: str = "all",
+    selected_employee_ids: Optional[List[int]] = None,
+) -> List[Dict[str, object]]:
+    clean_stores = unique_clean_values(store_names)
+    clean_statuses = unique_clean_values(employee_statuses or ["在职"])
+    employees = fetch_employees("", "", scope="active")
     normalized_scope = normalize_employee_scope(employee_scope)
     selected_ids = {int(employee_id) for employee_id in selected_employee_ids or [] if int(employee_id) > 0}
+    selected_store_set = set(clean_stores)
     result: List[Dict[str, object]] = []
     for employee in employees:
-        annotated = annotate_schedule_employee(employee, clean_store)
-        if clean_store and not employee_belongs_to_store(annotated, clean_store):
+        if clean_statuses and str(employee.get("status") or "") not in clean_statuses:
             continue
+        employee_stores = set(employee.get("store_names") or [])
+        if selected_store_set and not (employee_stores & selected_store_set):
+            continue
+        annotated = annotate_schedule_employee_for_stores(employee, clean_stores)
         if normalized_scope == "primary" and not annotated.get("is_primary_store_employee"):
             continue
         if normalized_scope == "support" and not annotated.get("is_support_store_employee"):
@@ -3136,21 +3441,49 @@ def hard_delete_employee(employee_id: int) -> None:
         connection.execute("DELETE FROM employees WHERE id = ?", (employee_id,))
 
 
-def fetch_shift_types(include_inactive: bool = True, active_only: bool = False) -> List[Dict[str, object]]:
-    clauses = []
+def fetch_shift_types(
+    include_inactive: bool = True,
+    active_only: bool = False,
+    store_names: Optional[List[str]] = None,
+    global_scope: str = "all",
+) -> List[Dict[str, object]]:
+    clauses: List[str] = []
+    params: List[object] = []
+    normalized_global_scope = global_scope if global_scope in {"all", "global", "store"} else "all"
     if active_only or not include_inactive:
         clauses.append("is_active = 1")
-    where_sql = "WHERE " + " AND ".join(clauses) if clauses else ""
+    clean_store_names = unique_clean_values(store_names or [])
+    if normalized_global_scope == "global":
+        clauses.append("COALESCE(is_global, 0) = 1")
+    elif normalized_global_scope == "store":
+        clauses.append("COALESCE(is_global, 0) = 0")
+    if clean_store_names:
+        placeholders = ",".join("?" for _ in clean_store_names)
+        if normalized_global_scope == "store":
+            clauses.append(f"COALESCE(store_name, '') IN ({placeholders})")
+            params.extend(clean_store_names)
+        elif normalized_global_scope == "global":
+            pass
+        else:
+            clauses.append(f"(COALESCE(is_global, 0) = 1 OR COALESCE(store_name, '') IN ({placeholders}))")
+            params.extend(clean_store_names)
     with get_connection() as connection:
+        where_sql = "WHERE " + " AND ".join(clauses) if clauses else ""
         rows = connection.execute(
             f"""
-            SELECT id, shift_name, start_time, end_time, duration_hours, color, is_active, created_at, updated_at
+            SELECT
+                id, shift_name, store_name, is_global, business_start_time, business_end_time,
+                start_time, end_time, duration_hours, color, is_active, created_at, updated_at
             FROM shift_types
             {where_sql}
-            ORDER BY is_active DESC, id
-            """
+            ORDER BY is_active DESC, COALESCE(is_global, 0) DESC, COALESCE(store_name, ''), id
+            """,
+            params,
         ).fetchall()
-    return [dict(row) for row in rows]
+    result = [dict(row) for row in rows]
+    for row in result:
+        row["store_label"] = "通用班次" if int(row.get("is_global") or 0) == 1 else (row.get("store_name") or "未绑定门店")
+    return result
 
 
 def fetch_shift_type(shift_type_id: int) -> Optional[Dict[str, object]]:
@@ -3159,25 +3492,77 @@ def fetch_shift_type(shift_type_id: int) -> Optional[Dict[str, object]]:
     return dict(row) if row else None
 
 
-def create_shift_type(shift_name: str, start_time: str, end_time: str, duration_hours: str, color: str) -> int:
+def validate_shift_scope(store_name: str, is_global: bool, config: AppConfig) -> Tuple[str, int]:
+    if is_global:
+        return "", 1
+    clean_store = store_name.strip()
+    if not clean_store:
+        raise ValueError("请选择班次所属门店，或勾选通用班次。")
+    if clean_store not in config.stores:
+        raise ValueError("请选择有效门店。")
+    return clean_store, 0
+
+
+def shift_scope_duplicate_exists(
+    connection: sqlite3.Connection,
+    shift_name: str,
+    store_name: str,
+    is_global: int,
+    exclude_shift_type_id: int = 0,
+) -> bool:
+    row = connection.execute(
+        """
+        SELECT id FROM shift_types
+        WHERE shift_name = ?
+          AND COALESCE(store_name, '') = ?
+          AND COALESCE(is_global, 0) = ?
+          AND id != ?
+        LIMIT 1
+        """,
+        (shift_name, store_name, is_global, exclude_shift_type_id),
+    ).fetchone()
+    return row is not None
+
+
+def create_shift_type(
+    shift_name: str,
+    start_time: str,
+    end_time: str,
+    duration_hours: str,
+    color: str,
+    store_name: str = "",
+    is_global: bool = False,
+    config: Optional[AppConfig] = None,
+) -> int:
     clean_name = shift_name.strip()
     if not clean_name:
         raise ValueError("请填写班次名称。")
+    clean_store, normalized_global = validate_shift_scope(store_name, is_global, config or load_app_config())
     timestamp = now_text()
     with get_connection() as connection:
-        try:
-            cursor = connection.execute(
-                """
-                INSERT INTO shift_types (
-                    shift_name, start_time, end_time, duration_hours, color,
-                    is_active, created_at, updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, 1, ?, ?)
-                """,
-                (clean_name, start_time.strip(), end_time.strip(), parse_duration_hours(duration_hours), color.strip(), timestamp, timestamp),
+        if shift_scope_duplicate_exists(connection, clean_name, clean_store, normalized_global):
+            raise ValueError("同一门店或通用范围内班次名称不能重复。")
+        cursor = connection.execute(
+            """
+            INSERT INTO shift_types (
+                shift_name, store_name, is_global, business_start_time, business_end_time,
+                start_time, end_time, duration_hours, color,
+                is_active, created_at, updated_at
             )
-        except sqlite3.IntegrityError as exc:
-            raise ValueError("班次名称不能重复。") from exc
+            VALUES (?, ?, ?, '', '', ?, ?, ?, ?, 1, ?, ?)
+            """,
+            (
+                clean_name,
+                clean_store,
+                normalized_global,
+                start_time.strip(),
+                end_time.strip(),
+                parse_duration_hours(duration_hours),
+                color.strip(),
+                timestamp,
+                timestamp,
+            ),
+        )
         return int(cursor.lastrowid)
 
 
@@ -3189,34 +3574,45 @@ def update_shift_type(
     duration_hours: str,
     color: str,
     is_active: bool,
+    store_name: str = "",
+    is_global: bool = False,
+    config: Optional[AppConfig] = None,
 ) -> None:
-    if not fetch_shift_type(shift_type_id):
+    existing_shift = fetch_shift_type(shift_type_id)
+    if not existing_shift:
         raise HTTPException(status_code=404, detail="班次不存在")
     clean_name = shift_name.strip()
     if not clean_name:
         raise ValueError("请填写班次名称。")
+    clean_store, normalized_global = validate_shift_scope(
+        store_name or str(existing_shift.get("store_name") or ""),
+        is_global or int(existing_shift.get("is_global") or 0) == 1,
+        config or load_app_config(),
+    )
     with get_connection() as connection:
-        try:
-            connection.execute(
-                """
-                UPDATE shift_types
-                SET shift_name = ?, start_time = ?, end_time = ?, duration_hours = ?,
-                    color = ?, is_active = ?, updated_at = ?
-                WHERE id = ?
-                """,
-                (
-                    clean_name,
-                    start_time.strip(),
-                    end_time.strip(),
-                    parse_duration_hours(duration_hours),
-                    color.strip(),
-                    1 if is_active else 0,
-                    now_text(),
-                    shift_type_id,
-                ),
-            )
-        except sqlite3.IntegrityError as exc:
-            raise ValueError("班次名称不能重复。") from exc
+        if shift_scope_duplicate_exists(connection, clean_name, clean_store, normalized_global, exclude_shift_type_id=shift_type_id):
+            raise ValueError("同一门店或通用范围内班次名称不能重复。")
+        connection.execute(
+            """
+            UPDATE shift_types
+            SET shift_name = ?, store_name = ?, is_global = ?,
+                start_time = ?, end_time = ?, duration_hours = ?,
+                color = ?, is_active = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                clean_name,
+                clean_store,
+                normalized_global,
+                start_time.strip(),
+                end_time.strip(),
+                parse_duration_hours(duration_hours),
+                color.strip(),
+                1 if is_active else 0,
+                now_text(),
+                shift_type_id,
+            ),
+        )
 
 
 def disable_shift_type(shift_type_id: int) -> None:
@@ -3224,6 +3620,40 @@ def disable_shift_type(shift_type_id: int) -> None:
         raise HTTPException(status_code=404, detail="班次不存在")
     with get_connection() as connection:
         connection.execute("UPDATE shift_types SET is_active = 0, updated_at = ? WHERE id = ?", (now_text(), shift_type_id))
+
+
+def fetch_store_business_hours() -> Dict[str, Dict[str, object]]:
+    with get_connection() as connection:
+        if not table_exists(connection, "store_business_hours"):
+            return {}
+        rows = connection.execute("SELECT * FROM store_business_hours ORDER BY store_name").fetchall()
+    return {str(row["store_name"]): dict(row) for row in rows}
+
+
+def upsert_store_business_hours(store_name: str, business_start_time: str, business_end_time: str, config: AppConfig) -> None:
+    clean_store = store_name.strip()
+    if clean_store not in config.stores:
+        raise ValueError("请选择有效门店。")
+    timestamp = now_text()
+    with get_connection() as connection:
+        existing = connection.execute("SELECT id FROM store_business_hours WHERE store_name = ?", (clean_store,)).fetchone()
+        if existing:
+            connection.execute(
+                """
+                UPDATE store_business_hours
+                SET business_start_time = ?, business_end_time = ?, updated_at = ?
+                WHERE store_name = ?
+                """,
+                (business_start_time.strip(), business_end_time.strip(), timestamp, clean_store),
+            )
+        else:
+            connection.execute(
+                """
+                INSERT INTO store_business_hours (store_name, business_start_time, business_end_time, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (clean_store, business_start_time.strip(), business_end_time.strip(), timestamp, timestamp),
+            )
 
 
 def schedule_redirect_url(
@@ -3261,30 +3691,82 @@ def schedule_redirect_url(
     return "/admin/schedules?" + urlencode({key: value for key, value in params.items() if value}) + hash_fragment
 
 
-def schedule_filters(store_name: str, month: str, employee_status: str = "", shift_type_id: int = 0) -> Dict[str, str]:
+def schedule_filters(
+    store_name: str,
+    month: str,
+    employee_status: str = "",
+    shift_type_id: int = 0,
+    store_names: Optional[List[str]] = None,
+    employee_statuses: Optional[List[str]] = None,
+    shift_type_ids: Optional[List[int]] = None,
+    include_custom_shift: bool = False,
+    is_all_stores: bool = False,
+) -> Dict[str, object]:
+    selected_store_names = unique_clean_values(store_names or ([store_name.strip()] if store_name.strip() and not is_all_stores else []))
+    selected_employee_statuses = unique_clean_values(employee_statuses or ([employee_status.strip()] if employee_status.strip() else []))
+    selected_shift_type_ids = [int(value) for value in shift_type_ids or ([] if shift_type_id <= 0 else [shift_type_id]) if int(value) > 0]
     return {
-        "store_name": store_name.strip(),
+        "store_name": selected_store_names[0] if len(selected_store_names) == 1 else "",
+        "store_names": selected_store_names,
+        "store_names_text": join_display_values(selected_store_names) if selected_store_names else "全部门店",
+        "is_all_stores": bool(is_all_stores or not selected_store_names),
         "month": normalize_month(month),
-        "employee_status": employee_status.strip(),
-        "shift_type_id": str(shift_type_id if shift_type_id > 0 else ""),
+        "employee_status": selected_employee_statuses[0] if len(selected_employee_statuses) == 1 else "",
+        "employee_statuses": selected_employee_statuses,
+        "shift_type_id": str(selected_shift_type_ids[0]) if len(selected_shift_type_ids) == 1 and not include_custom_shift else "",
+        "shift_type_ids": [str(value) for value in selected_shift_type_ids],
+        "include_custom_shift": include_custom_shift,
     }
 
 
-def fetch_schedule_rows(store_name: str, month: str, employee_status: str = "", shift_type_id: int = 0) -> List[Dict[str, object]]:
-    filters = schedule_filters(store_name, month, employee_status, shift_type_id)
+def fetch_schedule_rows(
+    store_name: str,
+    month: str,
+    employee_status: str = "",
+    shift_type_id: int = 0,
+    store_names: Optional[List[str]] = None,
+    employee_statuses: Optional[List[str]] = None,
+    shift_type_ids: Optional[List[int]] = None,
+    include_custom_shift: bool = False,
+    is_all_stores: bool = False,
+) -> List[Dict[str, object]]:
+    filters = schedule_filters(
+        store_name,
+        month,
+        employee_status,
+        shift_type_id,
+        store_names=store_names,
+        employee_statuses=employee_statuses,
+        shift_type_ids=shift_type_ids,
+        include_custom_shift=include_custom_shift,
+        is_all_stores=is_all_stores,
+    )
     year, month_number = [int(part) for part in filters["month"].split("-")]
     last_day = calendar.monthrange(year, month_number)[1]
     clauses = ["schedules.schedule_date >= ?", "schedules.schedule_date <= ?"]
     params: List[object] = [f"{filters['month']}-01", f"{filters['month']}-{last_day:02d}"]
-    if filters["store_name"]:
-        clauses.append("schedules.store_name = ?")
-        params.append(filters["store_name"])
-    if filters["employee_status"]:
-        clauses.append("employees.status = ?")
-        params.append(filters["employee_status"])
-    if filters["shift_type_id"]:
-        clauses.append("schedules.shift_type_id = ?")
-        params.append(int(filters["shift_type_id"]))
+    selected_store_names = list(filters["store_names"])
+    if selected_store_names:
+        placeholders = ",".join("?" for _ in selected_store_names)
+        clauses.append(f"schedules.store_name IN ({placeholders})")
+        params.extend(selected_store_names)
+    selected_employee_statuses = list(filters["employee_statuses"])
+    if selected_employee_statuses:
+        placeholders = ",".join("?" for _ in selected_employee_statuses)
+        clauses.append(f"employees.status IN ({placeholders})")
+        params.extend(selected_employee_statuses)
+    selected_shift_type_ids = [int(value) for value in filters["shift_type_ids"]]
+    include_custom = bool(filters["include_custom_shift"])
+    if selected_shift_type_ids and include_custom:
+        placeholders = ",".join("?" for _ in selected_shift_type_ids)
+        clauses.append(f"(schedules.shift_type_id IN ({placeholders}) OR COALESCE(schedules.is_custom_time, 0) = 1)")
+        params.extend(selected_shift_type_ids)
+    elif selected_shift_type_ids:
+        placeholders = ",".join("?" for _ in selected_shift_type_ids)
+        clauses.append(f"COALESCE(schedules.is_custom_time, 0) = 0 AND schedules.shift_type_id IN ({placeholders})")
+        params.extend(selected_shift_type_ids)
+    elif include_custom:
+        clauses.append("COALESCE(schedules.is_custom_time, 0) = 1")
     where_sql = " AND ".join(clauses)
     with get_connection() as connection:
         rows = connection.execute(
@@ -3292,12 +3774,16 @@ def fetch_schedule_rows(store_name: str, month: str, employee_status: str = "", 
             SELECT
                 schedules.id, schedules.store_name, schedules.employee_id, schedules.schedule_date,
                 schedules.shift_type_id, schedules.note, schedules.created_by,
+                COALESCE(schedules.is_custom_time, 0) AS is_custom_time,
+                schedules.custom_start_time, schedules.custom_end_time,
+                schedules.custom_duration_hours, schedules.custom_label,
                 employees.employee_name, employees.role, employees.status AS employee_status,
                 shift_types.shift_name, shift_types.start_time, shift_types.end_time,
-                shift_types.duration_hours, shift_types.color, shift_types.is_active
+                shift_types.duration_hours, shift_types.color, shift_types.is_active,
+                shift_types.store_name AS shift_store_name, shift_types.is_global AS shift_is_global
             FROM store_schedules AS schedules
             JOIN employees ON employees.id = schedules.employee_id
-            JOIN shift_types ON shift_types.id = schedules.shift_type_id
+            LEFT JOIN shift_types ON shift_types.id = schedules.shift_type_id
             WHERE {where_sql}
             ORDER BY schedules.schedule_date, schedules.store_name, employees.employee_name
             """,
@@ -3305,6 +3791,16 @@ def fetch_schedule_rows(store_name: str, month: str, employee_status: str = "", 
         ).fetchall()
     result = [dict(row) for row in rows]
     for row in result:
+        is_custom = int(row.get("is_custom_time") or 0) == 1
+        if is_custom:
+            row["shift_name"] = str(row.get("custom_label") or "").strip() or "自定义"
+            row["start_time"] = row.get("custom_start_time") or ""
+            row["end_time"] = row.get("custom_end_time") or ""
+            row["duration_hours"] = float(row.get("custom_duration_hours") or 0)
+            row["color"] = row.get("color") or "#f97316"
+        else:
+            row["shift_name"] = row.get("shift_name") or "未设置班次"
+            row["duration_hours"] = float(row.get("duration_hours") or 0)
         row["weekday"] = weekday_label(str(row["schedule_date"]))
     return result
 
@@ -3320,33 +3816,63 @@ def fetch_schedule_context(
     employee_scope: str = "all",
     selected_employee_ids: Optional[List[int]] = None,
     shift_type_id: int = 0,
+    store_names: Optional[List[str]] = None,
+    employee_statuses: Optional[List[str]] = None,
+    shift_type_ids: Optional[List[int]] = None,
+    include_custom_shift: bool = False,
+    is_all_stores: bool = False,
 ) -> Dict[str, object]:
     normalized_view = normalize_schedule_view(view)
-    normalized_scope = "all" if scope == "all" or (normalized_view == "store-summary" and not store_name.strip()) else "store"
-    filters = schedule_filters("" if normalized_scope == "all" else store_name, month, employee_status, shift_type_id)
+    selected_store_names = unique_clean_values(store_names or ([store_name.strip()] if store_name.strip() and not is_all_stores else []))
+    normalized_scope = "all" if is_all_stores or scope == "all" or (normalized_view == "store-summary" and not selected_store_names) else "store"
+    if normalized_scope == "all":
+        selected_store_names = []
+    filters = schedule_filters(
+        "" if normalized_scope == "all" else store_name,
+        month,
+        employee_status,
+        shift_type_id,
+        store_names=selected_store_names,
+        employee_statuses=employee_statuses,
+        shift_type_ids=shift_type_ids,
+        include_custom_shift=include_custom_shift,
+        is_all_stores=normalized_scope == "all",
+    )
     days = month_date_items(filters["month"])
-    selected_store = filters["store_name"]
     normalized_employee_scope = normalize_employee_scope(employee_scope)
     selected_ids = [int(employee_id) for employee_id in selected_employee_ids or [] if int(employee_id) > 0]
-    employee_status_filter = filters["employee_status"]
-    employee_options = fetch_schedulable_employees(
-        selected_store,
-        employee_status_filter,
+    selected_store_names = list(filters["store_names"])
+    is_all = bool(filters["is_all_stores"])
+    employee_status_filters = list(filters["employee_statuses"]) or ["在职"]
+    employee_options = fetch_schedulable_employees_for_stores(
+        selected_store_names,
+        employee_status_filters,
         normalized_employee_scope,
     )
-    employees = fetch_schedulable_employees(
-        selected_store,
-        employee_status_filter,
+    employees = fetch_schedulable_employees_for_stores(
+        selected_store_names,
+        employee_status_filters,
         normalized_employee_scope,
         selected_employee_ids=selected_ids,
     )
-    rows = fetch_schedule_rows(filters["store_name"], filters["month"], filters["employee_status"], shift_type_id)
+    rows = fetch_schedule_rows(
+        filters["store_name"],
+        filters["month"],
+        filters["employee_status"],
+        shift_type_id,
+        store_names=selected_store_names,
+        employee_statuses=list(filters["employee_statuses"]),
+        shift_type_ids=[int(value) for value in filters["shift_type_ids"]],
+        include_custom_shift=bool(filters["include_custom_shift"]),
+        is_all_stores=is_all,
+    )
     schedule_map: Dict[str, Dict[int, Dict[str, object]]] = {}
     daily_store_counts: Dict[str, Dict[str, int]] = {}
     for row in rows:
         schedule_map.setdefault(str(row["schedule_date"]), {})[int(row["employee_id"])] = row
         daily_store_counts.setdefault(str(row["schedule_date"]), {}).setdefault(str(row["store_name"]), 0)
         daily_store_counts[str(row["schedule_date"])][str(row["store_name"])] += 1
+    dashboard = build_schedule_dashboard(rows, str(filters["month"]))
     total_hours = round(sum(float(row.get("duration_hours") or 0) for row in rows), 2)
     scheduled_dates = {str(row["schedule_date"]) for row in rows}
     stats = {
@@ -3357,15 +3883,15 @@ def fetch_schedule_context(
         "rest_shift_count": sum(1 for row in rows if str(row.get("shift_name") or "") == "休息"),
     }
     selected_id_strings = [str(employee_id) for employee_id in selected_ids]
-    base_query = {
-        "store_name": filters["store_name"],
-        "month": filters["month"],
-        "employee_status": filters["employee_status"],
-        "employee_scope": normalized_employee_scope,
-        "shift_type_id": filters["shift_type_id"],
-        "scope": normalized_scope,
-    }
-    query_items = [(key, value) for key, value in base_query.items() if value]
+    query_items: List[Tuple[str, str]] = [("month", str(filters["month"])), ("employee_scope", normalized_employee_scope), ("scope", normalized_scope)]
+    if selected_store_names:
+        query_items.extend(("store_names", store) for store in selected_store_names)
+    else:
+        query_items.append(("store_names", "__all__"))
+    query_items.extend(("employee_statuses", status) for status in filters["employee_statuses"])
+    query_items.extend(("shift_type_ids", shift_id) for shift_id in filters["shift_type_ids"])
+    if filters["include_custom_shift"]:
+        query_items.append(("shift_type_ids", "custom"))
     query_items.extend(("employee_ids", employee_id) for employee_id in selected_id_strings)
     if show_cross_store:
         query_items.append(("show_cross_store", "1"))
@@ -3385,38 +3911,47 @@ def fetch_schedule_context(
         [*query_items, ("view_mode", normalized_view), ("show_cross_store", "" if show_cross_store else "1")]
     )
     global_view_url = "/admin/schedules?" + urlencode(
-        [(key, value) for key, value in {**base_query, "store_name": "", "scope": "all"}.items() if value]
-        + [("view_mode", "store-summary")]
+        [("store_names", "__all__"), ("month", str(filters["month"])), ("scope", "all"), ("view_mode", "store-summary")]
     ) + "#store-summary-view"
     calendar_summary = build_schedule_calendar_summary(days, rows)
     export_query = [("month", filters["month"])]
-    if filters["store_name"]:
-        export_query.append(("store_name", filters["store_name"]))
-    if filters["shift_type_id"]:
-        export_query.append(("shift_type_id", filters["shift_type_id"]))
+    export_query.extend(("store_names", store) for store in selected_store_names)
+    export_query.extend(("employee_statuses", status) for status in filters["employee_statuses"])
+    export_query.extend(("shift_type_ids", shift_id) for shift_id in filters["shift_type_ids"])
+    if filters["include_custom_shift"]:
+        export_query.append(("shift_type_ids", "custom"))
+    is_single_store = len(selected_store_names) == 1 and not is_all
+    bulk_shift_types = fetch_shift_types(active_only=True, store_names=selected_store_names if is_single_store else [], global_scope="all" if is_single_store else "global")
+    all_shift_types = fetch_shift_types(store_names=selected_store_names or None)
     return {
         "filters": filters,
         "stores": config.stores,
+        "selected_store_names": selected_store_names,
+        "selected_store_count": len(selected_store_names) if selected_store_names else len(config.stores),
+        "is_all_stores": is_all,
+        "is_single_store": is_single_store,
+        "is_multi_store": len(selected_store_names) > 1,
         "days": days,
         "employees": employees,
         "bulk_employees": employee_options,
         "employee_options": employee_options,
         "selected_employee_ids": selected_id_strings,
         "employee_scope": normalized_employee_scope,
-        "shift_types": fetch_shift_types(active_only=True),
-        "all_shift_types": fetch_shift_types(),
+        "shift_types": bulk_shift_types,
+        "all_shift_types": all_shift_types,
         "rows": rows,
         "schedule_map": schedule_map,
         "daily_store_counts": daily_store_counts,
         "calendar_summary": calendar_summary,
         "store_summary_calendar": calendar_summary,
         "stats": stats,
+        "dashboard": dashboard,
         "calendar_weeks": calendar_week_rows(days),
         "employee_summaries": build_schedule_employee_summaries(employees, rows, days),
         "view": normalized_view,
         "show_cross_store": show_cross_store,
         "scope": normalized_scope,
-        "form_store": filters["store_name"],
+        "form_store": filters["store_name"] if is_single_store else "",
         "view_urls": view_urls,
         "toggle_cross_store_url": toggle_cross_store_url,
         "global_view_url": global_view_url,
@@ -3450,7 +3985,24 @@ def insert_schedule_log(
     )
 
 
-def upsert_schedule(store_name: str, employee_id: int, schedule_date: str, shift_type_id: int, note: str, operator: str) -> int:
+def validate_shift_available_for_store(shift_type: Dict[str, object], store_name: str) -> None:
+    if int(shift_type.get("is_active") or 0) != 1:
+        raise ValueError("班次必须启用。")
+    if int(shift_type.get("is_global") or 0) == 1:
+        return
+    if str(shift_type.get("store_name") or "").strip() != store_name.strip():
+        raise ValueError("班次不属于当前门店。")
+
+
+def upsert_schedule(
+    store_name: str,
+    employee_id: int,
+    schedule_date: str,
+    shift_type_id: int,
+    note: str,
+    operator: str,
+    custom_schedule: Optional[Dict[str, object]] = None,
+) -> int:
     clean_store = store_name.strip()
     clean_date = normalize_schedule_date(schedule_date)
     employee = fetch_employee(employee_id)
@@ -3464,19 +4016,31 @@ def upsert_schedule(store_name: str, employee_id: int, schedule_date: str, shift
         raise ValueError("员工已归档，不能排班。")
     if str(employee.get("status") or "") != "在职":
         raise ValueError("员工必须是在职状态。")
-    shift_type = fetch_shift_type(shift_type_id)
-    if not shift_type:
-        raise ValueError("班次不存在。")
-    if int(shift_type.get("is_active") or 0) != 1:
-        raise ValueError("班次必须启用。")
+    is_custom = bool(custom_schedule)
+    if is_custom:
+        clean_shift_type_id = 0
+    else:
+        shift_type = fetch_shift_type(shift_type_id)
+        if not shift_type:
+            raise ValueError("班次不存在。")
+        validate_shift_available_for_store(shift_type, clean_store)
+        clean_shift_type_id = shift_type_id
     timestamp = now_text()
     clean_note = note.strip()
     new_value = {
         "store_name": clean_store,
         "employee_id": employee_id,
         "schedule_date": clean_date,
-        "shift_type_id": shift_type_id,
+        "shift_type_id": clean_shift_type_id,
         "note": clean_note,
+        "custom_schedule": custom_schedule or {},
+    }
+    custom_payload = custom_schedule or {
+        "is_custom_time": 0,
+        "custom_start_time": "",
+        "custom_end_time": "",
+        "custom_duration_hours": None,
+        "custom_label": "",
     }
     with get_connection() as connection:
         existing = connection.execute(
@@ -3489,10 +4053,23 @@ def upsert_schedule(store_name: str, employee_id: int, schedule_date: str, shift
             connection.execute(
                 """
                 UPDATE store_schedules
-                SET store_name = ?, shift_type_id = ?, note = ?, updated_at = ?
+                SET store_name = ?, shift_type_id = ?, note = ?,
+                    is_custom_time = ?, custom_start_time = ?, custom_end_time = ?,
+                    custom_duration_hours = ?, custom_label = ?, updated_at = ?
                 WHERE id = ?
                 """,
-                (clean_store, shift_type_id, clean_note, timestamp, schedule_id),
+                (
+                    clean_store,
+                    clean_shift_type_id,
+                    clean_note,
+                    int(custom_payload.get("is_custom_time") or 0),
+                    str(custom_payload.get("custom_start_time") or ""),
+                    str(custom_payload.get("custom_end_time") or ""),
+                    custom_payload.get("custom_duration_hours"),
+                    str(custom_payload.get("custom_label") or ""),
+                    timestamp,
+                    schedule_id,
+                ),
             )
             insert_schedule_log(connection, schedule_id, "更新排班", old_value, new_value, operator, timestamp)
             return schedule_id
@@ -3500,11 +4077,26 @@ def upsert_schedule(store_name: str, employee_id: int, schedule_date: str, shift
             """
             INSERT INTO store_schedules (
                 store_name, employee_id, schedule_date, shift_type_id,
-                note, created_by, created_at, updated_at
+                note, is_custom_time, custom_start_time, custom_end_time,
+                custom_duration_hours, custom_label, created_by, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (clean_store, employee_id, clean_date, shift_type_id, clean_note, operator, timestamp, timestamp),
+            (
+                clean_store,
+                employee_id,
+                clean_date,
+                clean_shift_type_id,
+                clean_note,
+                int(custom_payload.get("is_custom_time") or 0),
+                str(custom_payload.get("custom_start_time") or ""),
+                str(custom_payload.get("custom_end_time") or ""),
+                custom_payload.get("custom_duration_hours"),
+                str(custom_payload.get("custom_label") or ""),
+                operator,
+                timestamp,
+                timestamp,
+            ),
         )
         schedule_id = int(cursor.lastrowid)
         insert_schedule_log(connection, schedule_id, "新增排班", "", new_value, operator, timestamp)
@@ -3551,6 +4143,54 @@ def normalize_schedule_dates(schedule_dates: Optional[List[str]], schedule_date:
     return clean_dates
 
 
+def time_to_minutes(value: str) -> int:
+    clean_value = str(value or "").strip()
+    try:
+        parsed_time = datetime.strptime(clean_value, "%H:%M")
+    except ValueError as exc:
+        raise ValueError("自定义时间格式不正确。") from exc
+    return parsed_time.hour * 60 + parsed_time.minute
+
+
+def calculate_duration_from_times(start_time: str, end_time: str) -> float:
+    start_minutes = time_to_minutes(start_time)
+    end_minutes = time_to_minutes(end_time)
+    if end_minutes <= start_minutes:
+        end_minutes += 24 * 60
+    return round((end_minutes - start_minutes) / 60, 2)
+
+
+def normalize_custom_schedule_payload(
+    schedule_mode: str,
+    shift_type_id: int,
+    custom_label: str,
+    custom_start_time: str,
+    custom_end_time: str,
+    custom_duration_hours: str,
+) -> Tuple[int, Optional[Dict[str, object]]]:
+    is_custom = schedule_mode.strip() == "custom"
+    if not is_custom:
+        if shift_type_id <= 0:
+            raise ValueError("请选择班次。")
+        return shift_type_id, None
+    start_time = custom_start_time.strip()
+    end_time = custom_end_time.strip()
+    if not start_time or not end_time:
+        raise ValueError("自定义时间必须填写开始时间和结束时间。")
+    duration = parse_duration_hours(custom_duration_hours)
+    if duration <= 0:
+        duration = calculate_duration_from_times(start_time, end_time)
+    if duration <= 0:
+        raise ValueError("自定义工时必须大于 0。")
+    return 0, {
+        "is_custom_time": 1,
+        "custom_label": custom_label.strip() or "自定义",
+        "custom_start_time": start_time,
+        "custom_end_time": end_time,
+        "custom_duration_hours": duration,
+    }
+
+
 def bulk_upsert_schedules(
     store_name: str,
     employee_ids: List[int],
@@ -3560,22 +4200,23 @@ def bulk_upsert_schedules(
     overwrite_existing: bool,
     operator: str,
     max_bulk_count: int,
+    custom_schedule: Optional[Dict[str, object]] = None,
 ) -> Dict[str, int]:
     clean_store = store_name.strip()
     if not clean_store:
-        raise ValueError("请选择具体门店后进行排班操作。")
+        raise ValueError("请选择具体门店后进行排班操作。请选择单个具体门店后进行排班操作。")
     total_count = len(employee_ids) * len(schedule_dates)
     if total_count <= 0:
         raise ValueError("请选择至少 1 名员工和 1 个日期。")
     if total_count > max_bulk_count:
         raise ValueError(f"一次最多批量生成 {max_bulk_count} 条排班，请减少员工或日期数量。")
-    if shift_type_id <= 0:
-        raise ValueError("请选择班次。")
-    shift_type = fetch_shift_type(shift_type_id)
-    if not shift_type:
-        raise ValueError("班次不存在。")
-    if int(shift_type.get("is_active") or 0) != 1:
-        raise ValueError("班次必须启用。")
+    if not custom_schedule:
+        if shift_type_id <= 0:
+            raise ValueError("请选择班次。")
+        shift_type = fetch_shift_type(shift_type_id)
+        if not shift_type:
+            raise ValueError("班次不存在。")
+        validate_shift_available_for_store(shift_type, clean_store)
     for selected_employee_id in employee_ids:
         employee = fetch_employee(selected_employee_id)
         if not employee:
@@ -3598,7 +4239,7 @@ def bulk_upsert_schedules(
             if existing and not overwrite_existing:
                 skipped_count += 1
                 continue
-            upsert_schedule(clean_store, selected_employee_id, selected_date, shift_type_id, note, operator)
+            upsert_schedule(clean_store, selected_employee_id, selected_date, shift_type_id, note, operator, custom_schedule=custom_schedule)
             if existing:
                 updated_count += 1
             else:
@@ -3634,7 +4275,10 @@ def copy_previous_day_schedules(store_name: str, target_date: str, operator: str
     with get_connection() as connection:
         rows = connection.execute(
             """
-            SELECT employee_id, shift_type_id, note
+            SELECT
+                employee_id, shift_type_id, note,
+                COALESCE(is_custom_time, 0) AS is_custom_time,
+                custom_start_time, custom_end_time, custom_duration_hours, custom_label
             FROM store_schedules
             WHERE store_name = ? AND schedule_date = ?
             ORDER BY employee_id
@@ -3650,6 +4294,15 @@ def copy_previous_day_schedules(store_name: str, target_date: str, operator: str
             int(row["shift_type_id"]),
             str(row["note"] or ""),
             operator,
+            custom_schedule={
+                "is_custom_time": 1,
+                "custom_start_time": str(row["custom_start_time"] or ""),
+                "custom_end_time": str(row["custom_end_time"] or ""),
+                "custom_duration_hours": float(row["custom_duration_hours"] or 0),
+                "custom_label": str(row["custom_label"] or "自定义"),
+            }
+            if int(row["is_custom_time"] or 0) == 1
+            else None,
         )
         copied_count += 1
     return {"source_date": source_date, "target_date": clean_target_date, "copied_count": copied_count}
@@ -3682,7 +4335,7 @@ def build_schedule_excel(rows: List[Dict[str, object]]) -> BytesIO:
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "门店排班"
-    headers = ["门店", "日期", "星期", "员工", "角色", "班次", "开始时间", "结束时间", "工时", "备注"]
+    headers = ["门店", "员工", "日期", "星期", "班次", "开始时间", "结束时间", "工时", "是否自定义", "备注"]
     sheet.append(headers)
     header_fill = PatternFill(fill_type="solid", fgColor="E8EEF7")
     for cell in sheet[1]:
@@ -3693,18 +4346,18 @@ def build_schedule_excel(rows: List[Dict[str, object]]) -> BytesIO:
         sheet.append(
             [
                 row.get("store_name"),
+                row.get("employee_name"),
                 row.get("schedule_date"),
                 row.get("weekday"),
-                row.get("employee_name"),
-                row.get("role") or "",
                 row.get("shift_name"),
                 row.get("start_time") or "",
                 row.get("end_time") or "",
                 row.get("duration_hours") or 0,
+                "是" if int(row.get("is_custom_time") or 0) == 1 else "否",
                 row.get("note") or "",
             ]
         )
-    widths = [18, 14, 10, 16, 14, 14, 12, 12, 10, 28]
+    widths = [18, 16, 14, 10, 14, 12, 12, 10, 12, 28]
     for index, width in enumerate(widths, start=1):
         sheet.column_dimensions[get_column_letter(index)].width = width
     for row in sheet.iter_rows(min_row=2):
@@ -5944,15 +6597,46 @@ def create_app() -> FastAPI:
         admin: str,
         error: str = "",
         success: str = "",
+        store_names: Optional[List[str]] = None,
+        status_filter: str = "all",
+        global_scope: str = "all",
         status_code: int = 200,
     ) -> HTMLResponse:
+        config = load_app_config()
+        selected_stores, _is_all_stores, invalid_store = normalize_schedule_store_filter(
+            store_names,
+            "",
+            config,
+            default_to_first=False,
+        )
+        normalized_status = status_filter if status_filter in {"all", "active", "inactive"} else "all"
+        normalized_global_scope = global_scope if global_scope in {"all", "global", "store"} else "all"
+        hours_map = fetch_store_business_hours()
+        active_only = normalized_status == "active"
+        shift_types = fetch_shift_types(
+            include_inactive=normalized_status != "active",
+            active_only=active_only,
+            store_names=selected_stores or None,
+            global_scope=normalized_global_scope,
+        )
+        if normalized_status == "inactive":
+            shift_types = [shift for shift in shift_types if int(shift.get("is_active") or 0) == 0]
+        combined_error = combine_error_messages(error, "门店筛选参数无效，已忽略。" if invalid_store else "")
         return templates.TemplateResponse(
             request,
             "shift_types.html",
             {
                 "request": request,
-                "shift_types": fetch_shift_types(),
-                "error": error,
+                "shift_types": shift_types,
+                "stores": config.stores,
+                "selected_store_names": selected_stores,
+                "selected_store_count": len(selected_stores) if selected_stores else len(config.stores),
+                "status_filter": normalized_status,
+                "global_scope": normalized_global_scope,
+                "business_hours": hours_map,
+                "selected_business_store": selected_stores[0] if len(selected_stores) == 1 else "",
+                "selected_business_hours": hours_map.get(selected_stores[0], {}) if len(selected_stores) == 1 else {},
+                "error": combined_error,
                 "success": success,
                 "admin_user": admin,
                 "csrf_token": current_csrf_token(request),
@@ -5972,6 +6656,11 @@ def create_app() -> FastAPI:
         employee_scope: str = "all",
         employee_ids: Optional[List[int]] = None,
         shift_type_id: int = 0,
+        store_names: Optional[List[str]] = None,
+        employee_statuses: Optional[List[str]] = None,
+        shift_type_ids: Optional[List[int]] = None,
+        include_custom_shift: bool = False,
+        invalid_store_filter: bool = False,
         saved: int = 0,
         saved_count: int = 0,
         created_count: int = 0,
@@ -5983,8 +6672,19 @@ def create_app() -> FastAPI:
     ) -> HTMLResponse:
         config = load_app_config()
         selected_view = normalize_schedule_view(view)
-        selected_scope = "all" if scope == "all" or selected_view == "store-summary" else "store"
-        selected_store = "" if selected_scope == "all" else (store_name.strip() or (config.stores[0] if config.stores else ""))
+        default_to_first = not (scope == "all" or (selected_view == "store-summary" and not store_name.strip() and store_names is None))
+        selected_store_names, is_all_stores, invalid_store = normalize_schedule_store_filter(
+            store_names,
+            store_name,
+            config,
+            default_to_first=default_to_first,
+        )
+        selected_scope = "all" if is_all_stores or scope == "all" or (selected_view == "store-summary" and not selected_store_names) else "store"
+        selected_store = selected_store_names[0] if len(selected_store_names) == 1 else ""
+        combined_error = combine_error_messages(
+            error,
+            "门店筛选参数无效，已忽略。" if (invalid_store_filter or invalid_store) else "",
+        )
         context = fetch_schedule_context(
             selected_store,
             month,
@@ -5996,6 +6696,11 @@ def create_app() -> FastAPI:
             employee_scope,
             employee_ids,
             shift_type_id,
+            store_names=selected_store_names,
+            employee_statuses=employee_statuses,
+            shift_type_ids=shift_type_ids,
+            include_custom_shift=include_custom_shift,
+            is_all_stores=selected_scope == "all",
         )
         return templates.TemplateResponse(
             request,
@@ -6010,7 +6715,7 @@ def create_app() -> FastAPI:
                 "updated_count": max(updated_count, 0),
                 "skipped_count": max(skipped_count, 0),
                 "deleted": max(deleted, 0),
-                "error": error,
+                "error": combined_error,
                 "admin_user": admin,
                 "csrf_token": current_csrf_token(request),
             },
@@ -6877,15 +7582,28 @@ def create_app() -> FastAPI:
     def admin_shift_types(
         request: Request,
         admin: str = Depends(require_admin),
+        store_names: Optional[List[str]] = Query(None),
+        status_filter: str = Query("all", alias="status"),
+        global_scope: str = Query("all"),
         error: str = Query(""),
         success: str = Query(""),
     ) -> HTMLResponse:
-        return render_shift_types_page(request, admin, error=error, success=success)
+        return render_shift_types_page(
+            request,
+            admin,
+            error=error,
+            success=success,
+            store_names=store_names,
+            status_filter=status_filter,
+            global_scope=global_scope,
+        )
 
     @app.post("/admin/shift-types")
     def create_shift_type_route(
         request: Request,
         admin: str = Depends(require_admin),
+        store_name: str = Form(""),
+        is_global: str = Form(""),
         shift_name: str = Form(""),
         start_time: str = Form(""),
         end_time: str = Form(""),
@@ -6895,7 +7613,16 @@ def create_app() -> FastAPI:
     ) -> RedirectResponse:
         require_admin_csrf(request, csrf_token)
         try:
-            create_shift_type(shift_name, start_time, end_time, duration_hours, color)
+            create_shift_type(
+                shift_name,
+                start_time,
+                end_time,
+                duration_hours,
+                color,
+                store_name=store_name,
+                is_global=is_global in {"1", "true", "on", "yes"},
+                config=load_app_config(),
+            )
         except (ValueError, HTTPException) as exc:
             return RedirectResponse(url="/admin/shift-types?" + urlencode({"error": form_error_message(exc)}), status_code=303)
         return RedirectResponse(url="/admin/shift-types?" + urlencode({"success": "已新增班次。"}), status_code=303)
@@ -6905,6 +7632,8 @@ def create_app() -> FastAPI:
         request: Request,
         shift_type_id: int,
         admin: str = Depends(require_admin),
+        store_name: str = Form(""),
+        is_global: str = Form(""),
         shift_name: str = Form(""),
         start_time: str = Form(""),
         end_time: str = Form(""),
@@ -6923,10 +7652,32 @@ def create_app() -> FastAPI:
                 duration_hours,
                 color,
                 is_active in {"1", "true", "on", "yes"},
+                store_name=store_name,
+                is_global=is_global in {"1", "true", "on", "yes"},
+                config=load_app_config(),
             )
         except (ValueError, HTTPException) as exc:
             return RedirectResponse(url="/admin/shift-types?" + urlencode({"error": form_error_message(exc)}), status_code=303)
         return RedirectResponse(url="/admin/shift-types?" + urlencode({"success": "班次已保存。"}), status_code=303)
+
+    @app.post("/admin/shift-types/business-hours")
+    def update_store_business_hours_route(
+        request: Request,
+        admin: str = Depends(require_admin),
+        store_name: str = Form(""),
+        business_start_time: str = Form(""),
+        business_end_time: str = Form(""),
+        csrf_token: str = Form(""),
+    ) -> RedirectResponse:
+        require_admin_csrf(request, csrf_token)
+        try:
+            upsert_store_business_hours(store_name, business_start_time, business_end_time, load_app_config())
+        except (ValueError, HTTPException) as exc:
+            return RedirectResponse(url="/admin/shift-types?" + urlencode({"error": form_error_message(exc)}), status_code=303)
+        return RedirectResponse(
+            url="/admin/shift-types?" + urlencode({"store_names": store_name, "success": "门店营业时间已保存。"}),
+            status_code=303,
+        )
 
     @app.post("/admin/shift-types/{shift_type_id}/disable")
     def disable_shift_type_route(
@@ -6947,13 +7698,17 @@ def create_app() -> FastAPI:
         request: Request,
         admin: str = Depends(require_admin),
         store_name: str = Query(""),
+        store_names: Optional[List[str]] = Query(None),
         month: str = Query(""),
         employee_status: str = Query(""),
+        employee_statuses: Optional[List[str]] = Query(None),
         view: str = Query(""),
         view_mode: str = Query(""),
         employee_scope: str = Query("all"),
+        employee_scopes: Optional[List[str]] = Query(None),
         employee_ids: Optional[List[str]] = Query(None),
         shift_type_id: str = Query(""),
+        shift_type_ids: Optional[List[str]] = Query(None),
         show_cross_store: str = Query(""),
         scope: str = Query("store"),
         saved: int = Query(0),
@@ -6965,12 +7720,26 @@ def create_app() -> FastAPI:
         error: str = Query(""),
     ) -> HTMLResponse:
         parsed_employee_ids, has_invalid_employee_ids = parse_optional_int_list(employee_ids)
-        parsed_shift_type_id = parse_optional_positive_int(shift_type_id)
+        parsed_shift_type_ids, include_custom_shift, has_invalid_shift_type_ids = parse_shift_filter_values(shift_type_ids, shift_type_id)
+        parsed_shift_type_id = parsed_shift_type_ids[0] if len(parsed_shift_type_ids) == 1 and not include_custom_shift else 0
+        parsed_employee_statuses, has_invalid_employee_statuses = normalize_employee_status_filters(employee_statuses, employee_status)
+        normalized_employee_scope = normalize_employee_scope_filter(employee_scopes, employee_scope)
+        config = load_app_config()
+        _selected_store_names, _is_all_stores, has_invalid_store_names = normalize_schedule_store_filter(
+            store_names,
+            store_name,
+            config,
+            default_to_first=False,
+        )
         parameter_error = ""
-        if str(shift_type_id or "").strip() and parsed_shift_type_id is None:
+        if has_invalid_shift_type_ids:
             parameter_error = combine_error_messages(parameter_error, "班次筛选参数无效，已忽略。")
         if has_invalid_employee_ids:
             parameter_error = combine_error_messages(parameter_error, "员工筛选参数无效，已忽略。")
+        if has_invalid_employee_statuses:
+            parameter_error = combine_error_messages(parameter_error, "员工状态筛选参数无效，已忽略。")
+        if has_invalid_store_names:
+            parameter_error = combine_error_messages(parameter_error, "门店筛选参数无效，已忽略。")
         return render_schedules_page(
             request,
             admin,
@@ -6980,15 +7749,20 @@ def create_app() -> FastAPI:
             view_mode or view or "calendar",
             show_cross_store in {"1", "true", "on", "yes"},
             scope,
-            employee_scope,
+            normalized_employee_scope,
             parsed_employee_ids,
             parsed_shift_type_id or 0,
-            saved,
-            saved_count,
-            created_count,
-            updated_count,
-            skipped_count,
-            deleted,
+            store_names=store_names,
+            employee_statuses=parsed_employee_statuses,
+            shift_type_ids=parsed_shift_type_ids,
+            include_custom_shift=include_custom_shift,
+            invalid_store_filter=has_invalid_store_names,
+            saved=saved,
+            saved_count=saved_count,
+            created_count=created_count,
+            updated_count=updated_count,
+            skipped_count=skipped_count,
+            deleted=deleted,
             error=combine_error_messages(error, parameter_error),
         )
 
@@ -6997,28 +7771,52 @@ def create_app() -> FastAPI:
         request: Request,
         admin: str = Depends(require_admin),
         store_name: str = Form(""),
+        store_names: Optional[List[str]] = Form(None),
         employee_ids: Optional[List[str]] = Form(None),
         schedule_dates: Optional[List[str]] = Form(None),
         employee_id: str = Form(""),
         schedule_date: str = Form(""),
         shift_type_id: str = Form(""),
+        schedule_mode: str = Form("shift"),
+        custom_label: str = Form(""),
+        custom_start_time: str = Form(""),
+        custom_end_time: str = Form(""),
+        custom_duration_hours: str = Form(""),
         note: str = Form(""),
         overwrite_existing: str = Form(""),
         csrf_token: str = Form(""),
     ) -> RedirectResponse:
         require_admin_csrf(request, csrf_token)
         month_for_return = datetime.now().strftime("%Y-%m")
+        return_store = store_name.strip()
         try:
             config = load_app_config()
+            selected_stores, is_all_stores, invalid_store = normalize_schedule_store_filter(
+                store_names,
+                store_name,
+                config,
+                default_to_first=False,
+            )
+            if invalid_store:
+                raise ValueError("请选择有效门店。")
+            if is_all_stores or len(selected_stores) != 1:
+                raise ValueError("请选择具体门店后进行排班操作。请选择单个具体门店后进行排班操作。")
+            return_store = selected_stores[0]
             clean_employee_ids = normalize_schedule_employee_ids(employee_ids, employee_id)
             clean_dates = normalize_schedule_dates(schedule_dates, schedule_date)
             clean_shift_type_id = parse_optional_positive_int(shift_type_id)
-            if clean_shift_type_id is None:
-                raise ValueError("请选择班次。")
+            clean_shift_type_id, custom_schedule = normalize_custom_schedule_payload(
+                "custom" if shift_type_id.strip() == "custom" else schedule_mode,
+                clean_shift_type_id or 0,
+                custom_label,
+                custom_start_time,
+                custom_end_time,
+                custom_duration_hours,
+            )
             month_for_return = clean_dates[0][:7]
             is_legacy_single_submission = not employee_ids and not schedule_dates and bool(employee_id and schedule_date.strip())
             result = bulk_upsert_schedules(
-                store_name,
+                return_store,
                 clean_employee_ids,
                 clean_dates,
                 clean_shift_type_id,
@@ -7026,12 +7824,13 @@ def create_app() -> FastAPI:
                 is_legacy_single_submission or overwrite_existing in {"1", "true", "on", "yes"},
                 admin,
                 config.max_bulk_schedule_count,
+                custom_schedule=custom_schedule,
             )
         except (ValueError, HTTPException) as exc:
-            return RedirectResponse(url=schedule_redirect_url(store_name, month_for_return, error=form_error_message(exc)), status_code=303)
+            return RedirectResponse(url=schedule_redirect_url(return_store, month_for_return, error=form_error_message(exc)), status_code=303)
         return RedirectResponse(
             url=schedule_redirect_url(
-                store_name,
+                return_store,
                 month_for_return,
                 saved_count=result["saved_count"],
                 created_count=result["created_count"],
@@ -8145,15 +8944,39 @@ def create_app() -> FastAPI:
     def export_schedules(
         _admin: str = Depends(require_admin),
         store_name: str = Query(""),
+        store_names: Optional[List[str]] = Query(None),
         month: str = Query(""),
         shift_type_id: str = Query(""),
+        shift_type_ids: Optional[List[str]] = Query(None),
+        employee_statuses: Optional[List[str]] = Query(None),
     ) -> StreamingResponse:
+        config = load_app_config()
         selected_month = normalize_month(month)
-        selected_store = store_name.strip()
-        rows = fetch_schedule_rows(selected_store, selected_month, shift_type_id=parse_optional_positive_int(shift_type_id) or 0)
+        selected_store_names, is_all_stores, _invalid_store = normalize_schedule_store_filter(
+            store_names,
+            store_name,
+            config,
+            default_to_first=False,
+        )
+        selected_shift_ids, include_custom_shift, _invalid_shift = parse_shift_filter_values(shift_type_ids, shift_type_id)
+        selected_employee_statuses, _invalid_status = normalize_employee_status_filters(employee_statuses, "")
+        rows = fetch_schedule_rows(
+            selected_store_names[0] if len(selected_store_names) == 1 else "",
+            selected_month,
+            store_names=selected_store_names,
+            employee_statuses=selected_employee_statuses,
+            shift_type_ids=selected_shift_ids,
+            include_custom_shift=include_custom_shift,
+            is_all_stores=is_all_stores,
+        )
         output = build_schedule_excel(rows)
-        filename_store = selected_store or "全部门店"
-        filename = f"门店排班_{filename_store}_{selected_month.replace('-', '')}.xlsx"
+        if not selected_store_names:
+            filename_store = "全部门店"
+        elif len(selected_store_names) == 1:
+            filename_store = selected_store_names[0]
+        else:
+            filename_store = "多门店"
+        filename = f"门店排班_{filename_store}_{selected_month}.xlsx"
         return StreamingResponse(
             output,
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

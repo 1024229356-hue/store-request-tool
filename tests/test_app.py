@@ -2627,8 +2627,8 @@ def test_schedule_workbench_supports_view_mode_employee_filter_and_store_summary
     workbook = load_workbook(BytesIO(all_store_export.content))
     rows = list(workbook.active.iter_rows(values_only=True))
     row_prefixes = {row[:9] for row in rows}
-    assert ("南京门东店", "2026-07-06", "周一", "南京主店", "店员", "早班", "09:30", "17:30", 8) in row_prefixes
-    assert ("山城巷店", "2026-07-06", "周一", "山城员工", "店员", "晚班", "14:00", "22:00", 8) in row_prefixes
+    assert ("南京门东店", "南京主店", "2026-07-06", "周一", "早班", "09:30", "17:30", 8, "否") in row_prefixes
+    assert ("山城巷店", "山城员工", "2026-07-06", "周一", "晚班", "14:00", "22:00", 8, "否") in row_prefixes
 
 
 def test_schedule_filters_ignore_empty_numeric_query_values_without_json(tmp_path, monkeypatch):
@@ -3015,6 +3015,7 @@ def test_employee_and_shift_type_management_lifecycle(tmp_path, monkeypatch):
             "end_time": "20:00",
             "duration_hours": "8",
             "color": "#7c3aed",
+            "is_global": "1",
         },
         follow_redirects=False,
     )
@@ -3031,6 +3032,7 @@ def test_employee_and_shift_type_management_lifecycle(tmp_path, monkeypatch):
             "duration_hours": "8",
             "color": "#2563eb",
             "is_active": "1",
+            "is_global": "1",
         },
         follow_redirects=False,
     )
@@ -3085,6 +3087,307 @@ def test_shift_type_page_uses_card_timeline_structure(tmp_path, monkeypatch):
     assert "data-draggable-shift" in page.text
     assert "data-feedback-form" in page.text
     assert "shift-status-pill" in page.text
+
+
+def test_store_specific_shift_types_business_hours_and_schedule_visibility(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch)
+    logged_in_client(client)
+
+    default_shifts = rows_for(tmp_path, "shift_types")
+    assert default_shifts
+    assert all(row["is_global"] == 1 for row in default_shifts)
+    assert all(row["store_name"] in ("", None) for row in default_shifts)
+
+    save_hours = admin_post(
+        client,
+        "/admin/shift-types/business-hours",
+        data={
+            "store_name": "南京门东店",
+            "business_start_time": "09:30",
+            "business_end_time": "22:00",
+        },
+        follow_redirects=False,
+    )
+    assert save_hours.status_code == 303
+    assert rows_for(tmp_path, "store_business_hours")[0]["business_start_time"] == "09:30"
+
+    first_store_shift = admin_post(
+        client,
+        "/admin/shift-types",
+        data={
+            "store_name": "南京门东店",
+            "shift_name": "早班",
+            "start_time": "09:30",
+            "end_time": "17:30",
+            "duration_hours": "8",
+            "color": "#2563eb",
+        },
+        follow_redirects=False,
+    )
+    second_store_shift = admin_post(
+        client,
+        "/admin/shift-types",
+        data={
+            "store_name": "南昌万寿宫店",
+            "shift_name": "早班",
+            "start_time": "10:00",
+            "end_time": "18:00",
+            "duration_hours": "8",
+            "color": "#059669",
+        },
+        follow_redirects=False,
+    )
+
+    assert first_store_shift.status_code == 303
+    assert second_store_shift.status_code == 303
+    shift_rows = rows_for(tmp_path, "shift_types")
+    store_named_morning = [row for row in shift_rows if row["shift_name"] == "早班" and row["is_global"] == 0]
+    assert {row["store_name"] for row in store_named_morning} == {"南京门东店", "南昌万寿宫店"}
+
+    shift_page = client.get("/admin/shift-types?store_names=南京门东店&global_scope=store&status=active")
+    assert shift_page.status_code == 200
+    assert 'name="store_names"' in shift_page.text
+    assert "store-business-hours-card" in shift_page.text
+    assert "09:30" in shift_page.text
+    assert "当前门店未配置营业时间，请先在班次设置中维护。" not in shift_page.text
+
+    create_schedule_employee(client, "南京排班员工", store_name="南京门东店")
+    create_schedule_employee(client, "南昌排班员工", store_name="南昌万寿宫店")
+
+    nanjing_page = client.get("/admin/schedules?store_names=南京门东店&month=2026-07")
+    nanchang_page = client.get("/admin/schedules?store_names=南昌万寿宫店&month=2026-07")
+    assert nanjing_page.status_code == 200
+    assert nanchang_page.status_code == 200
+    assert "09:30-17:30" in nanjing_page.text
+    assert "10:00-18:00" not in nanjing_page.text
+    assert "10:00-18:00" in nanchang_page.text
+    assert "09:30-17:30" in nanchang_page.text  # 通用旧班次仍兼容显示
+
+
+def test_custom_schedule_time_duration_cross_midnight_and_bad_input_html(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch)
+    logged_in_client(client)
+    create_schedule_employee(client, "自定义排班员工")
+
+    custom_response = admin_post(
+        client,
+        "/admin/schedules",
+        data={
+            "store_name": "南京门东店",
+            "employee_ids": ["1"],
+            "schedule_dates": ["2026-07-02"],
+            "schedule_mode": "custom",
+            "custom_label": "加班",
+            "custom_start_time": "18:00",
+            "custom_end_time": "21:00",
+            "note": "盘点支援",
+            "overwrite_existing": "1",
+        },
+        follow_redirects=False,
+    )
+    overnight_response = admin_post(
+        client,
+        "/admin/schedules",
+        data={
+            "store_name": "南京门东店",
+            "employee_ids": ["1"],
+            "schedule_dates": ["2026-07-03"],
+            "schedule_mode": "custom",
+            "custom_label": "夜间盘点",
+            "custom_start_time": "22:00",
+            "custom_end_time": "02:00",
+            "overwrite_existing": "1",
+        },
+        follow_redirects=False,
+    )
+
+    assert custom_response.status_code == 303
+    assert overnight_response.status_code == 303
+    schedules = sorted(rows_for(tmp_path, "store_schedules"), key=lambda row: row["schedule_date"])
+    assert [(row["is_custom_time"], row["custom_label"], row["custom_duration_hours"]) for row in schedules] == [
+        (1, "加班", 3.0),
+        (1, "夜间盘点", 4.0),
+    ]
+
+    table_page = client.get("/admin/schedules?store_names=南京门东店&month=2026-07&view_mode=table")
+    calendar_page = client.get("/admin/schedules?store_names=南京门东店&month=2026-07&view_mode=calendar")
+    assert "shift-badge custom-shift-badge" in table_page.text
+    assert "加班" in table_page.text
+    assert "custom-shift-badge" in calendar_page.text
+    assert "夜间盘点" in calendar_page.text
+
+    bad_custom = admin_post(
+        client,
+        "/admin/schedules",
+        data={
+            "store_name": "南京门东店",
+            "employee_ids": ["1"],
+            "schedule_dates": ["2026-07-04"],
+            "schedule_mode": "custom",
+            "custom_label": "缺时间",
+            "custom_start_time": "",
+            "custom_end_time": "",
+        },
+        follow_redirects=False,
+    )
+    assert bad_custom.status_code == 303
+    bad_page = client.get(bad_custom.headers["location"])
+    assert "自定义时间必须填写开始时间和结束时间" in bad_page.text
+    assert "alert-error" in bad_page.text
+    assert '{"detail":' not in bad_page.text
+
+
+def test_schedule_multi_select_filters_dashboard_and_exports(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch)
+    logged_in_client(client)
+    month = date.today().strftime("%Y-%m")
+    first_day = f"{month}-01"
+    second_day = f"{month}-02"
+    create_schedule_employee(client, "南京看板员工", store_name="南京门东店")
+    create_schedule_employee(client, "南昌看板员工", store_name="南昌万寿宫店")
+    create_schedule_employee(client, "离职看板员工", store_name="山城巷店", status="离职")
+
+    admin_post(
+        client,
+        "/admin/schedules",
+        data={
+            "store_name": "南京门东店",
+            "employee_ids": ["1"],
+            "schedule_dates": [first_day],
+            "shift_type_id": "1",
+            "overwrite_existing": "1",
+        },
+        follow_redirects=False,
+    )
+    admin_post(
+        client,
+        "/admin/schedules",
+        data={
+            "store_name": "南昌万寿宫店",
+            "employee_ids": ["2"],
+            "schedule_dates": [second_day],
+            "schedule_mode": "custom",
+            "custom_label": "加班",
+            "custom_start_time": "18:00",
+            "custom_end_time": "21:00",
+            "overwrite_existing": "1",
+        },
+        follow_redirects=False,
+    )
+    admin_post(
+        client,
+        "/admin/schedules",
+        data={
+            "store_name": "南京门东店",
+            "employee_ids": ["1"],
+            "schedule_dates": [f"{month}-03"],
+            "shift_type_id": "4",
+            "overwrite_existing": "1",
+        },
+        follow_redirects=False,
+    )
+
+    page = client.get(
+        "/admin/schedules",
+        params=[
+            ("store_names", "南京门东店"),
+            ("store_names", "南昌万寿宫店"),
+            ("month", month),
+            ("view_mode", "store-summary"),
+            ("employee_statuses", "在职"),
+            ("shift_type_ids", "1"),
+            ("shift_type_ids", "custom"),
+            ("shift_type_ids", ""),
+            ("employee_ids", ""),
+        ],
+    )
+    assert page.status_code == 200
+    assert "text/html" in page.headers["content-type"]
+    assert '{"detail":' not in page.text
+    assert 'name="store_names"' in page.text
+    assert 'name="employee_statuses"' in page.text
+    assert 'name="shift_type_ids"' in page.text
+    assert "已选 2 个门店" in page.text
+    assert "当前为多门店查看模式，请选择单个门店后进行排班。" in page.text
+    assert "排班看板" in page.text
+    assert "当月已排工时" in page.text
+    assert "截至当前日期已排工时" in page.text
+    assert "当月排班人次" in page.text
+    assert "当月排班人数" in page.text
+    assert "自定义/加班班次数" in page.text
+    assert "休息班次数" in page.text
+    assert "南京门东店" in page.text
+    assert "南昌万寿宫店" in page.text
+
+    multi_store_post = admin_post(
+        client,
+        "/admin/schedules",
+        data={
+            "store_names": ["南京门东店", "南昌万寿宫店"],
+            "employee_ids": ["1"],
+            "schedule_dates": [first_day],
+            "shift_type_id": "1",
+        },
+        follow_redirects=False,
+    )
+    assert multi_store_post.status_code == 303
+    assert "请选择单个具体门店后进行排班操作" in client.get(multi_store_post.headers["location"]).text
+
+    multi_export = client.get(
+        "/admin/schedules/export",
+        params=[("store_names", "南京门东店"), ("store_names", "南昌万寿宫店"), ("month", month)],
+    )
+    all_export = client.get(f"/admin/schedules/export?month={month}")
+    single_export = client.get(f"/admin/schedules/export?store_names=南京门东店&month={month}")
+    assert multi_export.status_code == 200
+    assert all_export.status_code == 200
+    assert single_export.status_code == 200
+    assert quote(f"门店排班_多门店_{month}.xlsx") in multi_export.headers["content-disposition"]
+    assert quote(f"门店排班_全部门店_{month}.xlsx") in all_export.headers["content-disposition"]
+    assert quote(f"门店排班_南京门东店_{month}.xlsx") in single_export.headers["content-disposition"]
+
+    workbook = load_workbook(BytesIO(multi_export.content))
+    rows = list(workbook.active.iter_rows(values_only=True))
+    assert rows[0] == ("门店", "员工", "日期", "星期", "班次", "开始时间", "结束时间", "工时", "是否自定义", "备注")
+    assert any(row[:9] == ("南京门东店", "南京看板员工", first_day, "周三", "早班", "09:30", "17:30", 8, "否") for row in rows)
+    assert any(row[:9] == ("南昌万寿宫店", "南昌看板员工", second_day, "周四", "加班", "18:00", "21:00", 3, "是") for row in rows)
+
+
+def test_store_specific_shift_cannot_be_used_for_other_store(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch)
+    logged_in_client(client)
+    create_schedule_employee(client, "南京员工", store_name="南京门东店")
+    admin_post(
+        client,
+        "/admin/shift-types",
+        data={
+            "store_name": "南昌万寿宫店",
+            "shift_name": "南昌专属晚班",
+            "start_time": "15:00",
+            "end_time": "23:00",
+            "duration_hours": "8",
+            "color": "#7c3aed",
+        },
+        follow_redirects=False,
+    )
+    nanchang_shift_id = rows_for(tmp_path, "shift_types")[-1]["id"]
+
+    response = admin_post(
+        client,
+        "/admin/schedules",
+        data={
+            "store_name": "南京门东店",
+            "employee_ids": ["1"],
+            "schedule_dates": ["2026-07-08"],
+            "shift_type_id": str(nanchang_shift_id),
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    page = client.get(response.headers["location"])
+    assert "班次不属于当前门店" in page.text
+    assert rows_for(tmp_path, "store_schedules") == []
 
 
 def test_admin_schedule_interaction_js_feedback_contract():
@@ -3268,11 +3571,11 @@ def test_schedule_create_update_validation_public_view_export_and_logs(tmp_path,
 
     export_response = client.get("/admin/schedules/export?store_name=南京门东店&month=2026-07")
     assert export_response.status_code == 200
-    assert "%E9%97%A8%E5%BA%97%E6%8E%92%E7%8F%AD_%E5%8D%97%E4%BA%AC%E9%97%A8%E4%B8%9C%E5%BA%97_202607.xlsx" in export_response.headers["content-disposition"]
+    assert "%E9%97%A8%E5%BA%97%E6%8E%92%E7%8F%AD_%E5%8D%97%E4%BA%AC%E9%97%A8%E4%B8%9C%E5%BA%97_2026-07.xlsx" in export_response.headers["content-disposition"]
     workbook = load_workbook(BytesIO(export_response.content))
     values = list(workbook.active.iter_rows(values_only=True))
-    assert values[0] == ("门店", "日期", "星期", "员工", "角色", "班次", "开始时间", "结束时间", "工时", "备注")
-    assert ("南京门东店", "2026-07-06", "周一", "王早班", "店员", "晚班", "14:00", "22:00", 8, "改晚班") in values
+    assert values[0] == ("门店", "员工", "日期", "星期", "班次", "开始时间", "结束时间", "工时", "是否自定义", "备注")
+    assert ("南京门东店", "王早班", "2026-07-06", "周一", "晚班", "14:00", "22:00", 8, "否", "改晚班") in values
 
     delete_schedule = admin_post(client, "/admin/schedules/1/delete", follow_redirects=False)
     assert delete_schedule.status_code == 303

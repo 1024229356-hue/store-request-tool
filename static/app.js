@@ -61,6 +61,8 @@ function initializeStoreRequestApp() {
   const selectWeekdaysButton = document.querySelector("[data-select-weekdays]");
   const selectWeekendsButton = document.querySelector("[data-select-weekends]");
   const clearScheduleDatesButton = document.querySelector("[data-clear-schedule-dates]");
+  const customScheduleMode = document.querySelector("[data-custom-schedule-mode]");
+  const customScheduleFields = document.querySelector("[data-custom-schedule-fields]");
 
   let selectedImages = [];
   let selectedFiles = [];
@@ -296,6 +298,17 @@ function initializeStoreRequestApp() {
     const maxCount = Number(scheduleBulkForm.dataset.maxBulkScheduleCount || 0);
     scheduleBulkSummary.textContent = `已选 ${employeeCount} 名员工 × ${dateCount} 天 = 将生成 ${total} 条排班`;
     scheduleBulkSummary.classList.toggle("is-over-limit", Boolean(maxCount && total > maxCount));
+  }
+
+  function updateCustomScheduleFields() {
+    if (!customScheduleMode || !customScheduleFields) {
+      return;
+    }
+    const isCustom = customScheduleMode.value === "custom";
+    customScheduleFields.hidden = !isCustom;
+    Array.from(customScheduleFields.querySelectorAll("input, select, textarea")).forEach((field) => {
+      field.disabled = !isCustom;
+    });
   }
 
   function setScheduleInputsChecked(inputs, checked) {
@@ -930,6 +943,10 @@ function initializeStoreRequestApp() {
   }
 
   if (scheduleBulkForm) {
+    updateCustomScheduleFields();
+    if (customScheduleMode) {
+      customScheduleMode.addEventListener("change", updateCustomScheduleFields);
+    }
     scheduleEmployeeInputs().forEach((input) => input.addEventListener("change", updateScheduleBulkSummary));
     scheduleDateInputs().forEach((input) => input.addEventListener("change", updateScheduleBulkSummary));
   if (selectAllEmployeesButton) {
