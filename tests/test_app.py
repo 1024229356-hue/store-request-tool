@@ -2,8 +2,10 @@ import base64
 import html
 import importlib
 import json
+import os
 import re
 import sqlite3
+import subprocess
 import sys
 import zipfile
 from datetime import date, timedelta
@@ -1990,7 +1992,7 @@ def test_access_url_docs_run_bat_and_asset_versions_are_stable():
     assert "兼容地址" in readme
 
     run_bat = (PROJECT_DIR / "run.bat").read_text(encoding="utf-8")
-    assert "止痒 ERP 本地服务启动信息" in run_bat
+    assert "Store Request Tool startup" in run_bat
     assert "PORT=8701" in run_bat
     assert "PID" in run_bat
     assert "WARNING" in run_bat
@@ -2045,6 +2047,7 @@ def test_admin_not_found_uses_diagnostic_html(tmp_path, monkeypatch):
 
 def test_run_bat_prints_startup_route_diagnostics():
     content = (PROJECT_DIR / "run.bat").read_text(encoding="utf-8")
+    raw_content = (PROJECT_DIR / "run.bat").read_bytes()
 
     assert "PYTHONUTF8=1" in content
     assert "PYTHONIOENCODING=utf-8" in content
@@ -2056,6 +2059,70 @@ def test_run_bat_prints_startup_route_diagnostics():
     assert "MISSING_ROUTES=" in content
     assert "Critical routes missing. Do not continue startup." in content
     assert "python -m uvicorn main:app --host 127.0.0.1 --port 8701" in content
+    assert "startup_check.py" in content
+    assert "pause" in content.lower()
+    assert raw_content.count(b"\r\n") > 20
+    assert raw_content.count(b"\n") == raw_content.count(b"\r\n")
+
+
+def test_startup_diagnostics_scripts_are_present_and_safe(tmp_path, monkeypatch):
+    startup_check = PROJECT_DIR / "startup_check.py"
+    run_debug = PROJECT_DIR / "run_debug.bat"
+    gitignore = (PROJECT_DIR / ".gitignore").read_text(encoding="utf-8")
+
+    assert startup_check.exists()
+    startup_text = startup_check.read_text(encoding="utf-8")
+    for package_name in ("fastapi", "uvicorn", "jinja2", "openpyxl", "PIL"):
+        assert package_name in startup_text
+    for route_path in (
+        "/submit",
+        "/query",
+        "/admin/login",
+        "/admin/dashboard",
+        "/admin",
+        "/admin/schedules",
+        "/admin/employees",
+        "/admin/shift-types",
+        "/__version",
+        "/healthz",
+    ):
+        assert route_path in startup_text
+
+    debug_text = run_debug.read_text(encoding="utf-8")
+    debug_bytes = run_debug.read_bytes()
+    assert "logs\\startup.log" in debug_text
+    assert "startup_check.py" in debug_text
+    assert "uvicorn" in debug_text
+    assert "pause" in debug_text.lower()
+    assert "2>&1" in debug_text
+    assert debug_bytes.count(b"\r\n") > 20
+    assert debug_bytes.count(b"\n") == debug_bytes.count(b"\r\n")
+    assert "logs/" in gitignore
+
+    env = os.environ.copy()
+    env["STORE_REQUEST_DB_PATH"] = str(tmp_path / "tickets.db")
+    env["STORE_REQUEST_UPLOAD_DIR"] = str(tmp_path / "uploads")
+    env["STORE_REQUEST_CONFIG_DIR"] = str(tmp_path / "config")
+    env["ADMIN_USERNAME"] = ADMIN_AUTH[0]
+    env["ADMIN_PASSWORD"] = ADMIN_AUTH[1]
+    env["SESSION_SECRET"] = "test-session-secret"
+    result = subprocess.run(
+        [sys.executable, str(startup_check), "--format", "json"],
+        cwd=PROJECT_DIR,
+        env=env,
+        text=True,
+        encoding="utf-8",
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+    assert payload["main_imported"] is True
+    assert payload["app_exists"] is True
+    assert payload["missing_routes"] == []
+    assert payload["route_count"] > 0
 
 
 def test_modal_open_and_close_controls_do_not_submit_or_navigate():

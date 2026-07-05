@@ -1,113 +1,130 @@
 @echo off
+setlocal EnableExtensions
 chcp 65001 >nul
 set "PYTHONUTF8=1"
 set "PYTHONIOENCODING=utf-8"
 set "PORT=8701"
-cd /d "%~dp0"
+cd /d "%~dp0" || goto cd_failed
 
-if not exist ".venv\Scripts\python.exe" (
-    echo Creating local Python virtual environment...
-    where py >nul 2>nul
-    if %errorlevel%==0 (
-        py -3 -m venv .venv
-    ) else (
-        python -m venv .venv
-    )
-    if errorlevel 1 (
-        echo Failed to create virtual environment. Please install Python 3 first.
-        pause
-        exit /b 1
-    )
+echo.
+echo ==============================
+echo Store Request Tool startup
+echo ==============================
+echo CURRENT_DIR=%CD%
+echo PORT=%PORT%
+echo GIT_COMMIT=reported by startup_check.py
+echo MAIN_FILE=reported by startup_check.py
+echo ROUTE_COUNT=reported by startup_check.py
+echo MISSING_ROUTES=reported by startup_check.py
+
+if exist ".venv\Scripts\python.exe" goto venv_ready
+
+echo Creating local Python virtual environment...
+where py >nul 2>nul
+if not errorlevel 1 (
+    py -3 -m venv .venv
+    goto check_venv
 )
+
+where python >nul 2>nul
+if errorlevel 1 goto python_missing
+python -m venv .venv
+
+:check_venv
+if errorlevel 1 goto venv_failed
+if not exist ".venv\Scripts\python.exe" goto venv_failed
+
+:venv_ready
+set "PYTHON_EXE=%CD%\.venv\Scripts\python.exe"
+echo PYTHON_EXE=%PYTHON_EXE%
 
 call ".venv\Scripts\activate.bat"
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-if errorlevel 1 (
-    echo Failed to install dependencies. Please check network or Python.
-    pause
-    exit /b 1
-)
+if errorlevel 1 goto activate_failed
 
-set "GIT_EXE="
-where git >nul 2>nul
-if %errorlevel%==0 set "GIT_EXE=git"
-if not defined GIT_EXE if exist "C:\Program Files\Git\cmd\git.exe" set "GIT_EXE=C:\Program Files\Git\cmd\git.exe"
-if not defined GIT_EXE if exist "C:\Program Files\Git\bin\git.exe" set "GIT_EXE=C:\Program Files\Git\bin\git.exe"
-set "GIT_COMMIT=unknown"
-if defined GIT_EXE (
-    for /f "usebackq tokens=*" %%i in (`"%GIT_EXE%" rev-parse --short HEAD 2^>nul`) do set "GIT_COMMIT=%%i"
-)
+echo Installing dependencies...
+python -m pip install --upgrade pip
+if errorlevel 1 goto pip_failed
+python -m pip install -r requirements.txt
+if errorlevel 1 goto requirements_failed
+
+echo Running startup diagnostics...
+python startup_check.py --format text
+if errorlevel 1 goto startup_check_failed
 
 set "PORT_PID="
-for /f "tokens=5" %%p in ('netstat -ano ^| findstr /R /C:":%PORT% .*LISTENING"') do (
-    if not defined PORT_PID set "PORT_PID=%%p"
-)
+for /f "tokens=5" %%p in ('netstat -ano ^| findstr /R /C:":%PORT% .*LISTENING"') do set "PORT_PID=%%p"
+if defined PORT_PID goto port_busy
 
 echo.
-echo ==============================
-echo 止痒 ERP 本地服务启动信息
-echo ==============================
-echo 项目目录：%CD%
-echo CURRENT_DIR=%CD%
-echo 当前版本：%GIT_COMMIT%
-echo 端口：%PORT%
-echo PORT=%PORT%
-python -c "import sys; print('Python 路径：' + sys.executable); print('PYTHON_EXE=' + sys.executable)"
-python -c "import main, sys; missing=main.required_missing_routes(main.app); print('main.py 路径：' + str(main.BASE_DIR / 'main.py')); print('MAIN_FILE=' + str(main.BASE_DIR / 'main.py')); print('ROUTE_COUNT=' + str(len(main.app.routes))); print('关键路由缺失情况：' + ('无' if not missing else ', '.join(missing))); print('MISSING_ROUTES=' + ('[]' if not missing else ','.join(missing))); sys.exit(1 if missing else 0)"
-if errorlevel 1 (
-    echo WARNING: Critical routes missing. Do not continue startup.
-    pause
-    exit /b 1
-)
-
-if defined PORT_PID (
-    echo WARNING: Port %PORT% is already in use by PID %PORT_PID%.
-    echo PID=%PORT_PID%
-    tasklist /FI "PID eq %PORT_PID%"
-    pause
-    exit /b 1
-)
-
-echo.
-echo 门店提交：
-echo http://127.0.0.1:8701/submit
-echo.
-echo 门店查询：
-echo http://127.0.0.1:8701/query
-echo.
-echo 后台登录：
-echo http://127.0.0.1:8701/admin/login
-echo.
-echo 业务总览：
-echo http://127.0.0.1:8701/admin/dashboard
-echo.
-echo 工单管理：
-echo http://127.0.0.1:8701/admin
-echo.
-echo 门店排班：
-echo http://127.0.0.1:8701/admin/schedules
-echo.
-echo 员工管理：
-echo http://127.0.0.1:8701/admin/employees
-echo.
-echo 班次设置：
-echo http://127.0.0.1:8701/admin/shift-types
-echo.
-echo 嵌入页面管理：
-echo http://127.0.0.1:8701/admin/embedded-pages
-echo.
-echo 运行版本：
-echo http://127.0.0.1:8701/__version
-echo.
-echo 健康检查：
-echo http://127.0.0.1:8701/healthz
-echo.
-echo 路由体检：
-echo http://127.0.0.1:8701/admin/route-health
+echo Standard URLs:
+echo Submit:        http://127.0.0.1:8701/submit
+echo Query:         http://127.0.0.1:8701/query
+echo Admin login:   http://127.0.0.1:8701/admin/login
+echo Dashboard:     http://127.0.0.1:8701/admin/dashboard
+echo Tickets:       http://127.0.0.1:8701/admin
+echo Schedules:     http://127.0.0.1:8701/admin/schedules
+echo Employees:     http://127.0.0.1:8701/admin/employees
+echo Shift types:   http://127.0.0.1:8701/admin/shift-types
+echo Embedded:      http://127.0.0.1:8701/admin/embedded-pages
+echo Version:       http://127.0.0.1:8701/__version
+echo Health:        http://127.0.0.1:8701/healthz
+echo Route health:  http://127.0.0.1:8701/admin/route-health
 echo ==============================
 echo.
-
 echo Starting service...
 python -m uvicorn main:app --host 127.0.0.1 --port 8701
+if errorlevel 1 goto uvicorn_failed
+echo Service stopped.
 pause
+exit /b 0
+
+:cd_failed
+echo ERROR: Cannot enter project directory.
+pause
+exit /b 1
+
+:python_missing
+echo ERROR: Python was not found. Please install Python 3 and run this script again.
+pause
+exit /b 1
+
+:venv_failed
+echo ERROR: Failed to create .venv.
+pause
+exit /b 1
+
+:activate_failed
+echo ERROR: Failed to activate .venv.
+pause
+exit /b 1
+
+:pip_failed
+echo ERROR: Failed to upgrade pip.
+pause
+exit /b 1
+
+:requirements_failed
+echo ERROR: requirements.txt installation failed.
+pause
+exit /b 1
+
+:startup_check_failed
+echo WARNING: Critical routes missing. Do not continue startup.
+echo ERROR: startup_check.py failed. Run run_debug.bat and inspect logs\startup.log for full details.
+pause
+exit /b 1
+
+:port_busy
+echo WARNING: Port %PORT% is already in use by PID %PORT_PID%.
+echo PID=%PORT_PID%
+tasklist /FI "PID eq %PORT_PID%"
+echo If this is a stale python.exe from this project, you can close it or run:
+echo taskkill /PID %PORT_PID% /F
+pause
+exit /b 1
+
+:uvicorn_failed
+echo ERROR: uvicorn failed to start.
+echo Run run_debug.bat and inspect logs\startup.log for full traceback.
+pause
+exit /b 1

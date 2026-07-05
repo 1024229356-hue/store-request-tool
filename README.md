@@ -12,6 +12,14 @@
 python -m uvicorn main:app --host 127.0.0.1 --port 8701
 ```
 
+如果双击后窗口关闭或服务没有启动，请双击 `run_debug.bat`。它会把完整启动过程写入 `logs/startup.log`，包括当前目录、Python 路径、Git commit、`main.py` 路径、路由数量、缺失路由和 8701 端口占用情况。`logs/` 属于本地诊断输出，不提交 GitHub。
+
+也可以手动运行启动自检：
+
+```bat
+.venv\Scripts\python.exe startup_check.py --format text
+```
+
 首次启动会自动初始化 `data/tickets.db`，并自动创建 `uploads` 目录。
 后续版本升级时，系统启动也会自动补齐缺失的数据表和字段，不需要删除数据库。
 

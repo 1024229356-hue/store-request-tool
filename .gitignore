@@ -6,6 +6,7 @@ data/embedded_pages/
 uploads/
 backups/
 *.log
+logs/
 .venv/
 venv/
 __pycache__/
