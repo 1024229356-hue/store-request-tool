@@ -1861,7 +1861,7 @@ def test_run_bat_prints_startup_route_diagnostics():
 
 
 def test_modal_open_and_close_controls_do_not_submit_or_navigate():
-    for template_name in ("employees.html", "schedules.html", "shift_types.html"):
+    for template_name in ("admin.html", "employees.html", "schedules.html", "shift_types.html"):
         text = (PROJECT_DIR / "templates" / template_name).read_text(encoding="utf-8")
         for match in re.finditer(r"<(?P<tag>\w+)\b[^>]*\bdata-modal-open\b[^>]*>", text, re.IGNORECASE):
             tag = match.group(0)
@@ -1872,6 +1872,130 @@ def test_modal_open_and_close_controls_do_not_submit_or_navigate():
             assert match.group("tag").lower() == "button", f"{template_name}: {tag}"
             assert re.search(r'\btype\s*=\s*(["\'])button\1', tag, re.IGNORECASE), f"{template_name}: {tag}"
         assert not re.search(r"<a\b[^>]*\bdata-modal-open\b", text, re.IGNORECASE), template_name
+
+
+def test_admin_ticket_create_uses_modal_form_not_page_link(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch, config_overrides={"brands.json": ["ModalBrand"]})
+    logged_in_client(client)
+
+    page = client.get("/admin")
+
+    assert page.status_code == 200
+    assert 'data-modal="ticket-create-modal"' in page.text
+    assert "data-modal-overlay" in page.text
+    assert 'data-modal-open="ticket-create-modal"' in page.text
+    assert 'data-admin-ticket-create-form' in page.text
+    assert 'action="/admin/tickets/create"' in page.text
+    assert 'method="post"' in page.text
+    assert 'enctype="multipart/form-data"' in page.text
+    assert 'name="csrf_token"' in page.text
+    for field_name in (
+        "store_names",
+        "submitter",
+        "request_type",
+        "urgency",
+        "brands",
+        "brand_extra",
+        "product_name",
+        "sku_barcode",
+        "quantity",
+        "description",
+        "expected_finish_date",
+        "images",
+        "files",
+    ):
+        assert f'name="{field_name}"' in page.text
+    assert re.search(
+        r"<button\b[^>]*\btype=(['\"])button\1[^>]*\bdata-modal-open=(['\"])ticket-create-modal\2",
+        page.text,
+        re.IGNORECASE,
+    )
+    assert not re.search(r"<a\b[^>]*\bdata-modal-open\b", page.text, re.IGNORECASE)
+
+
+def test_admin_ticket_create_json_success_and_inline_error(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch)
+    logged_in_client(client)
+    store_name = DEFAULT_TEST_CONFIG["stores.json"][0]
+    request_type = DEFAULT_TEST_CONFIG["request_types.json"][0]
+    urgency = DEFAULT_TEST_CONFIG["urgency_levels.json"][0]
+
+    response = admin_post(
+        client,
+        "/admin/tickets/create",
+        data={
+            "store_names": [store_name],
+            "submitter": "Admin modal",
+            "request_type": request_type,
+            "urgency": urgency,
+            "description": "created from admin modal",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/json")
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["ticket_id"] == 1
+    assert payload["ticket_no"]
+    assert "message" in payload
+    tickets = rows_for(tmp_path, "tickets")
+    assert len(tickets) == 1
+    assert tickets[0]["submitter"] == "Admin modal"
+    assert tickets[0]["description"] == "created from admin modal"
+
+    error_response = admin_post(
+        client,
+        "/admin/tickets/create",
+        data={
+            "submitter": "",
+            "request_type": request_type,
+            "urgency": urgency,
+            "description": "",
+        },
+    )
+
+    assert error_response.status_code == 400
+    assert error_response.headers["content-type"].startswith("application/json")
+    error_payload = error_response.json()
+    assert error_payload["ok"] is False
+    assert error_payload["error"]
+    assert "detail" not in error_payload
+
+
+def test_submit_page_remains_compatible_after_ticket_create_modal(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch)
+
+    page = client.get("/submit")
+    response = submit_ticket(client, description="standalone submit still works")
+
+    assert page.status_code == 200
+    assert 'action="/submit"' in page.text
+    assert response.status_code == 200
+    assert "submit_success" in response.text or "ticket_no" in response.text or rows_for(tmp_path, "tickets")
+    assert rows_for(tmp_path, "tickets")[0]["description"] == "standalone submit still works"
+
+
+def test_ticket_create_modal_js_and_css_contract():
+    app_js = (PROJECT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+    style_css = (PROJECT_DIR / "static" / "style.css").read_text(encoding="utf-8")
+
+    assert "window.openModal" in app_js
+    assert "window.closeModal" in app_js
+    assert "data-admin-ticket-create-form" in app_js
+    assert "fetch(form.action" in app_js
+    assert "data-modal-error" in app_js
+    assert "window.location.reload" in app_js
+    assert "Escape" in app_js
+    assert "data-modal-overlay" in app_js
+    for selector in (
+        ".modal-overlay",
+        ".modal-container",
+        ".modal-header",
+        ".modal-body",
+        ".modal-footer",
+    ):
+        assert selector in style_css
 
 
 def test_bulk_pages_use_native_form_submission_without_dynamic_ticket_inputs(tmp_path, monkeypatch):
@@ -2168,6 +2292,7 @@ def create_schedule_employee(client, name, store_name="南京门东店", role="�
         data={
             "employee_name": name,
             "store_name": store_name,
+            "primary_store_name": store_name,
             "store_names": selected_stores,
             "role": role,
             "phone": "",
@@ -2238,6 +2363,90 @@ def test_employee_store_map_filters_schedule_employees_and_allows_cross_store_st
     assert len(rows_for(tmp_path, "store_schedules")) == 1
 
 
+def test_employee_primary_store_bindings_and_archive_trash_workflow(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch)
+    logged_in_client(client)
+
+    employee_page = client.get("/admin/employees")
+    assert employee_page.status_code == 200
+    assert 'name="primary_store_name"' in employee_page.text
+    assert "员工主要归属门店" in employee_page.text
+    assert 'type="checkbox"' in employee_page.text
+    assert 'name="store_names"' in employee_page.text
+
+    create_response = admin_post(
+        client,
+        "/admin/employees",
+        data={
+            "employee_name": "主店南京支援南昌",
+            "primary_store_name": "南京门东店",
+            "store_names": ["南昌万寿宫店"],
+            "role": "店员",
+            "phone": "13800000000",
+            "status": "在职",
+        },
+        follow_redirects=False,
+    )
+    assert create_response.status_code == 303
+    employee = rows_for(tmp_path, "employees")[0]
+    assert employee["store_name"] == "南京门东店"
+    assert employee["primary_store_name"] == "南京门东店"
+    assert [(row["employee_id"], row["store_name"]) for row in rows_for(tmp_path, "employee_store_map")] == [
+        (1, "南京门东店"),
+        (1, "南昌万寿宫店"),
+    ]
+
+    archive_response = admin_post(client, "/admin/employees/1/archive", data={"archive_reason": "历史员工"}, follow_redirects=False)
+    assert archive_response.status_code == 303
+    archived_employee = rows_for(tmp_path, "employees")[0]
+    assert archived_employee["archived_at"]
+    assert archived_employee["archived_by"] == ADMIN_AUTH[0]
+    assert archived_employee["archive_reason"] == "历史员工"
+    assert "主店南京支援南昌" not in client.get("/admin/employees").text
+    assert "主店南京支援南昌" not in client.get("/admin/schedules?store_name=南京门东店&month=2026-07").text
+    assert "主店南京支援南昌" in client.get("/admin/employees?scope=archive").text
+
+    unarchive_response = admin_post(client, "/admin/employees/1/unarchive", follow_redirects=False)
+    assert unarchive_response.status_code == 303
+    assert rows_for(tmp_path, "employees")[0]["archived_at"] is None
+    assert "主店南京支援南昌" in client.get("/admin/employees").text
+
+    delete_response = admin_post(client, "/admin/employees/1/delete", data={"delete_reason": "测试清理"}, follow_redirects=False)
+    assert delete_response.status_code == 303
+    deleted_employee = rows_for(tmp_path, "employees")[0]
+    assert deleted_employee["deleted_at"]
+    assert deleted_employee["deleted_by"] == ADMIN_AUTH[0]
+    assert "主店南京支援南昌" not in client.get("/admin/employees").text
+    assert "主店南京支援南昌" in client.get("/admin/employees?scope=trash").text
+
+    restore_response = admin_post(client, "/admin/employees/1/restore", follow_redirects=False)
+    assert restore_response.status_code == 303
+    assert rows_for(tmp_path, "employees")[0]["deleted_at"] is None
+
+    admin_post(
+        client,
+        "/admin/schedules",
+        data={
+            "store_name": "南京门东店",
+            "employee_ids": ["1"],
+            "schedule_dates": ["2026-07-06"],
+            "shift_type_id": "1",
+            "overwrite_existing": "1",
+        },
+        follow_redirects=False,
+    )
+    admin_post(client, "/admin/employees/1/delete", follow_redirects=False)
+    hard_delete_blocked = admin_post(
+        client,
+        "/admin/employees/1/hard-delete",
+        data={"confirm_delete": "1"},
+        follow_redirects=False,
+    )
+    assert hard_delete_blocked.status_code == 303
+    assert "该员工已有排班记录，建议归档而不是永久删除" in client.get(hard_delete_blocked.headers["location"]).text
+    assert rows_for(tmp_path, "employees")
+
+
 def test_schedule_page_exposes_bulk_employee_and_date_controls(tmp_path, monkeypatch):
     client, _ = build_client(tmp_path, monkeypatch)
     logged_in_client(client)
@@ -2261,6 +2470,165 @@ def test_schedule_page_exposes_bulk_employee_and_date_controls(tmp_path, monkeyp
     assert "schedule-bulk-summary" in page.text
     assert "王早班" in page.text
     assert "值班员" in page.text
+
+
+def test_schedule_page_has_saas_layers_and_three_views(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch)
+    logged_in_client(client)
+    store_name = DEFAULT_TEST_CONFIG["stores.json"][0]
+    create_schedule_employee(client, "EmpMorning", store_name=store_name, role="Crew")
+    create_schedule_employee(client, "EmpEvening", store_name=store_name, role="Lead")
+    admin_post(
+        client,
+        "/admin/schedules",
+        data={
+            "store_name": store_name,
+            "employee_ids": ["1", "2"],
+            "schedule_dates": ["2026-07-06", "2026-07-07"],
+            "shift_type_id": "1",
+            "note": "ops-view",
+            "overwrite_existing": "1",
+        },
+        follow_redirects=False,
+    )
+
+    calendar_page = client.get(
+        "/admin/schedules",
+        params={"store_name": store_name, "month": "2026-07", "view": "calendar"},
+    )
+
+    assert calendar_page.status_code == 200
+    assert "schedule-workbench" in calendar_page.text
+    assert "schedule-action-layer" in calendar_page.text
+    assert "schedule-filter-layer" in calendar_page.text
+    assert "schedule-data-layer" in calendar_page.text
+    assert "schedule-view-switch" in calendar_page.text
+    assert 'data-schedule-view="calendar"' in calendar_page.text
+    assert "view_mode=table" in calendar_page.text
+    assert "view_mode=calendar" in calendar_page.text
+    assert "view_mode=employee" in calendar_page.text
+    assert "view_mode=store-summary" in calendar_page.text
+    assert "schedule-calendar-grid" in calendar_page.text
+    assert "schedule-calendar-day" in calendar_page.text
+    assert "schedule-calendar-shift" in calendar_page.text
+    assert "data-schedule-edit" in calendar_page.text
+    assert re.search(r"<button\b[^>]*\btype=(['\"])button\1[^>]*\bdata-schedule-edit\b", calendar_page.text)
+
+    employee_page = client.get(
+        "/admin/schedules",
+        params={"store_name": store_name, "month": "2026-07", "view": "employee"},
+    )
+
+    assert employee_page.status_code == 200
+    assert 'data-schedule-view="employee"' in employee_page.text
+    assert "schedule-employee-view" in employee_page.text
+    assert "schedule-employee-card" in employee_page.text
+    assert "employee-timeline" in employee_page.text
+    assert "metric-hours" in employee_page.text
+    assert "metric-days" in employee_page.text
+
+
+def test_schedule_cross_store_toggle_tags_external_staff(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch)
+    logged_in_client(client)
+    current_store = DEFAULT_TEST_CONFIG["stores.json"][0]
+    other_store = DEFAULT_TEST_CONFIG["stores.json"][2]
+    create_schedule_employee(client, "LocalEmp", store_name=current_store)
+    create_schedule_employee(client, "OtherStoreEmp", store_name=other_store)
+    create_schedule_employee(client, "SharedEmp", store_name=DEFAULT_TEST_CONFIG["stores.json"][1], store_names=[current_store, DEFAULT_TEST_CONFIG["stores.json"][1]])
+
+    default_page = client.get("/admin/schedules", params={"store_name": current_store, "month": "2026-07"})
+    primary_page = client.get("/admin/schedules", params={"store_name": current_store, "month": "2026-07", "employee_scope": "primary"})
+    support_page = client.get("/admin/schedules", params={"store_name": current_store, "month": "2026-07", "employee_scope": "support"})
+
+    assert default_page.status_code == 200
+    assert "LocalEmp" in default_page.text
+    assert "SharedEmp" in default_page.text
+    assert "OtherStoreEmp" not in default_page.text
+    assert primary_page.status_code == 200
+    assert "LocalEmp" in primary_page.text
+    assert "SharedEmp" not in primary_page.text
+    assert support_page.status_code == 200
+    assert "SharedEmp" in support_page.text
+    assert "LocalEmp" not in support_page.text
+    assert "OtherStoreEmp" not in support_page.text
+    assert "store-tag-primary" in support_page.text
+    assert "store-tag-available" in support_page.text
+    assert "cross-store-readonly" not in support_page.text
+
+
+def test_schedule_workbench_supports_view_mode_employee_filter_and_store_summary(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch)
+    logged_in_client(client)
+    create_schedule_employee(client, "南京主店", store_name="南京门东店")
+    create_schedule_employee(client, "南昌支援南京", store_name="南昌万寿宫店", store_names=["南昌万寿宫店", "南京门东店"])
+    create_schedule_employee(client, "山城员工", store_name="山城巷店")
+    admin_post(
+        client,
+        "/admin/schedules",
+        data={
+            "store_name": "南京门东店",
+            "employee_ids": ["1", "2"],
+            "schedule_dates": ["2026-07-06", "2026-07-07"],
+            "shift_type_id": "1",
+            "overwrite_existing": "1",
+        },
+        follow_redirects=False,
+    )
+    admin_post(
+        client,
+        "/admin/schedules",
+        data={
+            "store_name": "山城巷店",
+            "employee_ids": ["3"],
+            "schedule_dates": ["2026-07-06"],
+            "shift_type_id": "2",
+            "overwrite_existing": "1",
+        },
+        follow_redirects=False,
+    )
+
+    calendar_page = client.get("/admin/schedules?store_name=南京门东店&month=2026-07&view_mode=calendar")
+    assert calendar_page.status_code == 200
+    assert 'data-schedule-view="calendar"' in calendar_page.text
+    assert "schedule-calendar-summary" in calendar_page.text
+    assert "早班 2 人" in calendar_page.text
+    assert "南京主店" in calendar_page.text
+    assert "山城员工" not in calendar_page.text
+
+    employee_page = client.get("/admin/schedules?store_name=南京门东店&month=2026-07&view_mode=employee&employee_ids=2")
+    assert employee_page.status_code == 200
+    assert 'data-schedule-view="employee"' in employee_page.text
+    assert 'name="employee_ids"' in employee_page.text
+    assert "南昌支援南京" in employee_page.text
+    assert employee_page.text.count('class="schedule-employee-card') == 1
+    assert "休息天数" in employee_page.text
+
+    store_summary_page = client.get("/admin/schedules?store_name=&month=2026-07&view_mode=store-summary")
+    assert store_summary_page.status_code == 200
+    assert 'data-schedule-view="store-summary"' in store_summary_page.text
+    assert "store-summary-calendar" in store_summary_page.text
+    assert "请选择具体门店后进行排班操作" in store_summary_page.text
+    assert "南京门东店 2 人" in store_summary_page.text
+    assert "山城巷店 1 人" in store_summary_page.text
+
+    all_store_post = admin_post(
+        client,
+        "/admin/schedules",
+        data={"store_name": "", "employee_ids": ["1"], "schedule_dates": ["2026-07-08"], "shift_type_id": "1"},
+        follow_redirects=False,
+    )
+    assert all_store_post.status_code == 303
+    assert "请选择具体门店后进行排班操作" in client.get(all_store_post.headers["location"]).text
+
+    all_store_export = client.get("/admin/schedules/export?store_name=&month=2026-07")
+    assert all_store_export.status_code == 200
+    assert "%E5%85%A8%E9%83%A8%E9%97%A8%E5%BA%97" in all_store_export.headers["content-disposition"]
+    workbook = load_workbook(BytesIO(all_store_export.content))
+    rows = list(workbook.active.iter_rows(values_only=True))
+    row_prefixes = {row[:9] for row in rows}
+    assert ("南京门东店", "2026-07-06", "周一", "南京主店", "店员", "早班", "09:30", "17:30", 8) in row_prefixes
+    assert ("山城巷店", "2026-07-06", "周一", "山城员工", "店员", "晚班", "14:00", "22:00", 8) in row_prefixes
 
 
 def test_bulk_schedule_creates_updates_and_skips_existing_rows(tmp_path, monkeypatch):
@@ -2335,6 +2703,57 @@ def test_bulk_schedule_creates_updates_and_skips_existing_rows(tmp_path, monkeyp
     assert len(skipped) == 6
     assert {row["shift_type_id"] for row in skipped} == {2}
     assert "跳过 6 条" in client.get(skip_bulk.headers["location"]).text
+
+
+def test_schedule_quick_copy_previous_day_and_clear_employee_month(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch)
+    logged_in_client(client)
+    store_name = DEFAULT_TEST_CONFIG["stores.json"][0]
+    create_schedule_employee(client, "QuickA", store_name=store_name)
+    create_schedule_employee(client, "QuickB", store_name=store_name)
+    admin_post(
+        client,
+        "/admin/schedules",
+        data={
+            "store_name": store_name,
+            "employee_ids": ["1", "2"],
+            "schedule_dates": ["2026-07-06"],
+            "shift_type_id": "1",
+            "note": "copy-source",
+            "overwrite_existing": "1",
+        },
+        follow_redirects=False,
+    )
+
+    copy_response = admin_post(
+        client,
+        "/admin/schedules/copy-day",
+        data={"store_name": store_name, "target_date": "2026-07-07"},
+        follow_redirects=False,
+    )
+
+    assert copy_response.status_code == 303
+    assert "month=2026-07" in copy_response.headers["location"]
+    copied_rows = sorted(rows_for(tmp_path, "store_schedules"), key=lambda row: (row["employee_id"], row["schedule_date"]))
+    assert [(row["employee_id"], row["schedule_date"]) for row in copied_rows] == [
+        (1, "2026-07-06"),
+        (1, "2026-07-07"),
+        (2, "2026-07-06"),
+        (2, "2026-07-07"),
+    ]
+    assert all(row["note"] == "copy-source" for row in copied_rows)
+
+    clear_response = admin_post(
+        client,
+        "/admin/schedules/clear-employee",
+        data={"store_name": store_name, "employee_id": "1", "month": "2026-07"},
+        follow_redirects=False,
+    )
+
+    assert clear_response.status_code == 303
+    remaining_rows = rows_for(tmp_path, "store_schedules")
+    assert {(row["employee_id"], row["schedule_date"]) for row in remaining_rows} == {(2, "2026-07-06"), (2, "2026-07-07")}
+    assert any(row["action"] == "删除排班" for row in rows_for(tmp_path, "schedule_logs"))
 
 
 def test_bulk_schedule_validation_errors_return_schedule_page(tmp_path, monkeypatch):
@@ -2533,6 +2952,70 @@ def test_employee_and_shift_type_management_lifecycle(tmp_path, monkeypatch):
     assert rows_for(tmp_path, "shift_types")[4]["is_active"] == 0
 
 
+def test_employee_management_uses_cards_drawer_and_store_tags(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch)
+    logged_in_client(client)
+    create_schedule_employee(
+        client,
+        "CardEmp",
+        role="Lead",
+        store_names=[DEFAULT_TEST_CONFIG["stores.json"][0], DEFAULT_TEST_CONFIG["stores.json"][1]],
+    )
+
+    page = client.get("/admin/employees")
+
+    assert page.status_code == 200
+    assert "employee-card-grid" in page.text
+    assert "employee-card" in page.text
+    assert "employee-store-tags" in page.text
+    assert "employee-status-pill" in page.text
+    assert "employee-drawer" in page.text
+    assert "drawer-panel" in page.text
+    assert "data-drawer-open" in page.text
+    assert "data-drawer-close" in page.text
+    assert "data-feedback-form" in page.text
+    assert re.search(r"<button\b[^>]*\btype=(['\"])button\1[^>]*\bdata-drawer-open\b", page.text)
+    assert "CardEmp" in page.text
+    assert "Lead" in page.text
+
+
+def test_shift_type_page_uses_card_timeline_structure(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch)
+    logged_in_client(client)
+
+    page = client.get("/admin/shift-types")
+
+    assert page.status_code == 200
+    assert "shift-type-grid" in page.text
+    assert "shift-type-card" in page.text
+    assert "shift-time-axis" in page.text
+    assert "shift-color-dot" in page.text
+    assert "data-draggable-shift" in page.text
+    assert "data-feedback-form" in page.text
+    assert "shift-status-pill" in page.text
+
+
+def test_admin_schedule_interaction_js_feedback_contract():
+    app_js = (PROJECT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+    style_css = (PROJECT_DIR / "static" / "style.css").read_text(encoding="utf-8")
+
+    assert "data-feedback-form" in app_js
+    assert "data-loading-label" in app_js
+    assert "data-drawer-open" in app_js
+    assert "data-drawer-close" in app_js
+    assert "data-filter-toggle" in app_js
+    assert "showAppToast" in app_js
+    for selector in (
+        ".ops-card",
+        ".schedule-calendar-grid",
+        ".schedule-employee-card",
+        ".employee-card-grid",
+        ".drawer-panel",
+        ".shift-type-card",
+    ):
+        assert selector in style_css
+
+
 def test_schedule_module_form_errors_redirect_with_page_alerts(tmp_path, monkeypatch):
     client, _ = build_client(tmp_path, monkeypatch)
     logged_in_client(client)
@@ -2693,7 +3176,7 @@ def test_schedule_create_update_validation_public_view_export_and_logs(tmp_path,
 
     export_response = client.get("/admin/schedules/export?store_name=南京门东店&month=2026-07")
     assert export_response.status_code == 200
-    assert "%E9%97%A8%E5%BA%97%E6%8E%92%E7%8F%AD_202607.xlsx" in export_response.headers["content-disposition"]
+    assert "%E9%97%A8%E5%BA%97%E6%8E%92%E7%8F%AD_%E5%8D%97%E4%BA%AC%E9%97%A8%E4%B8%9C%E5%BA%97_202607.xlsx" in export_response.headers["content-disposition"]
     workbook = load_workbook(BytesIO(export_response.content))
     values = list(workbook.active.iter_rows(values_only=True))
     assert values[0] == ("门店", "日期", "星期", "员工", "角色", "班次", "开始时间", "结束时间", "工时", "备注")

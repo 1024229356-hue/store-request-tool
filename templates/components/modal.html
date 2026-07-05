@@ -1,0 +1,16 @@
+{% macro modal(id, title, close_on_overlay=True) -%}
+<div class="modal-overlay" id="{{ id }}" data-modal="{{ id }}" data-modal-overlay data-close-on-overlay="{{ '1' if close_on_overlay else '0' }}" hidden>
+  <div class="modal-container" role="dialog" aria-modal="true" aria-labelledby="{{ id }}-title">
+    <header class="modal-header">
+      <div>
+        <p class="eyebrow">快速录入</p>
+        <h2 id="{{ id }}-title">{{ title }}</h2>
+      </div>
+      <button class="ghost-button compact modal-close" type="button" data-modal-close aria-label="关闭">关闭</button>
+    </header>
+    <div class="modal-body">
+      {{ caller() }}
+    </div>
+  </div>
+</div>
+{%- endmacro %}

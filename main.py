@@ -70,6 +70,7 @@ REQUIRED_RUNTIME_ROUTES = [
     "/admin/employees",
     "/admin/shift-types",
     "/admin/schedules",
+    "/admin/tickets/create",
     "/admin/tickets/bulk-archive",
     "/admin/tickets/bulk-delete",
 ]
@@ -733,6 +734,21 @@ def normalize_store_names(raw_store_names: Optional[List[str]], legacy_store_nam
     return unique_clean_values(candidates)
 
 
+def normalize_employee_scope(value: str) -> str:
+    clean_value = value.strip()
+    return clean_value if clean_value in {"all", "primary", "support"} else "all"
+
+
+def normalize_schedule_view(value: str) -> str:
+    clean_value = value.strip()
+    return clean_value if clean_value in {"calendar", "employee", "table", "store-summary"} else "calendar"
+
+
+def normalize_employee_record_scope(value: str) -> str:
+    clean_value = value.strip()
+    return clean_value if clean_value in {"active", "archive", "trash"} else "active"
+
+
 def normalize_brand_names(
     raw_brands: Optional[List[str]],
     brand_extra: str = "",
@@ -773,11 +789,18 @@ def backfill_ticket_relations(connection: sqlite3.Connection) -> None:
 
 def backfill_employee_store_map(connection: sqlite3.Connection) -> None:
     timestamp = now_text()
-    rows = connection.execute("SELECT id, store_name, created_at FROM employees").fetchall()
+    rows = connection.execute("SELECT id, store_name, primary_store_name, created_at FROM employees").fetchall()
     for row in rows:
         employee_id = int(row["id"])
         created_at = str(row["created_at"] or timestamp)
-        for store_name in split_multi_value_text(row["store_name"]):
+        existing_store_names = split_multi_value_text(row["store_name"])
+        primary_store = str(row["primary_store_name"] or "").strip() or (existing_store_names[0] if existing_store_names else "")
+        if primary_store and not str(row["primary_store_name"] or "").strip():
+            connection.execute(
+                "UPDATE employees SET primary_store_name = ?, store_name = ? WHERE id = ?",
+                (primary_store, primary_store, employee_id),
+            )
+        for store_name in unique_clean_values([primary_store, *existing_store_names]):
             connection.execute(
                 """
                 INSERT OR IGNORE INTO employee_store_map (employee_id, store_name, created_at)
@@ -1033,9 +1056,16 @@ def init_db() -> None:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 employee_name TEXT NOT NULL,
                 store_name TEXT NOT NULL,
+                primary_store_name TEXT,
                 role TEXT,
                 phone TEXT,
                 status TEXT NOT NULL DEFAULT '在职',
+                archived_at TEXT,
+                archived_by TEXT,
+                archive_reason TEXT,
+                deleted_at TEXT,
+                deleted_by TEXT,
+                delete_reason TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )
@@ -1121,7 +1151,13 @@ def init_db() -> None:
         connection.execute("CREATE INDEX IF NOT EXISTS idx_notification_events_ticket_id ON notification_events(ticket_id)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_notification_reads_username ON notification_reads(username)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_embedded_pages_enabled ON embedded_pages(enabled)")
+        add_column_if_missing(connection, "employees", "primary_store_name", "TEXT")
+        add_archive_columns(connection, "employees")
+        add_soft_delete_columns(connection, "employees")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_employees_store_name ON employees(store_name)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_employees_primary_store_name ON employees(primary_store_name)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_employees_deleted_at ON employees(deleted_at)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_employees_archived_at ON employees(archived_at)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_employee_store_map_employee_id ON employee_store_map(employee_id)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_employee_store_map_store_name ON employee_store_map(store_name)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_store_schedules_store_name ON store_schedules(store_name)")
@@ -1572,6 +1608,146 @@ def validate_request_type_rule(
     if rule.get("require_any_attachment") and not prepared_images and not prepared_files:
         return f"{request_type}必须上传图片或文件附件。"
     return None
+
+
+def build_ticket_submission_values(
+    store_names: Optional[List[str]],
+    brands: Optional[List[str]],
+    brand_extra: str,
+    store_name: str,
+    submitter: str,
+    request_type: str,
+    urgency: str,
+    brand: str,
+    product_name: str,
+    sku_barcode: str,
+    quantity: str,
+    description: str,
+    expected_finish_date: str,
+) -> Tuple[List[str], List[str], str, str, Dict[str, object]]:
+    normalized_stores = normalize_store_names(store_names, store_name)
+    normalized_brands = normalize_brand_names(brands, brand_extra, brand)
+    store_display = join_display_values(normalized_stores)
+    brand_display = join_display_values(normalized_brands)
+    form_values = {
+        "store_name": store_name,
+        "store_names": normalized_stores,
+        "submitter": submitter,
+        "request_type": request_type,
+        "urgency": urgency,
+        "brand": brand,
+        "brands": normalized_brands,
+        "brand_extra": brand_extra,
+        "product_name": product_name,
+        "sku_barcode": sku_barcode,
+        "quantity": quantity,
+        "description": description,
+        "expected_finish_date": expected_finish_date,
+    }
+    return normalized_stores, normalized_brands, store_display, brand_display, form_values
+
+
+async def create_ticket_from_submission(
+    *,
+    store_names: Optional[List[str]],
+    brands: Optional[List[str]],
+    brand_extra: str,
+    store_name: str,
+    submitter: str,
+    request_type: str,
+    urgency: str,
+    brand: str,
+    product_name: str,
+    sku_barcode: str,
+    quantity: str,
+    description: str,
+    expected_finish_date: str,
+    images: Optional[List[UploadFile]],
+    files: Optional[List[UploadFile]],
+    config: AppConfig,
+) -> Dict[str, object]:
+    normalized_stores, normalized_brands, store_display, brand_display, form_values = build_ticket_submission_values(
+        store_names,
+        brands,
+        brand_extra,
+        store_name,
+        submitter,
+        request_type,
+        urgency,
+        brand,
+        product_name,
+        sku_barcode,
+        quantity,
+        description,
+        expected_finish_date,
+    )
+    error = validate_submission(
+        normalized_stores,
+        submitter,
+        request_type,
+        urgency,
+        quantity,
+        description,
+        config.stores,
+        config.request_types,
+        config.urgency_levels,
+    )
+    if error:
+        return {"ok": False, "status_code": 400, "error": error, "values": form_values}
+
+    try:
+        prepared_images = await prepare_images(images, config)
+        prepared_files = await prepare_files(files, config)
+    except ValueError as exc:
+        return {"ok": False, "status_code": 400, "error": str(exc), "values": form_values}
+
+    rule_values = dict(form_values)
+    rule_values["brand"] = brand_display
+    rule_error = validate_request_type_rule(request_type, rule_values, prepared_images, prepared_files)
+    if rule_error:
+        return {"ok": False, "status_code": 400, "error": rule_error, "values": form_values}
+
+    timestamp = now_text()
+    quantity_value = int(quantity.strip()) if quantity.strip() else None
+    try:
+        ticket_id, ticket_no = create_ticket_with_images(
+            {
+                "created_at": timestamp,
+                "store_name": store_display,
+                "store_names": normalized_stores,
+                "submitter": submitter.strip(),
+                "request_type": request_type,
+                "urgency": urgency,
+                "brand": brand_display,
+                "brands": normalized_brands,
+                "product_name": product_name.strip(),
+                "sku_barcode": sku_barcode.strip(),
+                "quantity": quantity_value,
+                "description": description.strip(),
+                "expected_finish_date": expected_finish_date.strip(),
+            },
+            prepared_images,
+            config,
+            prepared_files,
+        )
+        try:
+            created_ticket = fetch_ticket(ticket_id)
+            if created_ticket:
+                create_new_ticket_notification(created_ticket)
+        except Exception:
+            pass
+    except RuntimeError as exc:
+        return {"ok": False, "status_code": 500, "error": str(exc), "values": form_values}
+    except OSError:
+        return {"ok": False, "status_code": 500, "error": "附件保存失败，请稍后重试。", "values": form_values}
+
+    return {
+        "ok": True,
+        "status_code": 200,
+        "ticket_id": ticket_id,
+        "ticket_no": ticket_no,
+        "values": form_values,
+    }
 
 
 async def prepare_images(images: Optional[List[UploadFile]], config: AppConfig) -> List[Tuple[str, bytes]]:
@@ -2541,14 +2717,102 @@ def month_date_items(month: str) -> List[Dict[str, object]]:
     return days
 
 
-def normalize_employee_store_bindings(raw_store_names: Optional[List[str]], legacy_store_name: str, config: AppConfig) -> List[str]:
-    store_names = normalize_store_names(raw_store_names, legacy_store_name)
-    if not store_names:
-        raise ValueError("请至少绑定 1 个门店。")
+def calendar_week_rows(days: List[Dict[str, object]]) -> List[List[Optional[Dict[str, object]]]]:
+    if not days:
+        return []
+    first_date = datetime.strptime(str(days[0]["date"]), "%Y-%m-%d")
+    cells: List[Optional[Dict[str, object]]] = [None] * first_date.weekday()
+    cells.extend(days)
+    while len(cells) % 7:
+        cells.append(None)
+    return [cells[index : index + 7] for index in range(0, len(cells), 7)]
+
+
+def annotate_schedule_employee(employee: Dict[str, object], selected_store: str) -> Dict[str, object]:
+    store_names = list(employee.get("store_names") or [])
+    primary_store = str(employee.get("primary_store_name") or employee.get("store_name") or (store_names[0] if store_names else "")).strip()
+    annotated = dict(employee)
+    annotated["primary_store"] = primary_store
+    annotated["is_current_store_employee"] = bool(not selected_store or selected_store in store_names)
+    annotated["is_support_store_employee"] = bool(selected_store and selected_store in store_names and primary_store != selected_store)
+    annotated["is_primary_store_employee"] = bool(selected_store and primary_store == selected_store)
+    annotated["is_cross_store_visible"] = annotated["is_support_store_employee"]
+    return annotated
+
+
+def build_schedule_employee_summaries(
+    employees: List[Dict[str, object]],
+    rows: List[Dict[str, object]],
+    days: List[Dict[str, object]],
+) -> List[Dict[str, object]]:
+    rows_by_employee: Dict[int, List[Dict[str, object]]] = {}
+    for row in rows:
+        rows_by_employee.setdefault(int(row["employee_id"]), []).append(row)
+    summaries: List[Dict[str, object]] = []
+    for employee in employees:
+        employee_id = int(employee["id"])
+        employee_rows = rows_by_employee.get(employee_id, [])
+        scheduled_dates = {str(row.get("schedule_date") or "") for row in employee_rows}
+        timeline = []
+        for day in days:
+            matching = next((row for row in employee_rows if str(row.get("schedule_date") or "") == str(day["date"])), None)
+            timeline.append({"day": day, "schedule": matching})
+        summaries.append(
+            {
+                "employee": employee,
+                "rows": employee_rows,
+                "timeline": timeline,
+                "total_hours": round(sum(float(row.get("duration_hours") or 0) for row in employee_rows), 2),
+                "schedule_day_count": len(scheduled_dates),
+                "rest_day_count": sum(1 for row in employee_rows if str(row.get("shift_name") or "") == "休息"),
+                "unscheduled_day_count": max(len(days) - len(scheduled_dates), 0),
+            }
+        )
+    return summaries
+
+
+def build_schedule_calendar_summary(days: List[Dict[str, object]], rows: List[Dict[str, object]]) -> List[Dict[str, object]]:
+    rows_by_date: Dict[str, List[Dict[str, object]]] = {}
+    for row in rows:
+        rows_by_date.setdefault(str(row["schedule_date"]), []).append(row)
+    summary: List[Dict[str, object]] = []
+    for day in days:
+        date_text = str(day["date"])
+        day_rows = rows_by_date.get(date_text, [])
+        shift_counts: Dict[str, int] = {}
+        store_counts: Dict[str, int] = {}
+        for row in day_rows:
+            shift_name = str(row.get("shift_name") or "未设置班次")
+            store_name = str(row.get("store_name") or "未设置门店")
+            shift_counts[shift_name] = shift_counts.get(shift_name, 0) + 1
+            store_counts[store_name] = store_counts.get(store_name, 0) + 1
+        summary.append(
+            {
+                "day": day,
+                "rows": day_rows,
+                "schedule_count": len(day_rows),
+                "shift_counts": shift_counts,
+                "store_counts": store_counts,
+            }
+        )
+    return summary
+
+
+def normalize_employee_store_data(
+    primary_store_name: str,
+    raw_store_names: Optional[List[str]],
+    legacy_store_name: str,
+    config: AppConfig,
+) -> Tuple[str, List[str]]:
+    store_names = normalize_store_names(raw_store_names, "")
+    primary_store = primary_store_name.strip() or legacy_store_name.strip() or (store_names[0] if store_names else "")
+    if not primary_store:
+        raise ValueError("请选择主门店。")
     valid_stores = set(config.stores)
-    if any(store_name not in valid_stores for store_name in store_names):
+    if primary_store not in valid_stores or any(store_name not in valid_stores for store_name in store_names):
         raise ValueError("请选择有效门店。")
-    return store_names
+    clean_store_names = unique_clean_values([primary_store, *store_names])
+    return primary_store, clean_store_names
 
 
 def employee_store_map_for_ids(connection: sqlite3.Connection, employee_ids: Iterable[int]) -> Dict[int, List[str]]:
@@ -2584,6 +2848,9 @@ def attach_employee_store_bindings(
     for employee in employees:
         employee_id = int(employee["id"])
         store_names = store_map.get(employee_id, []) or split_multi_value_text(employee.get("store_name"))
+        primary_store = str(employee.get("primary_store_name") or employee.get("store_name") or (store_names[0] if store_names else "")).strip()
+        employee["primary_store_name"] = primary_store
+        employee["store_name"] = primary_store
         employee["store_names"] = store_names
         employee["store_names_text"] = join_display_values(store_names)
     return employees
@@ -2611,7 +2878,16 @@ def employee_belongs_to_store(employee: Dict[str, object], store_name: str) -> b
     return bool(clean_store and clean_store in list(employee.get("store_names") or []))
 
 
-def fetch_employees(store_name: str = "", status: str = "") -> List[Dict[str, object]]:
+def employee_record_scope_clause(scope: str) -> str:
+    normalized_scope = normalize_employee_record_scope(scope)
+    if normalized_scope == "archive":
+        return "employees.deleted_at IS NULL AND employees.archived_at IS NOT NULL"
+    if normalized_scope == "trash":
+        return "employees.deleted_at IS NOT NULL"
+    return "employees.deleted_at IS NULL AND employees.archived_at IS NULL"
+
+
+def fetch_employees(store_name: str = "", status: str = "", scope: str = "active") -> List[Dict[str, object]]:
     clauses: List[str] = []
     params: List[object] = []
     join_sql = ""
@@ -2620,19 +2896,23 @@ def fetch_employees(store_name: str = "", status: str = "") -> List[Dict[str, ob
         clauses.append("employee_store_map_filter.store_name = ?")
         params.append(store_name.strip())
     if status.strip():
-        clauses.append("status = ?")
+        clauses.append("employees.status = ?")
         params.append(status.strip())
+    clauses.append(employee_record_scope_clause(scope))
     where_sql = "WHERE " + " AND ".join(clauses) if clauses else ""
     with get_connection() as connection:
         rows = connection.execute(
             f"""
             SELECT
-                employees.id, employees.employee_name, employees.store_name, employees.role,
-                employees.phone, employees.status, employees.created_at, employees.updated_at
+                employees.id, employees.employee_name, employees.store_name, employees.primary_store_name,
+                employees.role, employees.phone, employees.status,
+                employees.archived_at, employees.archived_by, employees.archive_reason,
+                employees.deleted_at, employees.deleted_by, employees.delete_reason,
+                employees.created_at, employees.updated_at
             FROM employees
             {join_sql}
             {where_sql}
-            ORDER BY employees.store_name, employees.status, employees.employee_name, employees.id
+            ORDER BY COALESCE(NULLIF(employees.primary_store_name, ''), employees.store_name), employees.status, employees.employee_name, employees.id
             """,
             params,
         ).fetchall()
@@ -2647,6 +2927,32 @@ def fetch_employee(employee_id: int) -> Optional[Dict[str, object]]:
         return attach_employee_store_bindings(connection, [row])[0]
 
 
+def fetch_schedulable_employees(
+    store_name: str,
+    employee_status: str = "",
+    employee_scope: str = "all",
+    selected_employee_ids: Optional[List[int]] = None,
+) -> List[Dict[str, object]]:
+    clean_store = store_name.strip()
+    status_filter = employee_status.strip() or "在职"
+    employees = fetch_employees(clean_store, status_filter, scope="active") if clean_store else fetch_employees("", status_filter, scope="active")
+    normalized_scope = normalize_employee_scope(employee_scope)
+    selected_ids = {int(employee_id) for employee_id in selected_employee_ids or [] if int(employee_id) > 0}
+    result: List[Dict[str, object]] = []
+    for employee in employees:
+        annotated = annotate_schedule_employee(employee, clean_store)
+        if clean_store and not employee_belongs_to_store(annotated, clean_store):
+            continue
+        if normalized_scope == "primary" and not annotated.get("is_primary_store_employee"):
+            continue
+        if normalized_scope == "support" and not annotated.get("is_support_store_employee"):
+            continue
+        if selected_ids and int(annotated["id"]) not in selected_ids:
+            continue
+        result.append(annotated)
+    return result
+
+
 def create_employee(
     employee_name: str,
     store_name: str,
@@ -2655,23 +2961,23 @@ def create_employee(
     status: str,
     config: AppConfig,
     store_names: Optional[List[str]] = None,
+    primary_store_name: str = "",
 ) -> int:
     clean_name = employee_name.strip()
     clean_status = status.strip() or "在职"
     if not clean_name:
         raise ValueError("请填写员工姓名。")
-    clean_stores = normalize_employee_store_bindings(store_names, store_name, config)
-    primary_store = clean_stores[0]
+    primary_store, clean_stores = normalize_employee_store_data(primary_store_name, store_names, store_name, config)
     if clean_status not in EMPLOYEE_STATUSES:
         raise ValueError("员工状态不正确。")
     timestamp = now_text()
     with get_connection() as connection:
         cursor = connection.execute(
             """
-            INSERT INTO employees (employee_name, store_name, role, phone, status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO employees (employee_name, store_name, primary_store_name, role, phone, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (clean_name, primary_store, role.strip(), phone.strip(), clean_status, timestamp, timestamp),
+            (clean_name, primary_store, primary_store, role.strip(), phone.strip(), clean_status, timestamp, timestamp),
         )
         employee_id = int(cursor.lastrowid)
         replace_employee_store_bindings(connection, employee_id, clean_stores, timestamp)
@@ -2687,15 +2993,17 @@ def update_employee(
     status: str,
     config: AppConfig,
     store_names: Optional[List[str]] = None,
+    primary_store_name: str = "",
 ) -> None:
-    if not fetch_employee(employee_id):
+    existing_employee = fetch_employee(employee_id)
+    if not existing_employee:
         raise HTTPException(status_code=404, detail="员工不存在")
     clean_name = employee_name.strip()
     clean_status = status.strip() or "在职"
     if not clean_name:
         raise ValueError("请填写员工姓名。")
-    clean_stores = normalize_employee_store_bindings(store_names, store_name, config)
-    primary_store = clean_stores[0]
+    legacy_primary_store = store_name or str(existing_employee.get("primary_store_name") or existing_employee.get("store_name") or "")
+    primary_store, clean_stores = normalize_employee_store_data(primary_store_name, store_names, legacy_primary_store, config)
     if clean_status not in EMPLOYEE_STATUSES:
         raise ValueError("员工状态不正确。")
     timestamp = now_text()
@@ -2703,10 +3011,10 @@ def update_employee(
         connection.execute(
             """
             UPDATE employees
-            SET employee_name = ?, store_name = ?, role = ?, phone = ?, status = ?, updated_at = ?
+            SET employee_name = ?, store_name = ?, primary_store_name = ?, role = ?, phone = ?, status = ?, updated_at = ?
             WHERE id = ?
             """,
-            (clean_name, primary_store, role.strip(), phone.strip(), clean_status, timestamp, employee_id),
+            (clean_name, primary_store, primary_store, role.strip(), phone.strip(), clean_status, timestamp, employee_id),
         )
         replace_employee_store_bindings(connection, employee_id, clean_stores, timestamp)
 
@@ -2719,6 +3027,78 @@ def disable_employee(employee_id: int) -> None:
             "UPDATE employees SET status = ?, updated_at = ? WHERE id = ?",
             ("离职", now_text(), employee_id),
         )
+
+
+def archive_employee(employee_id: int, operator: str, archive_reason: str = "") -> None:
+    if not fetch_employee(employee_id):
+        raise HTTPException(status_code=404, detail="员工不存在")
+    timestamp = now_text()
+    with get_connection() as connection:
+        connection.execute(
+            """
+            UPDATE employees
+            SET archived_at = ?, archived_by = ?, archive_reason = ?, updated_at = ?
+            WHERE id = ? AND deleted_at IS NULL AND archived_at IS NULL
+            """,
+            (timestamp, operator, archive_reason.strip() or "后台归档员工", timestamp, employee_id),
+        )
+
+
+def unarchive_employee(employee_id: int) -> None:
+    if not fetch_employee(employee_id):
+        raise HTTPException(status_code=404, detail="员工不存在")
+    with get_connection() as connection:
+        connection.execute(
+            """
+            UPDATE employees
+            SET archived_at = NULL, archived_by = NULL, archive_reason = NULL, updated_at = ?
+            WHERE id = ? AND deleted_at IS NULL
+            """,
+            (now_text(), employee_id),
+        )
+
+
+def soft_delete_employee(employee_id: int, operator: str, delete_reason: str = "") -> None:
+    if not fetch_employee(employee_id):
+        raise HTTPException(status_code=404, detail="员工不存在")
+    timestamp = now_text()
+    with get_connection() as connection:
+        connection.execute(
+            """
+            UPDATE employees
+            SET deleted_at = ?, deleted_by = ?, delete_reason = ?, updated_at = ?
+            WHERE id = ? AND deleted_at IS NULL
+            """,
+            (timestamp, operator, delete_reason.strip() or "后台移入回收站", timestamp, employee_id),
+        )
+
+
+def restore_employee(employee_id: int) -> None:
+    if not fetch_employee(employee_id):
+        raise HTTPException(status_code=404, detail="员工不存在")
+    with get_connection() as connection:
+        connection.execute(
+            """
+            UPDATE employees
+            SET deleted_at = NULL, deleted_by = NULL, delete_reason = NULL, updated_at = ?
+            WHERE id = ?
+            """,
+            (now_text(), employee_id),
+        )
+
+
+def hard_delete_employee(employee_id: int) -> None:
+    if not fetch_employee(employee_id):
+        raise HTTPException(status_code=404, detail="员工不存在")
+    with get_connection() as connection:
+        schedule_count = connection.execute(
+            "SELECT COUNT(*) AS total FROM store_schedules WHERE employee_id = ?",
+            (employee_id,),
+        ).fetchone()["total"]
+        if int(schedule_count or 0) > 0:
+            raise ValueError("该员工已有排班记录，建议归档而不是永久删除。")
+        connection.execute("DELETE FROM employee_store_map WHERE employee_id = ?", (employee_id,))
+        connection.execute("DELETE FROM employees WHERE id = ?", (employee_id,))
 
 
 def fetch_shift_types(include_inactive: bool = True, active_only: bool = False) -> List[Dict[str, object]]:
@@ -2844,16 +3224,17 @@ def schedule_redirect_url(
     return "/admin/schedules?" + urlencode({key: value for key, value in params.items() if value})
 
 
-def schedule_filters(store_name: str, month: str, employee_status: str = "") -> Dict[str, str]:
+def schedule_filters(store_name: str, month: str, employee_status: str = "", shift_type_id: int = 0) -> Dict[str, str]:
     return {
         "store_name": store_name.strip(),
         "month": normalize_month(month),
         "employee_status": employee_status.strip(),
+        "shift_type_id": str(shift_type_id if shift_type_id > 0 else ""),
     }
 
 
-def fetch_schedule_rows(store_name: str, month: str, employee_status: str = "") -> List[Dict[str, object]]:
-    filters = schedule_filters(store_name, month, employee_status)
+def fetch_schedule_rows(store_name: str, month: str, employee_status: str = "", shift_type_id: int = 0) -> List[Dict[str, object]]:
+    filters = schedule_filters(store_name, month, employee_status, shift_type_id)
     year, month_number = [int(part) for part in filters["month"].split("-")]
     last_day = calendar.monthrange(year, month_number)[1]
     clauses = ["schedules.schedule_date >= ?", "schedules.schedule_date <= ?"]
@@ -2864,6 +3245,9 @@ def fetch_schedule_rows(store_name: str, month: str, employee_status: str = "") 
     if filters["employee_status"]:
         clauses.append("employees.status = ?")
         params.append(filters["employee_status"])
+    if filters["shift_type_id"]:
+        clauses.append("schedules.shift_type_id = ?")
+        params.append(int(filters["shift_type_id"]))
     where_sql = " AND ".join(clauses)
     with get_connection() as connection:
         rows = connection.execute(
@@ -2888,11 +3272,38 @@ def fetch_schedule_rows(store_name: str, month: str, employee_status: str = "") 
     return result
 
 
-def fetch_schedule_context(store_name: str, month: str, employee_status: str, config: AppConfig) -> Dict[str, object]:
-    filters = schedule_filters(store_name, month, employee_status)
+def fetch_schedule_context(
+    store_name: str,
+    month: str,
+    employee_status: str,
+    config: AppConfig,
+    view: str = "calendar",
+    show_cross_store: bool = False,
+    scope: str = "store",
+    employee_scope: str = "all",
+    selected_employee_ids: Optional[List[int]] = None,
+    shift_type_id: int = 0,
+) -> Dict[str, object]:
+    normalized_view = normalize_schedule_view(view)
+    normalized_scope = "all" if scope == "all" or (normalized_view == "store-summary" and not store_name.strip()) else "store"
+    filters = schedule_filters("" if normalized_scope == "all" else store_name, month, employee_status, shift_type_id)
     days = month_date_items(filters["month"])
-    employees = fetch_employees(filters["store_name"], filters["employee_status"])
-    rows = fetch_schedule_rows(filters["store_name"], filters["month"], filters["employee_status"])
+    selected_store = filters["store_name"]
+    normalized_employee_scope = normalize_employee_scope(employee_scope)
+    selected_ids = [int(employee_id) for employee_id in selected_employee_ids or [] if int(employee_id) > 0]
+    employee_status_filter = filters["employee_status"]
+    employee_options = fetch_schedulable_employees(
+        selected_store,
+        employee_status_filter,
+        normalized_employee_scope,
+    )
+    employees = fetch_schedulable_employees(
+        selected_store,
+        employee_status_filter,
+        normalized_employee_scope,
+        selected_employee_ids=selected_ids,
+    )
+    rows = fetch_schedule_rows(filters["store_name"], filters["month"], filters["employee_status"], shift_type_id)
     schedule_map: Dict[str, Dict[int, Dict[str, object]]] = {}
     daily_store_counts: Dict[str, Dict[str, int]] = {}
     for row in rows:
@@ -2908,19 +3319,65 @@ def fetch_schedule_context(store_name: str, month: str, employee_status: str, co
         "unscheduled_day_count": max(len(days) - len(scheduled_dates), 0),
         "rest_shift_count": sum(1 for row in rows if str(row.get("shift_name") or "") == "休息"),
     }
+    selected_id_strings = [str(employee_id) for employee_id in selected_ids]
+    base_query = {
+        "store_name": filters["store_name"],
+        "month": filters["month"],
+        "employee_status": filters["employee_status"],
+        "employee_scope": normalized_employee_scope,
+        "shift_type_id": filters["shift_type_id"],
+        "scope": normalized_scope,
+    }
+    query_items = [(key, value) for key, value in base_query.items() if value]
+    query_items.extend(("employee_ids", employee_id) for employee_id in selected_id_strings)
+    if show_cross_store:
+        query_items.append(("show_cross_store", "1"))
+    view_urls = {
+        view_name: "/admin/schedules?"
+        + urlencode([*query_items, ("view_mode", view_name)])
+        for view_name in ("calendar", "employee", "table", "store-summary")
+    }
+    toggle_cross_store_url = "/admin/schedules?" + urlencode(
+        [*query_items, ("view_mode", normalized_view), ("show_cross_store", "" if show_cross_store else "1")]
+    )
+    global_view_url = "/admin/schedules?" + urlencode(
+        [(key, value) for key, value in {**base_query, "store_name": "", "scope": "all"}.items() if value]
+        + [("view_mode", "store-summary")]
+    )
+    calendar_summary = build_schedule_calendar_summary(days, rows)
+    export_query = [("month", filters["month"])]
+    if filters["store_name"]:
+        export_query.append(("store_name", filters["store_name"]))
+    if filters["shift_type_id"]:
+        export_query.append(("shift_type_id", filters["shift_type_id"]))
     return {
         "filters": filters,
         "stores": config.stores,
         "days": days,
         "employees": employees,
+        "bulk_employees": employee_options,
+        "employee_options": employee_options,
+        "selected_employee_ids": selected_id_strings,
+        "employee_scope": normalized_employee_scope,
         "shift_types": fetch_shift_types(active_only=True),
         "all_shift_types": fetch_shift_types(),
         "rows": rows,
         "schedule_map": schedule_map,
         "daily_store_counts": daily_store_counts,
+        "calendar_summary": calendar_summary,
+        "store_summary_calendar": calendar_summary,
         "stats": stats,
+        "calendar_weeks": calendar_week_rows(days),
+        "employee_summaries": build_schedule_employee_summaries(employees, rows, days),
+        "view": normalized_view,
+        "show_cross_store": show_cross_store,
+        "scope": normalized_scope,
+        "form_store": filters["store_name"],
+        "view_urls": view_urls,
+        "toggle_cross_store_url": toggle_cross_store_url,
+        "global_view_url": global_view_url,
         "max_bulk_schedule_count": config.max_bulk_schedule_count,
-        "export_url": "/admin/schedules/export?" + urlencode({key: value for key, value in filters.items() if value and key != "employee_status"}),
+        "export_url": "/admin/schedules/export?" + urlencode(export_query),
     }
 
 
@@ -2957,6 +3414,10 @@ def upsert_schedule(store_name: str, employee_id: int, schedule_date: str, shift
         raise ValueError("员工不存在。")
     if not employee_belongs_to_store(employee, clean_store):
         raise ValueError("员工必须绑定该门店。")
+    if employee.get("deleted_at"):
+        raise ValueError("员工已在回收站，不能排班。")
+    if employee.get("archived_at"):
+        raise ValueError("员工已归档，不能排班。")
     if str(employee.get("status") or "") != "在职":
         raise ValueError("员工必须是在职状态。")
     shift_type = fetch_shift_type(shift_type_id)
@@ -3058,7 +3519,7 @@ def bulk_upsert_schedules(
 ) -> Dict[str, int]:
     clean_store = store_name.strip()
     if not clean_store:
-        raise ValueError("请选择有效门店。")
+        raise ValueError("请选择具体门店后进行排班操作。")
     total_count = len(employee_ids) * len(schedule_dates)
     if total_count <= 0:
         raise ValueError("请选择至少 1 名员工和 1 个日期。")
@@ -3075,6 +3536,10 @@ def bulk_upsert_schedules(
             raise ValueError("员工不存在。")
         if not employee_belongs_to_store(employee, clean_store):
             raise ValueError("员工必须绑定该门店。")
+        if employee.get("deleted_at"):
+            raise ValueError("员工已在回收站，不能排班。")
+        if employee.get("archived_at"):
+            raise ValueError("员工已归档，不能排班。")
         if str(employee.get("status") or "") != "在职":
             raise ValueError("员工必须是在职状态。")
 
@@ -3112,6 +3577,59 @@ def delete_schedule(schedule_id: int, operator: str) -> Dict[str, object]:
         connection.execute("DELETE FROM store_schedules WHERE id = ?", (schedule_id,))
         insert_schedule_log(connection, schedule_id, "删除排班", old_value, "", operator, timestamp)
     return old_value
+
+
+def copy_previous_day_schedules(store_name: str, target_date: str, operator: str) -> Dict[str, object]:
+    clean_store = store_name.strip()
+    clean_target_date = normalize_schedule_date(target_date)
+    if not clean_store:
+        raise ValueError("请选择有效门店。")
+    source_date = (datetime.strptime(clean_target_date, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
+    with get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT employee_id, shift_type_id, note
+            FROM store_schedules
+            WHERE store_name = ? AND schedule_date = ?
+            ORDER BY employee_id
+            """,
+            (clean_store, source_date),
+        ).fetchall()
+    copied_count = 0
+    for row in rows:
+        upsert_schedule(
+            clean_store,
+            int(row["employee_id"]),
+            clean_target_date,
+            int(row["shift_type_id"]),
+            str(row["note"] or ""),
+            operator,
+        )
+        copied_count += 1
+    return {"source_date": source_date, "target_date": clean_target_date, "copied_count": copied_count}
+
+
+def clear_employee_month_schedules(store_name: str, employee_id: int, month: str, operator: str) -> int:
+    clean_store = store_name.strip()
+    clean_month = normalize_month(month)
+    employee = fetch_employee(employee_id)
+    if not employee:
+        raise ValueError("员工不存在。")
+    year, month_number = [int(part) for part in clean_month.split("-")]
+    last_day = calendar.monthrange(year, month_number)[1]
+    clauses = ["employee_id = ?", "schedule_date >= ?", "schedule_date <= ?"]
+    params: List[object] = [employee_id, f"{clean_month}-01", f"{clean_month}-{last_day:02d}"]
+    if clean_store:
+        clauses.append("store_name = ?")
+        params.append(clean_store)
+    with get_connection() as connection:
+        rows = connection.execute(
+            f"SELECT id FROM store_schedules WHERE {' AND '.join(clauses)} ORDER BY schedule_date",
+            params,
+        ).fetchall()
+    for row in rows:
+        delete_schedule(int(row["id"]), operator)
+    return len(rows)
 
 
 def build_schedule_excel(rows: List[Dict[str, object]]) -> BytesIO:
@@ -5098,6 +5616,30 @@ def create_app() -> FastAPI:
             include_in_schema=False,
         )
 
+    def ticket_create_form_context(
+        config: AppConfig,
+        values: Optional[Dict[str, object]] = None,
+        error: str = "",
+    ) -> Dict[str, object]:
+        return {
+            "stores": config.stores,
+            "request_types": config.request_types,
+            "urgency_levels": config.urgency_levels,
+            "brands": config.brands,
+            "image_accept": ",".join(f".{extension}" for extension in config.allowed_image_extensions),
+            "file_accept": ",".join(f".{extension}" for extension in config.allowed_file_extensions),
+            "max_image_count": config.max_image_count,
+            "max_total_upload_mb": config.max_total_upload_mb,
+            "max_image_mb": config.max_image_mb,
+            "allowed_file_extensions": config.allowed_file_extensions,
+            "max_file_count": config.max_file_count,
+            "max_file_mb": config.max_file_mb,
+            "max_total_file_upload_mb": config.max_total_file_upload_mb,
+            "error": error,
+            "values": values or {},
+            "request_type_rules_json": json.dumps(load_request_type_rules(), ensure_ascii=False),
+        }
+
     def render_submit_form(
         request: Request,
         status_code: int = 200,
@@ -5105,28 +5647,12 @@ def create_app() -> FastAPI:
         values: Optional[Dict[str, object]] = None,
     ) -> HTMLResponse:
         config = load_app_config()
+        context = {"request": request}
+        context.update(ticket_create_form_context(config, values=values, error=error))
         return templates.TemplateResponse(
             request,
             "submit.html",
-            {
-                "request": request,
-                "stores": config.stores,
-                "request_types": config.request_types,
-                "urgency_levels": config.urgency_levels,
-                "brands": config.brands,
-                "image_accept": ",".join(f".{extension}" for extension in config.allowed_image_extensions),
-                "file_accept": ",".join(f".{extension}" for extension in config.allowed_file_extensions),
-                "max_image_count": config.max_image_count,
-                "max_total_upload_mb": config.max_total_upload_mb,
-                "max_image_mb": config.max_image_mb,
-                "allowed_file_extensions": config.allowed_file_extensions,
-                "max_file_count": config.max_file_count,
-                "max_file_mb": config.max_file_mb,
-                "max_total_file_upload_mb": config.max_total_file_upload_mb,
-                "error": error,
-                "values": values or {},
-                "request_type_rules_json": json.dumps(load_request_type_rules(), ensure_ascii=False),
-            },
+            context,
             status_code=status_code,
         )
 
@@ -5323,20 +5849,42 @@ def create_app() -> FastAPI:
         admin: str,
         store_name: str = "",
         status: str = "",
+        scope: str = "active",
+        page: int = 1,
         error: str = "",
         success: str = "",
         status_code: int = 200,
     ) -> HTMLResponse:
         config = load_app_config()
+        selected_scope = normalize_employee_record_scope(scope)
+        all_employees = fetch_employees(store_name, status, selected_scope)
+        page_size = 24
+        total_count = len(all_employees)
+        total_pages = max(1, (total_count + page_size - 1) // page_size)
+        current_page = min(max(page, 1), total_pages)
+        start_index = (current_page - 1) * page_size
+        employees = all_employees[start_index : start_index + page_size]
+        filters = {"store_name": store_name.strip(), "status": status.strip(), "scope": selected_scope}
+        base_params = {key: value for key, value in filters.items() if value}
         return templates.TemplateResponse(
             request,
             "employees.html",
             {
                 "request": request,
-                "employees": fetch_employees(store_name, status),
+                "employees": employees,
                 "stores": config.stores,
                 "statuses": EMPLOYEE_STATUSES,
-                "filters": {"store_name": store_name.strip(), "status": status.strip()},
+                "filters": filters,
+                "pagination": {
+                    "current_page": current_page,
+                    "total_pages": total_pages,
+                    "total_count": total_count,
+                    "page_size": page_size,
+                    "prev_url": "/admin/employees?"
+                    + urlencode({**base_params, "page": max(current_page - 1, 1)}),
+                    "next_url": "/admin/employees?"
+                    + urlencode({**base_params, "page": min(current_page + 1, total_pages)}),
+                },
                 "error": error,
                 "success": success,
                 "admin_user": admin,
@@ -5372,6 +5920,12 @@ def create_app() -> FastAPI:
         store_name: str = "",
         month: str = "",
         employee_status: str = "",
+        view: str = "calendar",
+        show_cross_store: bool = False,
+        scope: str = "store",
+        employee_scope: str = "all",
+        employee_ids: Optional[List[int]] = None,
+        shift_type_id: int = 0,
         saved: int = 0,
         saved_count: int = 0,
         created_count: int = 0,
@@ -5382,8 +5936,21 @@ def create_app() -> FastAPI:
         status_code: int = 200,
     ) -> HTMLResponse:
         config = load_app_config()
-        selected_store = store_name.strip() or (config.stores[0] if config.stores else "")
-        context = fetch_schedule_context(selected_store, month, employee_status, config)
+        selected_view = normalize_schedule_view(view)
+        selected_scope = "all" if scope == "all" or selected_view == "store-summary" else "store"
+        selected_store = "" if selected_scope == "all" else (store_name.strip() or (config.stores[0] if config.stores else ""))
+        context = fetch_schedule_context(
+            selected_store,
+            month,
+            employee_status,
+            config,
+            selected_view,
+            show_cross_store,
+            selected_scope,
+            employee_scope,
+            employee_ids,
+            shift_type_id,
+        )
         return templates.TemplateResponse(
             request,
             "schedules.html",
@@ -5733,6 +6300,65 @@ def create_app() -> FastAPI:
             {"request": request, "ticket_no": ticket_no},
         )
 
+    @app.post("/admin/tickets/create")
+    async def admin_create_ticket(
+        request: Request,
+        admin: str = Depends(require_admin),
+        store_names: Optional[List[str]] = Form(None),
+        brands: Optional[List[str]] = Form(None),
+        brand_extra: str = Form(""),
+        store_name: str = Form(""),
+        submitter: str = Form(""),
+        request_type: str = Form(""),
+        urgency: str = Form(""),
+        brand: str = Form(""),
+        product_name: str = Form(""),
+        sku_barcode: str = Form(""),
+        quantity: str = Form(""),
+        description: str = Form(""),
+        expected_finish_date: str = Form(""),
+        images: Optional[List[UploadFile]] = File(None),
+        files: Optional[List[UploadFile]] = File(None),
+        csrf_token: str = Form(""),
+    ) -> JSONResponse:
+        require_admin_csrf(request, csrf_token)
+        config = load_app_config()
+        result = await create_ticket_from_submission(
+            store_names=store_names,
+            brands=brands,
+            brand_extra=brand_extra,
+            store_name=store_name,
+            submitter=submitter,
+            request_type=request_type,
+            urgency=urgency,
+            brand=brand,
+            product_name=product_name,
+            sku_barcode=sku_barcode,
+            quantity=quantity,
+            description=description,
+            expected_finish_date=expected_finish_date,
+            images=images,
+            files=files,
+            config=config,
+        )
+        if not result["ok"]:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": str(result.get("error") or ""),
+                    "values": result.get("values") or {},
+                },
+                status_code=int(result.get("status_code") or 400),
+            )
+        return JSONResponse(
+            {
+                "ok": True,
+                "ticket_id": result["ticket_id"],
+                "ticket_no": result["ticket_no"],
+                "message": f"已创建工单 {result['ticket_no']}。",
+            }
+        )
+
     @app.get("/query", response_class=HTMLResponse)
     def query_page(
         request: Request,
@@ -6009,6 +6635,18 @@ def create_app() -> FastAPI:
                 "error": error,
                 "admin_user": admin,
                 "csrf_token": current_csrf_token(request),
+                "brands": config.brands,
+                "image_accept": ",".join(f".{extension}" for extension in config.allowed_image_extensions),
+                "file_accept": ",".join(f".{extension}" for extension in config.allowed_file_extensions),
+                "max_image_count": config.max_image_count,
+                "max_total_upload_mb": config.max_total_upload_mb,
+                "max_image_mb": config.max_image_mb,
+                "allowed_file_extensions": config.allowed_file_extensions,
+                "max_file_count": config.max_file_count,
+                "max_file_mb": config.max_file_mb,
+                "max_total_file_upload_mb": config.max_total_file_upload_mb,
+                "values": {},
+                "request_type_rules_json": json.dumps(load_request_type_rules(), ensure_ascii=False),
             },
         )
 
@@ -6033,10 +6671,12 @@ def create_app() -> FastAPI:
         admin: str = Depends(require_admin),
         store_name: str = Query(""),
         status: str = Query(""),
+        scope: str = Query("active"),
+        page: int = Query(1),
         error: str = Query(""),
         success: str = Query(""),
     ) -> HTMLResponse:
-        return render_employees_page(request, admin, store_name, status, error=error, success=success)
+        return render_employees_page(request, admin, store_name, status, scope=scope, page=page, error=error, success=success)
 
     @app.post("/admin/employees")
     def create_employee_route(
@@ -6044,6 +6684,7 @@ def create_app() -> FastAPI:
         admin: str = Depends(require_admin),
         employee_name: str = Form(""),
         store_name: str = Form(""),
+        primary_store_name: str = Form(""),
         store_names: Optional[List[str]] = Form(None),
         role: str = Form(""),
         phone: str = Form(""),
@@ -6052,7 +6693,16 @@ def create_app() -> FastAPI:
     ) -> RedirectResponse:
         require_admin_csrf(request, csrf_token)
         try:
-            create_employee(employee_name, store_name, role, phone, status, load_app_config(), store_names=store_names)
+            create_employee(
+                employee_name,
+                store_name,
+                role,
+                phone,
+                status,
+                load_app_config(),
+                store_names=store_names,
+                primary_store_name=primary_store_name,
+            )
         except (ValueError, HTTPException) as exc:
             return RedirectResponse(url="/admin/employees?" + urlencode({"error": form_error_message(exc)}), status_code=303)
         return RedirectResponse(url="/admin/employees?" + urlencode({"success": "已新增员工。"}), status_code=303)
@@ -6064,6 +6714,7 @@ def create_app() -> FastAPI:
         admin: str = Depends(require_admin),
         employee_name: str = Form(""),
         store_name: str = Form(""),
+        primary_store_name: str = Form(""),
         store_names: Optional[List[str]] = Form(None),
         role: str = Form(""),
         phone: str = Form(""),
@@ -6072,7 +6723,17 @@ def create_app() -> FastAPI:
     ) -> RedirectResponse:
         require_admin_csrf(request, csrf_token)
         try:
-            update_employee(employee_id, employee_name, store_name, role, phone, status, load_app_config(), store_names=store_names)
+            update_employee(
+                employee_id,
+                employee_name,
+                store_name,
+                role,
+                phone,
+                status,
+                load_app_config(),
+                store_names=store_names,
+                primary_store_name=primary_store_name,
+            )
         except (ValueError, HTTPException) as exc:
             return RedirectResponse(url="/admin/employees?" + urlencode({"error": form_error_message(exc)}), status_code=303)
         return RedirectResponse(url="/admin/employees?" + urlencode({"success": "员工信息已保存。"}), status_code=303)
@@ -6090,6 +6751,81 @@ def create_app() -> FastAPI:
         except HTTPException as exc:
             return RedirectResponse(url="/admin/employees?" + urlencode({"error": form_error_message(exc)}), status_code=303)
         return RedirectResponse(url="/admin/employees?" + urlencode({"success": "员工已标记为离职。"}), status_code=303)
+
+    @app.post("/admin/employees/{employee_id}/archive")
+    def archive_employee_route(
+        request: Request,
+        employee_id: int,
+        admin: str = Depends(require_admin),
+        archive_reason: str = Form(""),
+        csrf_token: str = Form(""),
+    ) -> RedirectResponse:
+        require_admin_csrf(request, csrf_token)
+        try:
+            archive_employee(employee_id, admin, archive_reason)
+        except (ValueError, HTTPException) as exc:
+            return RedirectResponse(url="/admin/employees?" + urlencode({"error": form_error_message(exc)}), status_code=303)
+        return RedirectResponse(url="/admin/employees?" + urlencode({"success": "员工已归档。"}), status_code=303)
+
+    @app.post("/admin/employees/{employee_id}/unarchive")
+    def unarchive_employee_route(
+        request: Request,
+        employee_id: int,
+        _admin: str = Depends(require_admin),
+        csrf_token: str = Form(""),
+    ) -> RedirectResponse:
+        require_admin_csrf(request, csrf_token)
+        try:
+            unarchive_employee(employee_id)
+        except (ValueError, HTTPException) as exc:
+            return RedirectResponse(url="/admin/employees?scope=archive&" + urlencode({"error": form_error_message(exc)}), status_code=303)
+        return RedirectResponse(url="/admin/employees?" + urlencode({"success": "员工已取消归档。"}), status_code=303)
+
+    @app.post("/admin/employees/{employee_id}/delete")
+    def delete_employee_route(
+        request: Request,
+        employee_id: int,
+        admin: str = Depends(require_admin),
+        delete_reason: str = Form(""),
+        csrf_token: str = Form(""),
+    ) -> RedirectResponse:
+        require_admin_csrf(request, csrf_token)
+        try:
+            soft_delete_employee(employee_id, admin, delete_reason)
+        except (ValueError, HTTPException) as exc:
+            return RedirectResponse(url="/admin/employees?" + urlencode({"error": form_error_message(exc)}), status_code=303)
+        return RedirectResponse(url="/admin/employees?" + urlencode({"success": "员工已移入回收站。"}), status_code=303)
+
+    @app.post("/admin/employees/{employee_id}/restore")
+    def restore_employee_route(
+        request: Request,
+        employee_id: int,
+        _admin: str = Depends(require_admin),
+        csrf_token: str = Form(""),
+    ) -> RedirectResponse:
+        require_admin_csrf(request, csrf_token)
+        try:
+            restore_employee(employee_id)
+        except (ValueError, HTTPException) as exc:
+            return RedirectResponse(url="/admin/employees?scope=trash&" + urlencode({"error": form_error_message(exc)}), status_code=303)
+        return RedirectResponse(url="/admin/employees?" + urlencode({"success": "员工已恢复。"}), status_code=303)
+
+    @app.post("/admin/employees/{employee_id}/hard-delete")
+    def hard_delete_employee_route(
+        request: Request,
+        employee_id: int,
+        _admin: str = Depends(require_admin),
+        confirm_delete: str = Form(""),
+        csrf_token: str = Form(""),
+    ) -> RedirectResponse:
+        require_admin_csrf(request, csrf_token)
+        if confirm_delete != "1":
+            return RedirectResponse(url="/admin/employees?scope=trash&" + urlencode({"error": "请二次确认后再永久删除员工。"}), status_code=303)
+        try:
+            hard_delete_employee(employee_id)
+        except (ValueError, HTTPException) as exc:
+            return RedirectResponse(url="/admin/employees?scope=trash&" + urlencode({"error": form_error_message(exc)}), status_code=303)
+        return RedirectResponse(url="/admin/employees?scope=trash&" + urlencode({"success": "员工已永久删除。"}), status_code=303)
 
     @app.get("/admin/shift-types", response_class=HTMLResponse)
     def admin_shift_types(
@@ -6167,6 +6903,13 @@ def create_app() -> FastAPI:
         store_name: str = Query(""),
         month: str = Query(""),
         employee_status: str = Query(""),
+        view: str = Query(""),
+        view_mode: str = Query(""),
+        employee_scope: str = Query("all"),
+        employee_ids: Optional[List[int]] = Query(None),
+        shift_type_id: int = Query(0),
+        show_cross_store: str = Query(""),
+        scope: str = Query("store"),
         saved: int = Query(0),
         saved_count: int = Query(0),
         created_count: int = Query(0),
@@ -6181,6 +6924,12 @@ def create_app() -> FastAPI:
             store_name,
             month,
             employee_status,
+            view_mode or view or "calendar",
+            show_cross_store in {"1", "true", "on", "yes"},
+            scope,
+            employee_scope,
+            employee_ids,
+            shift_type_id,
             saved,
             saved_count,
             created_count,
@@ -6233,6 +6982,46 @@ def create_app() -> FastAPI:
                 updated_count=result["updated_count"],
                 skipped_count=result["skipped_count"],
             ),
+            status_code=303,
+        )
+
+    @app.post("/admin/schedules/copy-day")
+    def copy_schedule_day_route(
+        request: Request,
+        admin: str = Depends(require_admin),
+        store_name: str = Form(""),
+        target_date: str = Form(""),
+        csrf_token: str = Form(""),
+    ) -> RedirectResponse:
+        require_admin_csrf(request, csrf_token)
+        month_for_return = datetime.now().strftime("%Y-%m")
+        try:
+            result = copy_previous_day_schedules(store_name, target_date, admin)
+            month_for_return = str(result["target_date"])[:7]
+        except (ValueError, HTTPException) as exc:
+            return RedirectResponse(url=schedule_redirect_url(store_name, month_for_return, error=form_error_message(exc)), status_code=303)
+        return RedirectResponse(
+            url=schedule_redirect_url(store_name, month_for_return, saved_count=int(result["copied_count"] or 0)),
+            status_code=303,
+        )
+
+    @app.post("/admin/schedules/clear-employee")
+    def clear_employee_schedule_route(
+        request: Request,
+        admin: str = Depends(require_admin),
+        store_name: str = Form(""),
+        employee_id: int = Form(0),
+        month: str = Form(""),
+        csrf_token: str = Form(""),
+    ) -> RedirectResponse:
+        require_admin_csrf(request, csrf_token)
+        month_for_return = month.strip() or datetime.now().strftime("%Y-%m")
+        try:
+            deleted_count = clear_employee_month_schedules(store_name, employee_id, month_for_return, admin)
+        except (ValueError, HTTPException) as exc:
+            return RedirectResponse(url=schedule_redirect_url(store_name, month_for_return, error=form_error_message(exc)), status_code=303)
+        return RedirectResponse(
+            url=schedule_redirect_url(store_name, month_for_return, deleted=deleted_count),
             status_code=303,
         )
 
@@ -7298,11 +8087,14 @@ def create_app() -> FastAPI:
         _admin: str = Depends(require_admin),
         store_name: str = Query(""),
         month: str = Query(""),
+        shift_type_id: int = Query(0),
     ) -> StreamingResponse:
         selected_month = normalize_month(month)
-        rows = fetch_schedule_rows(store_name, selected_month)
+        selected_store = store_name.strip()
+        rows = fetch_schedule_rows(selected_store, selected_month, shift_type_id=shift_type_id)
         output = build_schedule_excel(rows)
-        filename = f"门店排班_{selected_month.replace('-', '')}.xlsx"
+        filename_store = selected_store or "全部门店"
+        filename = f"门店排班_{filename_store}_{selected_month.replace('-', '')}.xlsx"
         return StreamingResponse(
             output,
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

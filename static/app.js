@@ -40,9 +40,20 @@ function initializeStoreRequestApp() {
   const notificationToasts = document.querySelector("[data-notification-toasts]");
   const modalOpenButtons = Array.from(document.querySelectorAll("[data-modal-open]"));
   const modalCloseButtons = Array.from(document.querySelectorAll("[data-modal-close]"));
+  const modalOverlays = Array.from(document.querySelectorAll("[data-modal-overlay]"));
+  const drawerOpenButtons = Array.from(document.querySelectorAll("[data-drawer-open]"));
+  const drawerCloseButtons = Array.from(document.querySelectorAll("[data-drawer-close]"));
+  const drawerOverlays = Array.from(document.querySelectorAll("[data-drawer]"));
+  const feedbackForms = Array.from(document.querySelectorAll("[data-feedback-form]"));
+  const filterToggleButtons = Array.from(document.querySelectorAll("[data-filter-toggle]"));
+  const restShiftButton = document.querySelector("[data-select-rest-shift]");
+  const copyYesterdayButton = document.querySelector("[data-copy-yesterday-ui]");
+  const adminTicketCreateForms = Array.from(document.querySelectorAll("[data-admin-ticket-create-form]"));
   const scheduleBulkForm = document.querySelector("[data-schedule-bulk-form]");
   const scheduleBulkSummary = document.querySelector("[data-schedule-bulk-summary]");
   const selectAllEmployeesButton = document.querySelector("[data-select-all-employees]");
+  const selectPrimaryEmployeesButton = document.querySelector("[data-select-primary-employees]");
+  const selectSupportEmployeesButton = document.querySelector("[data-select-support-employees]");
   const clearEmployeesButton = document.querySelector("[data-clear-employees]");
   const selectAllScheduleDatesButton = document.querySelector("[data-select-all-schedule-dates]");
   const selectWeekdaysButton = document.querySelector("[data-select-weekdays]");
@@ -132,6 +143,10 @@ function initializeStoreRequestApp() {
     }
     modal.hidden = false;
     modal.classList.add("is-open");
+    const firstInput = modal.querySelector("input:not([type='hidden']), select, textarea, button");
+    if (firstInput) {
+      window.setTimeout(() => firstInput.focus(), 0);
+    }
   }
 
   function closeModal(modal) {
@@ -140,6 +155,67 @@ function initializeStoreRequestApp() {
     }
     modal.classList.remove("is-open");
     modal.hidden = true;
+  }
+
+  window.openModal = (targetName) => openModal(findModalTarget(targetName));
+  window.closeModal = (targetName) => closeModal(findModalTarget(targetName));
+
+  function findDrawerTarget(targetName) {
+    if (!targetName) {
+      return null;
+    }
+    const byId = document.getElementById(targetName);
+    if (byId) {
+      return byId;
+    }
+    return Array.from(document.querySelectorAll("[data-drawer]")).find((drawer) => drawer.dataset.drawer === targetName) || null;
+  }
+
+  function openDrawer(drawer) {
+    if (!drawer) {
+      return;
+    }
+    drawer.hidden = false;
+    drawer.classList.add("is-open");
+    const firstInput = drawer.querySelector("input:not([type='hidden']), select, textarea, button");
+    if (firstInput) {
+      window.setTimeout(() => firstInput.focus(), 0);
+    }
+  }
+
+  function closeDrawer(drawer) {
+    if (!drawer) {
+      return;
+    }
+    drawer.classList.remove("is-open");
+    drawer.hidden = true;
+  }
+
+  function showAppToast(message, tone = "success") {
+    if (!message) {
+      return;
+    }
+    let toastArea = document.querySelector("[data-app-toast-area]");
+    if (!toastArea) {
+      toastArea = document.createElement("div");
+      toastArea.className = "app-toast-area";
+      toastArea.dataset.appToastArea = "1";
+      document.body.appendChild(toastArea);
+    }
+    const toast = document.createElement("div");
+    toast.className = `app-toast ${tone}`;
+    toast.textContent = message;
+    toastArea.appendChild(toast);
+    window.setTimeout(() => toast.remove(), 1800);
+  }
+
+  function setModalError(form, message) {
+    const errorBox = form ? form.querySelector("[data-modal-error]") : null;
+    if (!errorBox) {
+      return;
+    }
+    errorBox.textContent = message || "";
+    errorBox.hidden = !message;
   }
 
   function scheduleEmployeeInputs() {
@@ -165,6 +241,18 @@ function initializeStoreRequestApp() {
   function setScheduleInputsChecked(inputs, checked) {
     inputs.forEach((input) => {
       input.checked = checked;
+    });
+    updateScheduleBulkSummary();
+  }
+
+  function setScheduleEmployeesByRole(role) {
+    scheduleEmployeeInputs().forEach((input) => {
+      const chip = input.closest(".schedule-employee-chip");
+      if (!chip) {
+        input.checked = false;
+        return;
+      }
+      input.checked = role === "primary" ? chip.hasAttribute("data-primary-store-employee") : chip.hasAttribute("data-support-store-employee");
     });
     updateScheduleBulkSummary();
   }
@@ -784,9 +872,15 @@ function initializeStoreRequestApp() {
   if (scheduleBulkForm) {
     scheduleEmployeeInputs().forEach((input) => input.addEventListener("change", updateScheduleBulkSummary));
     scheduleDateInputs().forEach((input) => input.addEventListener("change", updateScheduleBulkSummary));
-    if (selectAllEmployeesButton) {
-      selectAllEmployeesButton.addEventListener("click", () => setScheduleInputsChecked(scheduleEmployeeInputs(), true));
-    }
+  if (selectAllEmployeesButton) {
+    selectAllEmployeesButton.addEventListener("click", () => setScheduleInputsChecked(scheduleEmployeeInputs(), true));
+  }
+  if (selectPrimaryEmployeesButton) {
+    selectPrimaryEmployeesButton.addEventListener("click", () => setScheduleEmployeesByRole("primary"));
+  }
+  if (selectSupportEmployeesButton) {
+    selectSupportEmployeesButton.addEventListener("click", () => setScheduleEmployeesByRole("support"));
+  }
     if (clearEmployeesButton) {
       clearEmployeesButton.addEventListener("click", () => setScheduleInputsChecked(scheduleEmployeeInputs(), false));
     }
@@ -828,6 +922,150 @@ function initializeStoreRequestApp() {
       event.preventDefault();
       event.stopPropagation();
       closeModal(button.closest("[data-modal]"));
+    });
+  });
+
+  modalOverlays.forEach((overlay) => {
+    overlay.addEventListener("click", (event) => {
+      if (event.target !== overlay || overlay.dataset.closeOnOverlay === "0") {
+        return;
+      }
+      closeModal(overlay);
+    });
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") {
+      return;
+    }
+    const openModals = Array.from(document.querySelectorAll("[data-modal].is-open"));
+    const latestModal = openModals[openModals.length - 1];
+    if (latestModal) {
+      closeModal(latestModal);
+      return;
+    }
+    const openDrawers = Array.from(document.querySelectorAll("[data-drawer].is-open"));
+    const latestDrawer = openDrawers[openDrawers.length - 1];
+    if (latestDrawer) {
+      closeDrawer(latestDrawer);
+    }
+  });
+
+  drawerOpenButtons.forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      openDrawer(findDrawerTarget(button.dataset.drawerOpen || ""));
+    });
+  });
+
+  drawerCloseButtons.forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      closeDrawer(button.closest("[data-drawer]"));
+    });
+  });
+
+  drawerOverlays.forEach((drawer) => {
+    drawer.addEventListener("click", (event) => {
+      if (event.target === drawer) {
+        closeDrawer(drawer);
+      }
+    });
+  });
+
+  filterToggleButtons.forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      const target = document.getElementById(button.dataset.filterToggle || "");
+      if (target && target.tagName.toLowerCase() === "details") {
+        target.open = !target.open;
+      }
+    });
+  });
+
+  feedbackForms.forEach((form) => {
+    form.addEventListener("submit", (event) => {
+      const submitter = event.submitter || form.querySelector('[type="submit"]');
+      if (!submitter) {
+        return;
+      }
+      submitter.dataset.originalText = submitter.dataset.originalText || submitter.textContent;
+      submitter.textContent =
+        form.getAttribute("data-loading-label") || submitter.getAttribute("data-loading-label") || "处理中...";
+      submitter.disabled = true;
+    });
+  });
+
+  document.querySelectorAll(".alert-success, .alert-error").forEach((alert) => {
+    const message = alert.textContent ? alert.textContent.trim() : "";
+    if (message) {
+      showAppToast(message, alert.classList.contains("alert-error") ? "error" : "success");
+    }
+  });
+
+  if (restShiftButton && scheduleBulkForm) {
+    restShiftButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      const shiftSelect = scheduleBulkForm.querySelector("[data-shift-select]");
+      if (!shiftSelect) {
+        return;
+      }
+      const restOption = Array.from(shiftSelect.options).find((option) => (option.dataset.shiftName || option.textContent).includes("休息"));
+      if (restOption) {
+        shiftSelect.value = restOption.value;
+        showAppToast("已选择休息班次，请选择日期和员工后保存。", "success");
+      }
+    });
+  }
+
+  if (copyYesterdayButton) {
+    copyYesterdayButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      showAppToast("请选择目标日期后，按昨日排班模板复制。", "success");
+    });
+  }
+
+  adminTicketCreateForms.forEach((form) => {
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      setModalError(form, "");
+      const submitButton = event.submitter || form.querySelector('[type="submit"]');
+      if (submitButton) {
+        submitButton.disabled = true;
+      }
+      try {
+        const response = await fetch(form.action, {
+          method: "POST",
+          body: new FormData(form),
+          credentials: "same-origin",
+          headers: {
+            Accept: "application/json",
+          },
+        });
+        let payload = {};
+        try {
+          payload = await response.json();
+        } catch (_error) {
+          payload = {};
+        }
+        if (!response.ok || !payload.ok) {
+          setModalError(form, payload.error || "工单创建失败，请检查后重试。");
+          return;
+        }
+        closeModal(form.closest("[data-modal]"));
+        showAppToast(payload.message || "工单已创建。", "success");
+        window.setTimeout(() => {
+          window.location.reload();
+        }, 650);
+      } catch (_error) {
+        setModalError(form, "工单创建失败，请检查网络后重试。");
+      } finally {
+        if (submitButton) {
+          submitButton.disabled = false;
+        }
+      }
     });
   });
 

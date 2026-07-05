@@ -3,8 +3,10 @@
 {% set page_eyebrow = '止痒工单后台' %}
 {% set current_menu = 'tickets' %}
 {% extends "base_admin.html" %}
+{% from "components/modal.html" import modal %}
 
 {% block topbar_actions %}
+<button class="primary-button compact" type="button" data-modal-open="ticket-create-modal">新建工单</button>
 <a class="quick-action-button" href="{{ export_url }}">导出 Excel</a>
 <a class="ghost-button compact" href="/admin/dashboard">查看统计</a>
 <a class="ghost-button compact" href="/admin/cleanup">清理测试数据</a>
@@ -20,6 +22,18 @@
 {% if error %}
 <div class="alert alert-error">{{ error }}</div>
 {% endif %}
+
+{% call modal("ticket-create-modal", "新建工单") %}
+<form class="form-stack modal-form ticket-create-modal-form" method="post" action="/admin/tickets/create" enctype="multipart/form-data" data-admin-ticket-create-form>
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <div class="alert alert-error modal-form-error" data-modal-error hidden></div>
+  {% include "components/ticket_create_form_fields.html" %}
+  <footer class="modal-footer">
+    <button class="ghost-button compact" type="button" data-modal-close>取消</button>
+    <button class="primary-button compact" type="submit" data-modal-submit>保存工单</button>
+  </footer>
+</form>
+{% endcall %}
 
 <section class="stats-section work-card" aria-label="统计概览">
   <div class="section-heading admin-section-heading">
