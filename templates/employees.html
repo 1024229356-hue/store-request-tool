@@ -52,8 +52,8 @@
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <label><span>员工姓名</span><input name="employee_name" required></label>
     <label>
-      <span>所属门店</span>
-      <select name="store_name" required>
+      <span>绑定门店</span>
+      <select name="store_names" multiple size="3" required>
         {% for store in stores %}<option value="{{ store }}">{{ store }}</option>{% endfor %}
       </select>
     </label>
@@ -91,7 +91,7 @@
         {% for employee in employees %}
         <tr>
           <td>{{ employee.employee_name }}</td>
-          <td>{{ employee.store_name }}</td>
+          <td>{{ employee.store_names_text or employee.store_name }}</td>
           <td>{{ employee.role or '' }}</td>
           <td>{{ employee.phone or '' }}</td>
           <td><span class="badge status-badge">{{ employee.status }}</span></td>
@@ -99,9 +99,9 @@
             <form class="schedule-row-form" method="post" action="/admin/employees/{{ employee.id }}/update">
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
               <input name="employee_name" value="{{ employee.employee_name }}" aria-label="员工姓名">
-              <select name="store_name" aria-label="所属门店">
+              <select name="store_names" multiple size="3" aria-label="绑定门店">
                 {% for store in stores %}
-                <option value="{{ store }}" {% if employee.store_name == store %}selected{% endif %}>{{ store }}</option>
+                <option value="{{ store }}" {% if store in employee.store_names %}selected{% endif %}>{{ store }}</option>
                 {% endfor %}
               </select>
               <input name="role" value="{{ employee.role or '' }}" aria-label="角色">

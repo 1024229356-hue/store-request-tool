@@ -2247,6 +2247,11 @@ a:focus-visible {
   font-size: 13px;
 }
 
+.schedule-row-form select[multiple],
+.schedule-form select[multiple] {
+  min-height: 86px;
+}
+
 .schedule-table-wrap {
   overflow-x: auto;
   border: 1px solid var(--line);

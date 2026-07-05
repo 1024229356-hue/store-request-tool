@@ -2106,13 +2106,82 @@ def test_schedule_admin_pages_auth_defaults_and_navigation(tmp_path, monkeypatch
     assert 'href="/schedule"' in public_query.text
 
 
-def create_schedule_employee(client, name, store_name="南京门东店", role="店员", status="在职"):
+def create_schedule_employee(client, name, store_name="南京门东店", role="店员", status="在职", store_names=None):
+    selected_stores = store_names or [store_name]
     return admin_post(
         client,
         "/admin/employees",
-        data={"employee_name": name, "store_name": store_name, "role": role, "phone": "", "status": status},
+        data={
+            "employee_name": name,
+            "store_name": store_name,
+            "store_names": selected_stores,
+            "role": role,
+            "phone": "",
+            "status": status,
+        },
         follow_redirects=False,
     )
+
+
+def test_employee_store_map_filters_schedule_employees_and_allows_cross_store_staff(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch)
+    logged_in_client(client)
+    create_schedule_employee(client, "跨店员工", store_names=["南京门东店", "南昌万寿宫店"])
+    create_schedule_employee(client, "山城员工", store_name="山城巷店")
+
+    employee_store_map = rows_for(tmp_path, "employee_store_map")
+    assert [(row["employee_id"], row["store_name"]) for row in employee_store_map] == [
+        (1, "南京门东店"),
+        (1, "南昌万寿宫店"),
+        (2, "山城巷店"),
+    ]
+
+    nanjing_page = client.get("/admin/schedules?store_name=南京门东店&month=2026-07")
+    assert nanjing_page.status_code == 200
+    assert "跨店员工" in nanjing_page.text
+    assert "山城员工" not in nanjing_page.text
+
+    nanchang_page = client.get("/admin/schedules?store_name=南昌万寿宫店&month=2026-07")
+    assert nanchang_page.status_code == 200
+    assert "跨店员工" in nanchang_page.text
+    assert "山城员工" not in nanchang_page.text
+
+    shancheng_page = client.get("/admin/schedules?store_name=山城巷店&month=2026-07")
+    assert shancheng_page.status_code == 200
+    assert "跨店员工" not in shancheng_page.text
+    assert "山城员工" in shancheng_page.text
+
+    cross_store_schedule = admin_post(
+        client,
+        "/admin/schedules",
+        data={
+            "store_name": "南昌万寿宫店",
+            "employee_ids": ["1"],
+            "schedule_dates": ["2026-07-06"],
+            "shift_type_id": "1",
+            "overwrite_existing": "1",
+        },
+        follow_redirects=False,
+    )
+    assert cross_store_schedule.status_code == 303
+    schedules = rows_for(tmp_path, "store_schedules")
+    assert [(row["store_name"], row["employee_id"]) for row in schedules] == [("南昌万寿宫店", 1)]
+
+    unrelated_store_schedule = admin_post(
+        client,
+        "/admin/schedules",
+        data={
+            "store_name": "南京门东店",
+            "employee_ids": ["2"],
+            "schedule_dates": ["2026-07-07"],
+            "shift_type_id": "1",
+            "overwrite_existing": "1",
+        },
+        follow_redirects=False,
+    )
+    assert unrelated_store_schedule.status_code == 303
+    assert "员工必须绑定该门店" in client.get(unrelated_store_schedule.headers["location"]).text
+    assert len(rows_for(tmp_path, "store_schedules")) == 1
 
 
 def test_schedule_page_exposes_bulk_employee_and_date_controls(tmp_path, monkeypatch):
@@ -2273,7 +2342,7 @@ def test_bulk_schedule_validation_errors_return_schedule_page(tmp_path, monkeypa
         follow_redirects=False,
     )
     assert wrong_store.status_code == 303
-    assert "员工必须属于该门店" in client.get(wrong_store.headers["location"]).text
+    assert "员工必须绑定该门店" in client.get(wrong_store.headers["location"]).text
 
 
 def test_bulk_schedule_security_keeps_public_schedule_read_only(tmp_path, monkeypatch):
@@ -2342,13 +2411,19 @@ def test_employee_and_shift_type_management_lifecycle(tmp_path, monkeypatch):
     assert employees[0]["employee_name"] == "张小排"
     assert employees[0]["store_name"] == "南京门东店"
     assert employees[0]["status"] == "在职"
+    assert [(row["employee_id"], row["store_name"]) for row in rows_for(tmp_path, "employee_store_map")] == [(1, "南京门东店")]
+
+    employee_page = client.get("/admin/employees")
+    assert employee_page.status_code == 200
+    assert 'name="store_names"' in employee_page.text
+    assert "绑定门店" in employee_page.text
 
     update_employee = admin_post(
         client,
         "/admin/employees/1/update",
         data={
             "employee_name": "张小排",
-            "store_name": "南京门东店",
+            "store_names": ["南京门东店", "南昌万寿宫店"],
             "role": "值班员",
             "phone": "13900000000",
             "status": "在职",
@@ -2357,6 +2432,10 @@ def test_employee_and_shift_type_management_lifecycle(tmp_path, monkeypatch):
     )
     assert update_employee.status_code == 303
     assert rows_for(tmp_path, "employees")[0]["role"] == "值班员"
+    assert [(row["employee_id"], row["store_name"]) for row in rows_for(tmp_path, "employee_store_map")] == [
+        (1, "南京门东店"),
+        (1, "南昌万寿宫店"),
+    ]
 
     disable_employee = admin_post(client, "/admin/employees/1/disable", follow_redirects=False)
     assert disable_employee.status_code == 303
@@ -2899,6 +2978,69 @@ def test_legacy_database_is_migrated_without_losing_existing_rows(tmp_path, monk
     admin_page = client.get("/admin")
     assert admin_page.status_code == 200
     assert "旧库里的工单" in admin_page.text
+
+
+def test_legacy_employee_store_name_is_backfilled_to_employee_store_map(tmp_path, monkeypatch):
+    config_dir = tmp_path / "config"
+    write_config(config_dir)
+    db_path = tmp_path / "tickets.db"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE employees (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                employee_name TEXT NOT NULL,
+                store_name TEXT NOT NULL,
+                role TEXT,
+                phone TEXT,
+                status TEXT NOT NULL DEFAULT '在职',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO employees (
+                employee_name, store_name, role, phone, status, created_at, updated_at
+            )
+            VALUES ('旧南京员工', '南京门东店', '店员', '', '在职', '2026-07-03 10:00:00', '2026-07-03 10:00:00')
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO employees (
+                employee_name, store_name, role, phone, status, created_at, updated_at
+            )
+            VALUES ('旧南昌员工', '南昌万寿宫店', '店员', '', '在职', '2026-07-03 10:00:00', '2026-07-03 10:00:00')
+            """
+        )
+
+    monkeypatch.setenv("STORE_REQUEST_DB_PATH", str(db_path))
+    monkeypatch.setenv("STORE_REQUEST_UPLOAD_DIR", str(tmp_path / "uploads"))
+    monkeypatch.setenv("STORE_REQUEST_CONFIG_DIR", str(config_dir))
+    monkeypatch.setenv("ADMIN_USERS", "")
+    monkeypatch.setenv("ADMIN_USERNAME", ADMIN_AUTH[0])
+    monkeypatch.setenv("ADMIN_PASSWORD", ADMIN_AUTH[1])
+    monkeypatch.setenv("SESSION_SECRET", "test-session-secret")
+    monkeypatch.syspath_prepend(str(PROJECT_DIR))
+    sys.modules.pop("main", None)
+    main = importlib.import_module("main")
+    monkeypatch.delenv("ADMIN_USERS", raising=False)
+
+    with sqlite3.connect(db_path) as connection:
+        pairs = connection.execute(
+            "SELECT employee_id, store_name FROM employee_store_map ORDER BY employee_id, store_name"
+        ).fetchall()
+
+    assert pairs == [(1, "南京门东店"), (2, "南昌万寿宫店")]
+
+    client = TestClient(main.app)
+    assert_login_success(login_admin(client))
+    nanjing_page = client.get("/admin/schedules?store_name=南京门东店&month=2026-07")
+    assert nanjing_page.status_code == 200
+    assert "旧南京员工" in nanjing_page.text
+    assert "旧南昌员工" not in nanjing_page.text
 
 
 def test_config_files_drive_options_validation_images_and_export_name(tmp_path, monkeypatch):

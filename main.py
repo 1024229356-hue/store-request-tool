@@ -771,6 +771,22 @@ def backfill_ticket_relations(connection: sqlite3.Connection) -> None:
             )
 
 
+def backfill_employee_store_map(connection: sqlite3.Connection) -> None:
+    timestamp = now_text()
+    rows = connection.execute("SELECT id, store_name, created_at FROM employees").fetchall()
+    for row in rows:
+        employee_id = int(row["id"])
+        created_at = str(row["created_at"] or timestamp)
+        for store_name in split_multi_value_text(row["store_name"]):
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO employee_store_map (employee_id, store_name, created_at)
+                VALUES (?, ?, ?)
+                """,
+                (employee_id, store_name, created_at),
+            )
+
+
 DEFAULT_SHIFT_TYPES = [
     ("早班", "09:30", "17:30", 8.0, "#2563eb"),
     ("晚班", "14:00", "22:00", 8.0, "#7c3aed"),
@@ -1027,6 +1043,18 @@ def init_db() -> None:
         )
         connection.execute(
             """
+            CREATE TABLE IF NOT EXISTS employee_store_map (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                employee_id INTEGER NOT NULL,
+                store_name TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(employee_id, store_name),
+                FOREIGN KEY (employee_id) REFERENCES employees(id)
+            )
+            """
+        )
+        connection.execute(
+            """
             CREATE TABLE IF NOT EXISTS shift_types (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 shift_name TEXT NOT NULL UNIQUE,
@@ -1094,6 +1122,8 @@ def init_db() -> None:
         connection.execute("CREATE INDEX IF NOT EXISTS idx_notification_reads_username ON notification_reads(username)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_embedded_pages_enabled ON embedded_pages(enabled)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_employees_store_name ON employees(store_name)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_employee_store_map_employee_id ON employee_store_map(employee_id)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_employee_store_map_store_name ON employee_store_map(store_name)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_store_schedules_store_name ON store_schedules(store_name)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_store_schedules_schedule_date ON store_schedules(schedule_date)")
         add_column_if_missing(connection, "embedded_pages", "storage_type", "TEXT NOT NULL DEFAULT 'html'")
@@ -1108,6 +1138,7 @@ def init_db() -> None:
             add_soft_delete_columns(connection, table_name)
         add_soft_delete_columns(connection, "embedded_pages")
         backfill_ticket_relations(connection)
+        backfill_employee_store_map(connection)
         ensure_default_shift_types(connection)
 
 
@@ -2510,11 +2541,83 @@ def month_date_items(month: str) -> List[Dict[str, object]]:
     return days
 
 
+def normalize_employee_store_bindings(raw_store_names: Optional[List[str]], legacy_store_name: str, config: AppConfig) -> List[str]:
+    store_names = normalize_store_names(raw_store_names, legacy_store_name)
+    if not store_names:
+        raise ValueError("请至少绑定 1 个门店。")
+    valid_stores = set(config.stores)
+    if any(store_name not in valid_stores for store_name in store_names):
+        raise ValueError("请选择有效门店。")
+    return store_names
+
+
+def employee_store_map_for_ids(connection: sqlite3.Connection, employee_ids: Iterable[int]) -> Dict[int, List[str]]:
+    ids = [int(employee_id) for employee_id in employee_ids]
+    if not ids:
+        return {}
+    placeholders = ",".join("?" for _ in ids)
+    rows = connection.execute(
+        f"""
+        SELECT employee_id, store_name
+        FROM employee_store_map
+        WHERE employee_id IN ({placeholders})
+        ORDER BY id
+        """,
+        ids,
+    ).fetchall()
+    store_map: Dict[int, List[str]] = {}
+    for row in rows:
+        employee_id = int(row["employee_id"])
+        store_map.setdefault(employee_id, [])
+        store_name = str(row["store_name"] or "").strip()
+        if store_name and store_name not in store_map[employee_id]:
+            store_map[employee_id].append(store_name)
+    return store_map
+
+
+def attach_employee_store_bindings(
+    connection: sqlite3.Connection,
+    rows: Iterable[sqlite3.Row],
+) -> List[Dict[str, object]]:
+    employees = [dict(row) for row in rows]
+    store_map = employee_store_map_for_ids(connection, [int(employee["id"]) for employee in employees])
+    for employee in employees:
+        employee_id = int(employee["id"])
+        store_names = store_map.get(employee_id, []) or split_multi_value_text(employee.get("store_name"))
+        employee["store_names"] = store_names
+        employee["store_names_text"] = join_display_values(store_names)
+    return employees
+
+
+def replace_employee_store_bindings(
+    connection: sqlite3.Connection,
+    employee_id: int,
+    store_names: Iterable[str],
+    timestamp: str,
+) -> None:
+    connection.execute("DELETE FROM employee_store_map WHERE employee_id = ?", (employee_id,))
+    for store_name in unique_clean_values(store_names):
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO employee_store_map (employee_id, store_name, created_at)
+            VALUES (?, ?, ?)
+            """,
+            (employee_id, store_name, timestamp),
+        )
+
+
+def employee_belongs_to_store(employee: Dict[str, object], store_name: str) -> bool:
+    clean_store = store_name.strip()
+    return bool(clean_store and clean_store in list(employee.get("store_names") or []))
+
+
 def fetch_employees(store_name: str = "", status: str = "") -> List[Dict[str, object]]:
     clauses: List[str] = []
     params: List[object] = []
+    join_sql = ""
     if store_name.strip():
-        clauses.append("store_name = ?")
+        join_sql = "JOIN employee_store_map AS employee_store_map_filter ON employee_store_map_filter.employee_id = employees.id"
+        clauses.append("employee_store_map_filter.store_name = ?")
         params.append(store_name.strip())
     if status.strip():
         clauses.append("status = ?")
@@ -2523,30 +2626,42 @@ def fetch_employees(store_name: str = "", status: str = "") -> List[Dict[str, ob
     with get_connection() as connection:
         rows = connection.execute(
             f"""
-            SELECT id, employee_name, store_name, role, phone, status, created_at, updated_at
+            SELECT
+                employees.id, employees.employee_name, employees.store_name, employees.role,
+                employees.phone, employees.status, employees.created_at, employees.updated_at
             FROM employees
+            {join_sql}
             {where_sql}
-            ORDER BY store_name, status, employee_name, id
+            ORDER BY employees.store_name, employees.status, employees.employee_name, employees.id
             """,
             params,
         ).fetchall()
-    return [dict(row) for row in rows]
+        return attach_employee_store_bindings(connection, rows)
 
 
 def fetch_employee(employee_id: int) -> Optional[Dict[str, object]]:
     with get_connection() as connection:
         row = connection.execute("SELECT * FROM employees WHERE id = ?", (employee_id,)).fetchone()
-    return dict(row) if row else None
+        if not row:
+            return None
+        return attach_employee_store_bindings(connection, [row])[0]
 
 
-def create_employee(employee_name: str, store_name: str, role: str, phone: str, status: str, config: AppConfig) -> int:
+def create_employee(
+    employee_name: str,
+    store_name: str,
+    role: str,
+    phone: str,
+    status: str,
+    config: AppConfig,
+    store_names: Optional[List[str]] = None,
+) -> int:
     clean_name = employee_name.strip()
-    clean_store = store_name.strip()
     clean_status = status.strip() or "在职"
     if not clean_name:
         raise ValueError("请填写员工姓名。")
-    if clean_store not in config.stores:
-        raise ValueError("请选择有效门店。")
+    clean_stores = normalize_employee_store_bindings(store_names, store_name, config)
+    primary_store = clean_stores[0]
     if clean_status not in EMPLOYEE_STATUSES:
         raise ValueError("员工状态不正确。")
     timestamp = now_text()
@@ -2556,23 +2671,34 @@ def create_employee(employee_name: str, store_name: str, role: str, phone: str, 
             INSERT INTO employees (employee_name, store_name, role, phone, status, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (clean_name, clean_store, role.strip(), phone.strip(), clean_status, timestamp, timestamp),
+            (clean_name, primary_store, role.strip(), phone.strip(), clean_status, timestamp, timestamp),
         )
-        return int(cursor.lastrowid)
+        employee_id = int(cursor.lastrowid)
+        replace_employee_store_bindings(connection, employee_id, clean_stores, timestamp)
+        return employee_id
 
 
-def update_employee(employee_id: int, employee_name: str, store_name: str, role: str, phone: str, status: str, config: AppConfig) -> None:
+def update_employee(
+    employee_id: int,
+    employee_name: str,
+    store_name: str,
+    role: str,
+    phone: str,
+    status: str,
+    config: AppConfig,
+    store_names: Optional[List[str]] = None,
+) -> None:
     if not fetch_employee(employee_id):
         raise HTTPException(status_code=404, detail="员工不存在")
     clean_name = employee_name.strip()
-    clean_store = store_name.strip()
     clean_status = status.strip() or "在职"
     if not clean_name:
         raise ValueError("请填写员工姓名。")
-    if clean_store not in config.stores:
-        raise ValueError("请选择有效门店。")
+    clean_stores = normalize_employee_store_bindings(store_names, store_name, config)
+    primary_store = clean_stores[0]
     if clean_status not in EMPLOYEE_STATUSES:
         raise ValueError("员工状态不正确。")
+    timestamp = now_text()
     with get_connection() as connection:
         connection.execute(
             """
@@ -2580,8 +2706,9 @@ def update_employee(employee_id: int, employee_name: str, store_name: str, role:
             SET employee_name = ?, store_name = ?, role = ?, phone = ?, status = ?, updated_at = ?
             WHERE id = ?
             """,
-            (clean_name, clean_store, role.strip(), phone.strip(), clean_status, now_text(), employee_id),
+            (clean_name, primary_store, role.strip(), phone.strip(), clean_status, timestamp, employee_id),
         )
+        replace_employee_store_bindings(connection, employee_id, clean_stores, timestamp)
 
 
 def disable_employee(employee_id: int) -> None:
@@ -2828,8 +2955,8 @@ def upsert_schedule(store_name: str, employee_id: int, schedule_date: str, shift
     employee = fetch_employee(employee_id)
     if not employee:
         raise ValueError("员工不存在。")
-    if str(employee.get("store_name") or "") != clean_store:
-        raise ValueError("员工必须属于该门店。")
+    if not employee_belongs_to_store(employee, clean_store):
+        raise ValueError("员工必须绑定该门店。")
     if str(employee.get("status") or "") != "在职":
         raise ValueError("员工必须是在职状态。")
     shift_type = fetch_shift_type(shift_type_id)
@@ -2946,8 +3073,8 @@ def bulk_upsert_schedules(
         employee = fetch_employee(selected_employee_id)
         if not employee:
             raise ValueError("员工不存在。")
-        if str(employee.get("store_name") or "") != clean_store:
-            raise ValueError("员工必须属于该门店。")
+        if not employee_belongs_to_store(employee, clean_store):
+            raise ValueError("员工必须绑定该门店。")
         if str(employee.get("status") or "") != "在职":
             raise ValueError("员工必须是在职状态。")
 
@@ -5917,6 +6044,7 @@ def create_app() -> FastAPI:
         admin: str = Depends(require_admin),
         employee_name: str = Form(""),
         store_name: str = Form(""),
+        store_names: Optional[List[str]] = Form(None),
         role: str = Form(""),
         phone: str = Form(""),
         status: str = Form("在职"),
@@ -5924,7 +6052,7 @@ def create_app() -> FastAPI:
     ) -> RedirectResponse:
         require_admin_csrf(request, csrf_token)
         try:
-            create_employee(employee_name, store_name, role, phone, status, load_app_config())
+            create_employee(employee_name, store_name, role, phone, status, load_app_config(), store_names=store_names)
         except (ValueError, HTTPException) as exc:
             return RedirectResponse(url="/admin/employees?" + urlencode({"error": form_error_message(exc)}), status_code=303)
         return RedirectResponse(url="/admin/employees?" + urlencode({"success": "已新增员工。"}), status_code=303)
@@ -5936,6 +6064,7 @@ def create_app() -> FastAPI:
         admin: str = Depends(require_admin),
         employee_name: str = Form(""),
         store_name: str = Form(""),
+        store_names: Optional[List[str]] = Form(None),
         role: str = Form(""),
         phone: str = Form(""),
         status: str = Form("在职"),
@@ -5943,7 +6072,7 @@ def create_app() -> FastAPI:
     ) -> RedirectResponse:
         require_admin_csrf(request, csrf_token)
         try:
-            update_employee(employee_id, employee_name, store_name, role, phone, status, load_app_config())
+            update_employee(employee_id, employee_name, store_name, role, phone, status, load_app_config(), store_names=store_names)
         except (ValueError, HTTPException) as exc:
             return RedirectResponse(url="/admin/employees?" + urlencode({"error": form_error_message(exc)}), status_code=303)
         return RedirectResponse(url="/admin/employees?" + urlencode({"success": "员工信息已保存。"}), status_code=303)
