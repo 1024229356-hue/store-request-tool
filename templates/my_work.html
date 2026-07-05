@@ -1,0 +1,145 @@
+{% set page_title = '我的待办' %}
+{% set page_subtitle = '负责工单、指派给我的子任务、需要回复的门店沟通集中处理。' %}
+{% set page_eyebrow = '协作工作流' %}
+{% set current_menu = 'my-work' %}
+{% extends "base_admin.html" %}
+
+{% block topbar_actions %}
+<a class="ghost-button compact" href="/admin">工单管理</a>
+<a class="ghost-button compact" href="/admin/archive">归档工单</a>
+{% endblock %}
+
+{% block content %}
+<section class="detail-summary-card work-card todo-summary">
+  <div>
+    <span>待办总数</span>
+    <strong>{{ work.total_count }}</strong>
+  </div>
+  <div>
+    <span>负责工单</span>
+    <strong>{{ work.assigned_count }}</strong>
+  </div>
+  <div>
+    <span>子任务</span>
+    <strong>{{ work.task_count }}</strong>
+  </div>
+  <div>
+    <span>需回复</span>
+    <strong>{{ work.reply_count }}</strong>
+  </div>
+</section>
+
+<section class="admin-section work-card todo-section">
+  <div class="section-heading">
+    <h2>负责工单</h2>
+    <p>当前处理人是 {{ admin_user }} 的活跃工单。</p>
+  </div>
+  {% if work.assigned_tickets %}
+  <table class="ticket-table erp-table todo-table">
+    <thead>
+      <tr>
+        <th>工单号</th>
+        <th>门店</th>
+        <th>需求类型</th>
+        <th>状态</th>
+        <th>下一步</th>
+        <th>最后更新</th>
+        <th>操作</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for ticket in work.assigned_tickets %}
+      <tr>
+        <td><a class="ticket-no-link" href="{{ ticket.detail_url }}">{{ ticket.ticket_no }}</a></td>
+        <td>{{ ticket.store_name }}</td>
+        <td>{{ ticket.request_type }}</td>
+        <td><span class="badge status-badge status-{{ ticket.status }}">{{ ticket.status }}</span></td>
+        <td>
+          <strong>{{ ticket.handler_note or '待更新处理进度' }}</strong>
+          <small>{{ ticket.description_summary }}</small>
+        </td>
+        <td>{{ ticket.updated_at }}</td>
+        <td><a class="ghost-button compact" href="{{ ticket.detail_url }}">处理</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty-note">暂无由你负责的活跃工单。</p>
+  {% endif %}
+</section>
+
+<section class="admin-section work-card todo-section">
+  <div class="section-heading">
+    <h2>子任务</h2>
+    <p>指派给 {{ admin_user }} 且尚未完成的子任务。</p>
+  </div>
+  {% if work.tasks %}
+  <table class="ticket-table erp-table todo-table">
+    <thead>
+      <tr>
+        <th>子任务</th>
+        <th>工单号</th>
+        <th>门店</th>
+        <th>工单状态</th>
+        <th>任务状态</th>
+        <th>截止时间</th>
+        <th>操作</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for task in work.tasks %}
+      <tr>
+        <td>{{ task.title }}</td>
+        <td><a class="ticket-no-link" href="{{ task.detail_url }}">{{ task.ticket_no }}</a></td>
+        <td>{{ task.store_name }}</td>
+        <td><span class="badge status-badge status-{{ task.ticket_status }}">{{ task.ticket_status }}</span></td>
+        <td>{{ task.task_status }}</td>
+        <td>{{ task.due_date or '未设置' }}</td>
+        <td><a class="ghost-button compact" href="{{ task.detail_url }}">处理</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty-note">暂无指派给你的未完成子任务。</p>
+  {% endif %}
+</section>
+
+<section class="admin-section work-card todo-section">
+  <div class="section-heading">
+    <h2>需要回复</h2>
+    <p>由你负责的工单中，门店最近提交的沟通或补充资料。</p>
+  </div>
+  {% if work.reply_items %}
+  <table class="ticket-table erp-table todo-table">
+    <thead>
+      <tr>
+        <th>来源</th>
+        <th>工单号</th>
+        <th>门店</th>
+        <th>提交人</th>
+        <th>内容</th>
+        <th>时间</th>
+        <th>操作</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for item in work.reply_items %}
+      <tr>
+        <td>{{ item.source_type }}</td>
+        <td><a class="ticket-no-link" href="{{ item.detail_url }}">{{ item.ticket_no }}</a></td>
+        <td>{{ item.store_name }}</td>
+        <td>{{ item.author_name or '门店' }}</td>
+        <td>{{ item.content_summary or '未填写补充说明' }}</td>
+        <td>{{ item.created_at }}</td>
+        <td><a class="ghost-button compact" href="{{ item.detail_url }}">回复</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty-note">暂无需要你回复的门店沟通。</p>
+  {% endif %}
+</section>
+{% endblock %}

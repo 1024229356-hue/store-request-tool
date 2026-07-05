@@ -4,20 +4,135 @@
 {% set current_menu = 'trash' %}
 {% extends "base_admin.html" %}
 
+{% block topbar_actions %}
+<a class="ghost-button compact" href="/admin">活跃工单</a>
+<a class="ghost-button compact" href="/admin/archive">归档工单</a>
+<a class="ghost-button compact" href="/admin/cleanup">清理测试数据</a>
+{% endblock %}
+
 {% block content %}
+{% if restored_count %}
+<div class="alert alert-success">已恢复 {{ restored_count }} 条工单。</div>
+{% endif %}
+{% if hard_deleted_count %}
+<div class="alert alert-success">已永久删除 {{ hard_deleted_count }} 条工单。</div>
+{% endif %}
+
+<section class="filter-card work-card trash-section">
+  <div class="section-heading admin-section-heading">
+    <h2>筛选回收站工单</h2>
+    <p>回收站工单不显示在活跃列表、门店查询和默认导出中。</p>
+  </div>
+  <form class="filter-bar" method="get" action="/admin/trash">
+    <label>
+      <span>门店</span>
+      <select name="store_name">
+        <option value="">全部</option>
+        {% for store in stores %}
+        <option value="{{ store }}" {% if filters.get('store_name') == store %}selected{% endif %}>{{ store }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>
+      <span>需求类型</span>
+      <select name="request_type">
+        <option value="">全部</option>
+        {% for item in request_types %}
+        <option value="{{ item }}" {% if filters.get('request_type') == item %}selected{% endif %}>{{ item }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>
+      <span>状态</span>
+      <select name="status">
+        <option value="">全部</option>
+        {% for item in statuses %}
+        <option value="{{ item }}" {% if filters.get('status') == item %}selected{% endif %}>{{ item }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>
+      <span>处理人</span>
+      <select name="assigned_to">
+        <option value="">全部</option>
+        {% for item in handlers %}
+        <option value="{{ item }}" {% if filters.get('assigned_to') == item %}selected{% endif %}>{{ item }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <div class="date-range">
+      <label>
+        <span>开始日期</span>
+        <input type="date" name="date_start" value="{{ filters.get('date_start', '') }}">
+      </label>
+      <label>
+        <span>结束日期</span>
+        <input type="date" name="date_end" value="{{ filters.get('date_end', '') }}">
+      </label>
+    </div>
+    <label class="filter-keyword">
+      <span>关键词</span>
+      <input type="search" name="keyword" value="{{ filters.get('keyword', '') }}" placeholder="工单号、商品、说明、处理人">
+    </label>
+    <div class="filter-actions">
+      <button class="primary-button compact" type="submit">筛选</button>
+      <a class="ghost-button compact" href="/admin/trash">重置</a>
+    </div>
+  </form>
+</section>
+
+<section class="bulk-action-bar work-card" data-bulk-toolbar data-bulk-root data-filtered-count="{{ pagination.total_count }}">
+  <div class="bulk-selected-count">
+    当前页已选 <strong data-selected-count>0</strong> 条
+    <span data-filtered-notice hidden>已选择当前筛选条件下全部 {{ pagination.total_count }} 条回收站工单。</span>
+    <span class="danger-note">永久删除不可恢复，建议先执行 backup.sh。</span>
+  </div>
+  <div class="bulk-actions">
+    <button class="ghost-button compact" type="button" data-select-current-page-button>全选当前页</button>
+    <button class="ghost-button compact" type="button" data-clear-selection>清空选择</button>
+    <button class="ghost-button compact" type="button" data-select-filtered>按当前筛选条件选择全部结果</button>
+    <form class="inline-action-form" method="post" action="/admin/tickets/bulk-restore" data-bulk-form data-confirm-selected="确认恢复选中工单吗？" data-confirm-filtered="确认对当前筛选条件下全部 {{ pagination.total_count }} 条回收站工单执行恢复吗？">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input name="select_scope" value="selected" type="hidden" data-select-scope>
+      <input type="hidden" name="source_view" value="trash">
+      <input type="hidden" name="sort" value="{{ sort }}">
+      {% for key in ['store_name', 'request_type', 'urgency', 'status', 'assigned_to', 'date_start', 'date_end', 'keyword', 'due_status'] %}
+      <input type="hidden" name="{{ key }}" value="{{ filters.get(key, '') }}">
+      {% endfor %}
+      <button class="secondary-button compact" type="submit">批量恢复</button>
+    </form>
+    <form class="inline-action-form" method="post" action="/admin/tickets/bulk-hard-delete" data-bulk-form data-confirm-selected="确认永久删除选中工单及其附件吗？此操作不可恢复。建议先执行 backup.sh。" data-confirm-filtered="确认对当前筛选条件下全部 {{ pagination.total_count }} 条回收站工单执行永久删除吗？此操作不可恢复。建议先执行 backup.sh。">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input name="select_scope" value="selected" type="hidden" data-select-scope>
+      <input type="hidden" name="source_view" value="trash">
+      <input type="hidden" name="sort" value="{{ sort }}">
+      {% for key in ['store_name', 'request_type', 'urgency', 'status', 'assigned_to', 'date_start', 'date_end', 'keyword', 'due_status'] %}
+      <input type="hidden" name="{{ key }}" value="{{ filters.get(key, '') }}">
+      {% endfor %}
+      <label class="inline-check">
+        <input name="confirm_delete" type="checkbox" value="1" required>
+        <span>二次确认永久删除</span>
+      </label>
+      <button class="danger-button compact" type="submit">批量永久删除</button>
+    </form>
+  </div>
+</section>
+
 <section class="admin-section work-card trash-section">
   <div class="section-heading admin-section-heading">
     <h2>已删除工单</h2>
-    <p>恢复后会重新出现在后台列表、门店查询和 Excel 导出中；永久删除会移除数据库记录和对应附件文件。</p>
+    <p>恢复后会回到原状态：原来是归档工单则回到归档页，原来是活跃工单则回到活跃列表。</p>
   </div>
   <div class="table-wrap">
     <table class="ticket-table erp-table trash-table">
       <thead>
         <tr>
+          <th class="ticket-select-cell"><input class="ticket-select-all" type="checkbox" data-select-current-page aria-label="全选当前页"></th>
           <th>工单号</th>
           <th>门店</th>
           <th>提报人</th>
           <th>状态</th>
+          <th>原状态</th>
           <th>删除时间</th>
           <th>删除人</th>
           <th>删除原因</th>
@@ -28,10 +143,18 @@
       <tbody>
         {% for ticket in deleted_tickets %}
         <tr>
+          <td class="ticket-select-cell"><input class="ticket-select" type="checkbox" name="ticket_ids" value="{{ ticket.id }}" data-ticket-select aria-label="选择 {{ ticket.ticket_no }}"></td>
           <td>{{ ticket.ticket_no }}</td>
           <td>{{ ticket.store_name }}</td>
           <td>{{ ticket.submitter }}</td>
           <td><span class="badge status-badge status-{{ ticket.status }}">{{ ticket.status }}</span></td>
+          <td>
+            {% if ticket.archived_at %}
+            <span class="badge archive-badge">已归档</span>
+            {% else %}
+            <span class="badge active-badge">活跃</span>
+            {% endif %}
+          </td>
           <td>{{ ticket.deleted_at }}</td>
           <td>{{ ticket.deleted_by or '-' }}</td>
           <td>{{ ticket.delete_reason or '-' }}</td>
@@ -42,7 +165,7 @@
             </form>
           </td>
           <td>
-            <form class="hard-delete-form" method="post" action="/admin/ticket/{{ ticket.id }}/hard-delete" onsubmit="return confirm('确认永久删除该工单及其附件吗？此操作不可恢复。');">
+            <form class="hard-delete-form" method="post" action="/admin/ticket/{{ ticket.id }}/hard-delete" onsubmit="return confirm('确认永久删除该工单及其附件吗？此操作不可恢复。建议先执行 backup.sh。');">
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
               <label class="inline-check">
                 <input name="confirm_delete" type="checkbox" value="1" required>
@@ -54,7 +177,7 @@
         </tr>
         {% else %}
         <tr>
-          <td class="empty-cell" colspan="9">
+          <td class="empty-cell" colspan="11">
             <strong>暂无已删除工单</strong>
             <span>工单移入回收站后会显示在这里。</span>
           </td>
@@ -64,6 +187,22 @@
     </table>
   </div>
 </section>
+
+<nav class="pagination-bar" aria-label="回收站工单分页">
+  <div>当前第 {{ pagination.current_page }} 页 / 共 {{ pagination.total_pages }} 页 / 共 {{ pagination.total_count }} 条工单</div>
+  <div class="pagination-actions">
+    {% if pagination.has_prev %}
+    <a class="ghost-button compact" href="{{ prev_page_url }}">上一页</a>
+    {% else %}
+    <span class="ghost-button compact disabled">上一页</span>
+    {% endif %}
+    {% if pagination.has_next %}
+    <a class="ghost-button compact" href="{{ next_page_url }}">下一页</a>
+    {% else %}
+    <span class="ghost-button compact disabled">下一页</span>
+    {% endif %}
+  </div>
+</nav>
 
 <section class="admin-section work-card trash-section">
   <div class="section-heading admin-section-heading">

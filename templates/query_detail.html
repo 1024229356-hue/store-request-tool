@@ -23,12 +23,25 @@
         <span class="badge status-{{ ticket.status }}">{{ ticket.status }}</span>
         <span class="badge urgency-{{ ticket.urgency }}">{{ ticket.urgency }}</span>
         <span class="badge due-{{ ticket.due_status_class }}">{{ ticket.due_status }}</span>
+        {% if ticket.archived_at %}
+        <span class="badge archive-badge">已归档</span>
+        {% endif %}
       </div>
       <div class="header-actions">
         <a class="ghost-button compact" href="{{ query_url }}">返回查询结果</a>
         <a class="primary-button compact" href="{{ supplement_url }}">补充资料</a>
       </div>
     </section>
+
+    {% if needs_store_supplement %}
+    <section class="form-card store-supplement-alert">
+      <div class="section-heading">
+        <h2>需要补充资料</h2>
+        <p>{{ handler_note or '总部已将该工单标记为待门店补充，请补充说明、图片或相关文件。' }}</p>
+      </div>
+      <a class="primary-button compact" href="{{ supplement_url }}">去补充资料</a>
+    </section>
+    {% endif %}
 
     <section class="form-card highlight-card">
       <div class="section-heading">

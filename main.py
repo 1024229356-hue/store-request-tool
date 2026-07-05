@@ -445,7 +445,12 @@ def should_redirect_to_login(request: Request) -> bool:
         or path == "/admin/settings"
         or path == "/admin/account"
         or path == "/admin/system"
+        or path == "/admin/my-work"
+        or path == "/admin/archive"
+        or path == "/admin/trash"
+        or path == "/admin/cleanup"
         or path.startswith("/admin/ticket")
+        or path.startswith("/admin/tickets")
         or path.startswith("/admin/embedded-pages")
         or path.startswith("/admin/embed")
     )
@@ -526,6 +531,12 @@ def add_soft_delete_columns(connection: sqlite3.Connection, table_name: str) -> 
     add_column_if_missing(connection, table_name, "deleted_at", "TEXT")
     add_column_if_missing(connection, table_name, "deleted_by", "TEXT")
     add_column_if_missing(connection, table_name, "delete_reason", "TEXT")
+
+
+def add_archive_columns(connection: sqlite3.Connection, table_name: str) -> None:
+    add_column_if_missing(connection, table_name, "archived_at", "TEXT")
+    add_column_if_missing(connection, table_name, "archived_by", "TEXT")
+    add_column_if_missing(connection, table_name, "archive_reason", "TEXT")
 
 
 MULTI_VALUE_SPLIT_RE = re.compile(r"[,\uFF0C\u3001;\uFF1B]+")
@@ -638,6 +649,7 @@ def init_db() -> None:
         add_column_if_missing(connection, "tickets", "assigned_to", "TEXT")
         add_column_if_missing(connection, "tickets", "closed_at", "TEXT")
         add_soft_delete_columns(connection, "tickets")
+        add_archive_columns(connection, "tickets")
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS ticket_stores (
@@ -824,6 +836,8 @@ def init_db() -> None:
         connection.execute("CREATE INDEX IF NOT EXISTS idx_tickets_created_at ON tickets(created_at)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_tickets_status ON tickets(status)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_tickets_assigned_to ON tickets(assigned_to)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_tickets_deleted_at ON tickets(deleted_at)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_tickets_archived_at ON tickets(archived_at)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_ticket_stores_store_name ON ticket_stores(store_name)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_ticket_stores_ticket_id ON ticket_stores(ticket_id)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_ticket_brands_brand ON ticket_brands(brand)")
@@ -1171,6 +1185,8 @@ def annotate_ticket_runtime(ticket: Dict[str, object]) -> Dict[str, object]:
     ticket["due_status"] = label
     ticket["due_status_class"] = due_status_class(label)
     ticket["description_summary"] = compact_text(str(ticket.get("description") or ""))
+    ticket["is_archived"] = bool(ticket.get("archived_at"))
+    ticket["is_deleted"] = bool(ticket.get("deleted_at"))
     return ticket
 
 
@@ -1210,7 +1226,11 @@ def attach_ticket_relations(tickets: List[Dict[str, object]]) -> List[Dict[str, 
 
 
 def build_query_params(filters: Dict[str, str], sort: str, page: Optional[int] = None) -> str:
-    params = {key: value for key, value in filters.items() if str(value or "").strip()}
+    params = {
+        key: value
+        for key, value in filters.items()
+        if not key.startswith("__") and str(value or "").strip()
+    }
     if sort:
         params["sort"] = sort
     if page is not None:
@@ -1520,12 +1540,19 @@ def create_ticket_with_images(
 def build_ticket_where(filters: Dict[str, str]) -> Tuple[str, List[str]]:
     include_deleted = str(filters.get("__include_deleted") or "").strip() == "1"
     deleted_only = str(filters.get("__deleted_only") or "").strip() == "1"
+    ticket_scope = str(filters.get("__ticket_scope") or "").strip()
     clauses: List[str] = []
     params: List[str] = []
-    if deleted_only:
+    if deleted_only or ticket_scope == "deleted":
         clauses.append("tickets.deleted_at IS NOT NULL")
+    elif ticket_scope == "archive":
+        clauses.append("tickets.deleted_at IS NULL")
+        clauses.append("tickets.archived_at IS NOT NULL")
+    elif ticket_scope == "store":
+        clauses.append("tickets.deleted_at IS NULL")
     elif not include_deleted:
         clauses.append("tickets.deleted_at IS NULL")
+        clauses.append("tickets.archived_at IS NULL")
 
     exact_fields = {
         "ticket_no": "ticket_no",
@@ -1688,6 +1715,7 @@ def fetch_tickets(
                 request_type, urgency, brand, product_name, sku_barcode,
                 quantity, description, expected_finish_date, status, assigned_to,
                 handler_note, closed_at, deleted_at, deleted_by, delete_reason,
+                archived_at, archived_by, archive_reason,
                 COALESCE(image_counts.image_count, 0) AS image_count,
                 COALESCE(file_counts.file_count, 0) AS file_count
             FROM tickets
@@ -2042,6 +2070,136 @@ def fetch_ticket_tasks(ticket_id: int) -> List[Dict[str, object]]:
             (ticket_id,),
         ).fetchall()
     return [dict(row) for row in rows]
+
+
+def detail_handler_options(config: AppConfig, ticket: Dict[str, object], admin_user: str) -> List[str]:
+    options: List[str] = []
+    for value in (str(ticket.get("assigned_to") or ""), admin_user, *config.handlers):
+        clean_value = str(value or "").strip()
+        if clean_value and clean_value not in options:
+            options.append(clean_value)
+    return options
+
+
+def should_prompt_close_ticket(ticket: Dict[str, object], tasks: List[Dict[str, object]]) -> bool:
+    if str(ticket.get("status") or "") == COMPLETED_STATUS:
+        return False
+    return bool(tasks) and all(str(task.get("status") or "") == COMPLETED_STATUS for task in tasks)
+
+
+def fetch_my_work(username: str, config: AppConfig) -> Dict[str, object]:
+    clean_username = username.strip()
+    assigned_tickets = fetch_tickets(
+        {"assigned_to": clean_username},
+        "newest",
+        config,
+        limit=50,
+        offset=0,
+    )
+    for ticket in assigned_tickets:
+        ticket["detail_url"] = build_ticket_detail_url(int(ticket["id"]), "/admin/my-work")
+
+    with get_connection() as connection:
+        task_rows = connection.execute(
+            """
+            SELECT
+                ticket_tasks.id AS task_id,
+                ticket_tasks.ticket_id,
+                ticket_tasks.title,
+                ticket_tasks.assignee,
+                ticket_tasks.status AS task_status,
+                ticket_tasks.due_date,
+                ticket_tasks.completed_at,
+                ticket_tasks.created_at AS task_created_at,
+                ticket_tasks.updated_at AS task_updated_at,
+                tickets.ticket_no,
+                tickets.store_name,
+                tickets.submitter,
+                tickets.request_type,
+                tickets.urgency,
+                tickets.status AS ticket_status,
+                tickets.assigned_to,
+                tickets.description
+            FROM ticket_tasks
+            JOIN tickets ON tickets.id = ticket_tasks.ticket_id
+            WHERE ticket_tasks.deleted_at IS NULL
+              AND ticket_tasks.status != ?
+              AND TRIM(COALESCE(ticket_tasks.assignee, '')) = ?
+              AND tickets.deleted_at IS NULL
+              AND tickets.archived_at IS NULL
+            ORDER BY
+                ticket_tasks.due_date IS NULL,
+                ticket_tasks.due_date,
+                ticket_tasks.updated_at DESC,
+                ticket_tasks.id DESC
+            LIMIT 100
+            """,
+            (COMPLETED_STATUS, clean_username),
+        ).fetchall()
+        reply_rows = connection.execute(
+            """
+            SELECT *
+            FROM (
+                SELECT
+                    '门店沟通' AS source_type,
+                    ticket_comments.id AS source_id,
+                    ticket_comments.created_at,
+                    ticket_comments.author_name AS author_name,
+                    ticket_comments.content AS content,
+                    tickets.id AS ticket_id,
+                    tickets.ticket_no,
+                    tickets.store_name,
+                    tickets.status,
+                    tickets.request_type
+                FROM ticket_comments
+                JOIN tickets ON tickets.id = ticket_comments.ticket_id
+                WHERE ticket_comments.deleted_at IS NULL
+                  AND ticket_comments.author_type = 'store'
+                  AND tickets.assigned_to = ?
+                  AND tickets.deleted_at IS NULL
+                  AND tickets.archived_at IS NULL
+                UNION ALL
+                SELECT
+                    '补充资料' AS source_type,
+                    ticket_supplements.id AS source_id,
+                    ticket_supplements.created_at,
+                    ticket_supplements.submitter AS author_name,
+                    ticket_supplements.note AS content,
+                    tickets.id AS ticket_id,
+                    tickets.ticket_no,
+                    tickets.store_name,
+                    tickets.status,
+                    tickets.request_type
+                FROM ticket_supplements
+                JOIN tickets ON tickets.id = ticket_supplements.ticket_id
+                WHERE ticket_supplements.deleted_at IS NULL
+                  AND tickets.assigned_to = ?
+                  AND tickets.deleted_at IS NULL
+                  AND tickets.archived_at IS NULL
+            )
+            ORDER BY created_at DESC, source_id DESC
+            LIMIT 20
+            """,
+            (clean_username, clean_username),
+        ).fetchall()
+
+    tasks = [dict(row) for row in task_rows]
+    for task in tasks:
+        task["detail_url"] = build_ticket_detail_url(int(task["ticket_id"]), "/admin/my-work")
+        task["description_summary"] = compact_text(str(task.get("description") or ""))
+    reply_items = [dict(row) for row in reply_rows]
+    for item in reply_items:
+        item["detail_url"] = build_ticket_detail_url(int(item["ticket_id"]), "/admin/my-work") + "#comments"
+        item["content_summary"] = compact_text(str(item.get("content") or ""))
+    return {
+        "assigned_tickets": assigned_tickets,
+        "tasks": tasks,
+        "reply_items": reply_items,
+        "assigned_count": len(assigned_tickets),
+        "task_count": len(tasks),
+        "reply_count": len(reply_items),
+        "total_count": len(assigned_tickets) + len(tasks) + len(reply_items),
+    }
 
 
 def embedded_html_filename(page_key: str) -> str:
@@ -2552,6 +2710,290 @@ def insert_ticket_log(
     )
 
 
+def normalize_ticket_ids(ticket_ids: Iterable[object]) -> List[int]:
+    normalized: List[int] = []
+    seen: set[int] = set()
+    for raw_id in ticket_ids:
+        try:
+            ticket_id = int(raw_id)
+        except (TypeError, ValueError):
+            continue
+        if ticket_id <= 0 or ticket_id in seen:
+            continue
+        normalized.append(ticket_id)
+        seen.add(ticket_id)
+    return normalized
+
+
+def ticket_filters_from_params(
+    store_name: str = "",
+    request_type: str = "",
+    urgency: str = "",
+    status: str = "",
+    assigned_to: str = "",
+    date_start: str = "",
+    date_end: str = "",
+    keyword: str = "",
+    due_status: str = "",
+    scope: str = "active",
+) -> Dict[str, str]:
+    filters = {
+        "store_name": store_name.strip(),
+        "request_type": request_type.strip(),
+        "urgency": urgency.strip(),
+        "status": status.strip(),
+        "assigned_to": assigned_to.strip(),
+        "date_start": date_start.strip(),
+        "date_end": date_end.strip(),
+        "keyword": keyword.strip(),
+        "due_status": due_status.strip(),
+    }
+    if scope:
+        filters["__ticket_scope"] = scope
+    return filters
+
+
+def ticket_scope_for_source_view(source_view: str) -> str:
+    if source_view == "archive":
+        return "archive"
+    if source_view == "trash":
+        return "deleted"
+    if source_view == "store":
+        return "store"
+    return "active"
+
+
+def admin_ticket_filters_from_form(
+    store_name: str = Form(""),
+    request_type: str = Form(""),
+    urgency: str = Form(""),
+    status: str = Form(""),
+    assigned_to: str = Form(""),
+    date_start: str = Form(""),
+    date_end: str = Form(""),
+    keyword: str = Form(""),
+    due_status: str = Form(""),
+    source_view: str = Form("active"),
+) -> Dict[str, str]:
+    return ticket_filters_from_params(
+        store_name,
+        request_type,
+        urgency,
+        status,
+        assigned_to,
+        date_start,
+        date_end,
+        keyword,
+        due_status,
+        scope=ticket_scope_for_source_view(source_view),
+    )
+
+
+def bulk_ticket_ids_from_scope(
+    ticket_ids: Iterable[object],
+    select_scope: str,
+    filters: Dict[str, str],
+    sort: str,
+    config: AppConfig,
+) -> List[int]:
+    if select_scope == "filtered":
+        return normalize_ticket_ids(ticket["id"] for ticket in fetch_tickets(filters, sort, config))
+    return normalize_ticket_ids(ticket_ids)
+
+
+def in_clause_for_ids(ticket_ids: List[int]) -> Tuple[str, List[int]]:
+    placeholders = ",".join("?" for _ in ticket_ids)
+    return placeholders, ticket_ids
+
+
+def bulk_archive_tickets(ticket_ids: Iterable[object], operator: str, archive_reason: str = "") -> int:
+    ids = normalize_ticket_ids(ticket_ids)
+    if not ids:
+        return 0
+    reason = archive_reason.strip() or "批量归档"
+    timestamp = now_text()
+    placeholders, params = in_clause_for_ids(ids)
+    with get_connection() as connection:
+        rows = connection.execute(
+            f"""
+            SELECT id
+            FROM tickets
+            WHERE id IN ({placeholders})
+              AND deleted_at IS NULL
+              AND archived_at IS NULL
+            ORDER BY id
+            """,
+            params,
+        ).fetchall()
+        target_ids = [int(row["id"]) for row in rows]
+        for ticket_id in target_ids:
+            connection.execute(
+                """
+                UPDATE tickets
+                SET archived_at = ?, archived_by = ?, archive_reason = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (timestamp, operator, reason, timestamp, ticket_id),
+            )
+            insert_ticket_log(connection, ticket_id, "归档工单", reason, operator, timestamp)
+    return len(target_ids)
+
+
+def bulk_unarchive_tickets(ticket_ids: Iterable[object], operator: str) -> int:
+    ids = normalize_ticket_ids(ticket_ids)
+    if not ids:
+        return 0
+    timestamp = now_text()
+    placeholders, params = in_clause_for_ids(ids)
+    with get_connection() as connection:
+        rows = connection.execute(
+            f"""
+            SELECT id
+            FROM tickets
+            WHERE id IN ({placeholders})
+              AND deleted_at IS NULL
+              AND archived_at IS NOT NULL
+            ORDER BY id
+            """,
+            params,
+        ).fetchall()
+        target_ids = [int(row["id"]) for row in rows]
+        for ticket_id in target_ids:
+            connection.execute(
+                """
+                UPDATE tickets
+                SET archived_at = NULL, archived_by = NULL, archive_reason = NULL, updated_at = ?
+                WHERE id = ?
+                """,
+                (timestamp, ticket_id),
+            )
+            insert_ticket_log(connection, ticket_id, "取消归档", "", operator, timestamp)
+    return len(target_ids)
+
+
+def accept_ticket(ticket_id: int, operator: str) -> None:
+    clean_operator = operator.strip()
+    timestamp = now_text()
+    with get_connection() as connection:
+        row = connection.execute(
+            "SELECT * FROM tickets WHERE id = ? AND deleted_at IS NULL",
+            (ticket_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="工单不存在")
+        ticket = dict(row)
+        old_assigned_to = str(ticket.get("assigned_to") or "").strip()
+        if old_assigned_to and old_assigned_to != clean_operator:
+            raise HTTPException(status_code=400, detail=f"工单已由 {old_assigned_to} 负责。")
+        if old_assigned_to == clean_operator:
+            return
+        connection.execute(
+            """
+            UPDATE tickets
+            SET assigned_to = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (clean_operator, timestamp, ticket_id),
+        )
+        insert_ticket_log(
+            connection,
+            ticket_id,
+            "接单",
+            f"{clean_operator} 接单",
+            clean_operator,
+            timestamp,
+            old_status=str(ticket.get("status") or ""),
+            new_status=str(ticket.get("status") or ""),
+            old_assigned_to=old_assigned_to,
+            new_assigned_to=clean_operator,
+        )
+
+
+def bulk_soft_delete_tickets(ticket_ids: Iterable[object], operator: str, delete_reason: str = "") -> int:
+    ids = normalize_ticket_ids(ticket_ids)
+    if not ids:
+        return 0
+    reason = delete_reason.strip() or "批量移入回收站"
+    timestamp = now_text()
+    placeholders, params = in_clause_for_ids(ids)
+    with get_connection() as connection:
+        rows = connection.execute(
+            f"""
+            SELECT id
+            FROM tickets
+            WHERE id IN ({placeholders})
+              AND deleted_at IS NULL
+            ORDER BY id
+            """,
+            params,
+        ).fetchall()
+        target_ids = [int(row["id"]) for row in rows]
+        for ticket_id in target_ids:
+            connection.execute(
+                """
+                UPDATE tickets
+                SET deleted_at = ?, deleted_by = ?, delete_reason = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (timestamp, operator, reason, timestamp, ticket_id),
+            )
+            insert_ticket_log(connection, ticket_id, "移入回收站", reason, operator, timestamp)
+    return len(target_ids)
+
+
+def bulk_restore_tickets(ticket_ids: Iterable[object], operator: str) -> int:
+    ids = normalize_ticket_ids(ticket_ids)
+    if not ids:
+        return 0
+    timestamp = now_text()
+    placeholders, params = in_clause_for_ids(ids)
+    with get_connection() as connection:
+        rows = connection.execute(
+            f"""
+            SELECT id
+            FROM tickets
+            WHERE id IN ({placeholders})
+              AND deleted_at IS NOT NULL
+            ORDER BY id
+            """,
+            params,
+        ).fetchall()
+        target_ids = [int(row["id"]) for row in rows]
+        for ticket_id in target_ids:
+            connection.execute(
+                """
+                UPDATE tickets
+                SET deleted_at = NULL, deleted_by = NULL, delete_reason = NULL, updated_at = ?
+                WHERE id = ?
+                """,
+                (timestamp, ticket_id),
+            )
+            insert_ticket_log(connection, ticket_id, "恢复工单", "", operator, timestamp)
+    return len(target_ids)
+
+
+def bulk_hard_delete_tickets(ticket_ids: Iterable[object], operator: str) -> int:
+    ids = normalize_ticket_ids(ticket_ids)
+    if not ids:
+        return 0
+    placeholders, params = in_clause_for_ids(ids)
+    with get_connection() as connection:
+        rows = connection.execute(
+            f"""
+            SELECT id
+            FROM tickets
+            WHERE id IN ({placeholders})
+              AND deleted_at IS NOT NULL
+            ORDER BY id
+            """,
+            params,
+        ).fetchall()
+    target_ids = [int(row["id"]) for row in rows]
+    for ticket_id in target_ids:
+        hard_delete_ticket(ticket_id, operator)
+    return len(target_ids)
+
+
 def soft_delete_ticket(ticket_id: int, deleted_by: str, delete_reason: str = "") -> None:
     ticket = fetch_ticket(ticket_id)
     if not ticket:
@@ -2567,7 +3009,7 @@ def soft_delete_ticket(ticket_id: int, deleted_by: str, delete_reason: str = "")
             """,
             (timestamp, deleted_by, reason, timestamp, ticket_id),
         )
-        insert_ticket_log(connection, ticket_id, "删除工单", reason, deleted_by, timestamp)
+        insert_ticket_log(connection, ticket_id, "移入回收站", reason, deleted_by, timestamp)
     try:
         create_notification_event(
             event_type="ticket_deleted",
@@ -2598,6 +3040,18 @@ def restore_ticket(ticket_id: int, operator: str) -> None:
             (timestamp, ticket_id),
         )
         insert_ticket_log(connection, ticket_id, "恢复工单", "", operator, timestamp)
+
+
+def archive_ticket(ticket_id: int, operator: str, archive_reason: str = "") -> None:
+    archived_count = bulk_archive_tickets([ticket_id], operator, archive_reason or "后台手动归档")
+    if archived_count == 0:
+        raise HTTPException(status_code=404, detail="工单不存在、已删除或已归档")
+
+
+def unarchive_ticket(ticket_id: int, operator: str) -> None:
+    unarchived_count = bulk_unarchive_tickets([ticket_id], operator)
+    if unarchived_count == 0:
+        raise HTTPException(status_code=404, detail="工单不存在、已删除或未归档")
 
 
 def hard_delete_ticket(ticket_id: int, operator: str) -> None:
@@ -2814,13 +3268,15 @@ def create_new_ticket_notification(ticket: Dict[str, object]) -> None:
 
 
 def create_store_supplement_notification(ticket: Dict[str, object], submitter: str) -> None:
+    assigned_to = str(ticket.get("assigned_to") or "").strip()
+    handler_hint = f"，请处理人 {assigned_to} 及时回复" if assigned_to else ""
     create_notification_event(
         event_type="store_supplement",
         ticket_id=int(ticket["id"]),
         ticket_no=str(ticket.get("ticket_no") or ""),
         store_name=str(ticket.get("store_name") or ""),
         title="门店补充资料",
-        content=f"{ticket.get('store_name')} 为工单 {ticket.get('ticket_no')} 补充了资料",
+        content=f"{ticket.get('store_name')} 为工单 {ticket.get('ticket_no')} 补充了资料{handler_hint}",
         severity="warning",
         created_by=f"门店:{submitter}",
     )
@@ -3060,6 +3516,32 @@ def update_ticket_task(
     )
 
 
+def notification_actions(
+    notification: Dict[str, object],
+    ticket: Optional[Dict[str, object]],
+    detail_url: str,
+) -> List[Dict[str, object]]:
+    event_id = int(notification.get("id") or 0)
+    actions: List[Dict[str, object]] = []
+    if detail_url:
+        actions.append({"label": "查看工单", "url": detail_url, "method": "get"})
+    if ticket and detail_url:
+        assigned_to = str(ticket.get("assigned_to") or "").strip()
+        if not assigned_to:
+            actions.append({"label": "接单", "url": f"/admin/ticket/{int(ticket['id'])}/accept", "method": "post"})
+        actions.append({"label": "回复", "url": f"{detail_url}#comments", "method": "get"})
+    if event_id:
+        actions.append(
+            {
+                "label": "标记已读",
+                "url": f"/admin/api/notifications/{event_id}/read",
+                "method": "post",
+                "disabled": bool(notification.get("is_read")),
+            }
+        )
+    return actions
+
+
 def fetch_notifications(
     username: str,
     after_id: int = 0,
@@ -3098,7 +3580,19 @@ def fetch_notifications(
     for notification in notifications:
         ticket_id = notification.get("ticket_id")
         notification["is_read"] = bool(notification.get("is_read"))
-        notification["detail_url"] = f"/admin/ticket/{ticket_id}" if ticket_id and fetch_ticket(int(ticket_id)) else ""
+        notification["detail_url"] = ""
+        ticket: Optional[Dict[str, object]] = None
+        if ticket_id:
+            ticket = fetch_ticket(int(ticket_id))
+            if ticket:
+                notification["detail_url"] = f"/admin/ticket/{ticket_id}"
+            else:
+                deleted_ticket = fetch_ticket(int(ticket_id), include_deleted=True)
+                if deleted_ticket and deleted_ticket.get("deleted_at"):
+                    ticket_no = str(deleted_ticket.get("ticket_no") or notification.get("ticket_no") or "")
+                    notification["detail_url"] = "/admin/trash" + (f"?{urlencode({'keyword': ticket_no})}" if ticket_no else "")
+                    notification["content"] = "工单已在回收站"
+        notification["actions"] = notification_actions(notification, ticket, str(notification.get("detail_url") or ""))
     return notifications
 
 
@@ -3296,6 +3790,8 @@ def fetch_store_query_page(
     config: AppConfig,
     page: int,
 ) -> Tuple[List[Dict[str, object]], Dict[str, int]]:
+    filters = dict(filters)
+    filters["__ticket_scope"] = "store"
     page_size = config.store_query_page_size
     total_count = count_tickets(filters)
     total_pages = max((total_count + page_size - 1) // page_size, 1)
@@ -3317,8 +3813,16 @@ def fetch_store_query_page(
 TEST_DATA_KEYWORDS = ("codex", "smoke", "test", "测试")
 
 
-def fetch_deleted_tickets() -> List[Dict[str, object]]:
-    return fetch_tickets({"__deleted_only": "1"}, "newest", load_app_config())
+def fetch_archived_tickets(filters: Optional[Dict[str, str]] = None, sort: str = "newest") -> List[Dict[str, object]]:
+    scoped_filters = dict(filters or {})
+    scoped_filters["__ticket_scope"] = "archive"
+    return fetch_tickets(scoped_filters, sort, load_app_config())
+
+
+def fetch_deleted_tickets(filters: Optional[Dict[str, str]] = None, sort: str = "newest") -> List[Dict[str, object]]:
+    scoped_filters = dict(filters or {})
+    scoped_filters["__ticket_scope"] = "deleted"
+    return fetch_tickets(scoped_filters, sort, load_app_config())
 
 
 def fetch_deleted_embedded_pages() -> List[Dict[str, object]]:
@@ -3640,6 +4144,7 @@ def create_app() -> FastAPI:
         participants = fetch_ticket_participants(ticket_id)
         comments = fetch_ticket_comments(ticket_id)
         tasks = fetch_ticket_tasks(ticket_id)
+        open_task_count = sum(1 for task in tasks if str(task.get("status") or "") != COMPLETED_STATUS)
         config = load_app_config()
         return templates.TemplateResponse(
             request,
@@ -3650,12 +4155,14 @@ def create_app() -> FastAPI:
                 "images": images,
                 "files": files,
                 "statuses": config.statuses,
-                "handlers": config.handlers,
+                "handlers": detail_handler_options(config, ticket, admin),
                 "logs": logs,
                 "supplements": supplements,
                 "participants": participants,
                 "comments": comments,
                 "tasks": tasks,
+                "open_task_count": open_task_count,
+                "close_prompt": should_prompt_close_ticket(ticket, tasks),
                 "task_statuses": TASK_STATUSES,
                 "saved": saved,
                 "attachments_saved": attachments_saved,
@@ -3696,14 +4203,85 @@ def create_app() -> FastAPI:
             status_code=status_code,
         )
 
-    def render_trash_page(request: Request, admin: str) -> HTMLResponse:
+    def render_archive_page(
+        request: Request,
+        admin: str,
+        filters: Optional[Dict[str, str]] = None,
+        sort: str = "newest",
+        page: int = 1,
+        unarchived_count: int = 0,
+        deleted_count: int = 0,
+    ) -> HTMLResponse:
+        config = load_app_config()
+        active_filters = dict(filters or {})
+        active_filters["__ticket_scope"] = "archive"
+        tickets, pagination = fetch_ticket_page(active_filters, sort, config, page)
+        return_url = safe_admin_return_url(request_path_with_query(request))
+        for ticket in tickets:
+            ticket["detail_url"] = build_ticket_detail_url(int(ticket["id"]), return_url)
+        export_query = build_query_params(active_filters, sort)
+        prev_query = build_query_params(active_filters, sort, pagination["prev_page"])
+        next_query = build_query_params(active_filters, sort, pagination["next_page"])
+        return templates.TemplateResponse(
+            request,
+            "archive.html",
+            {
+                "request": request,
+                "tickets": tickets,
+                "stores": config.stores,
+                "request_types": config.request_types,
+                "urgency_levels": config.urgency_levels,
+                "statuses": config.statuses,
+                "handlers": config.handlers,
+                "due_status_options": DUE_STATUS_OPTIONS,
+                "filters": active_filters,
+                "sort": sort,
+                "pagination": pagination,
+                "export_url": "/admin/archive/export" + (f"?{export_query}" if export_query else ""),
+                "prev_page_url": "/admin/archive" + (f"?{prev_query}" if prev_query else ""),
+                "next_page_url": "/admin/archive" + (f"?{next_query}" if next_query else ""),
+                "unarchived_count": unarchived_count,
+                "deleted_count": deleted_count,
+                "admin_user": admin,
+                "csrf_token": current_csrf_token(request),
+            },
+        )
+
+    def render_trash_page(
+        request: Request,
+        admin: str,
+        filters: Optional[Dict[str, str]] = None,
+        sort: str = "newest",
+        page: int = 1,
+        restored_count: int = 0,
+        hard_deleted_count: int = 0,
+    ) -> HTMLResponse:
+        config = load_app_config()
+        active_filters = dict(filters or {})
+        active_filters["__ticket_scope"] = "deleted"
+        deleted_tickets, pagination = fetch_ticket_page(active_filters, sort, config, page)
+        prev_query = build_query_params(active_filters, sort, pagination["prev_page"])
+        next_query = build_query_params(active_filters, sort, pagination["next_page"])
         return templates.TemplateResponse(
             request,
             "trash.html",
             {
                 "request": request,
-                "deleted_tickets": fetch_deleted_tickets(),
+                "deleted_tickets": deleted_tickets,
                 "deleted_embedded_pages": fetch_deleted_embedded_pages(),
+                "stores": config.stores,
+                "request_types": config.request_types,
+                "urgency_levels": config.urgency_levels,
+                "statuses": config.statuses,
+                "handlers": config.handlers,
+                "due_status_options": DUE_STATUS_OPTIONS,
+                "filters": active_filters,
+                "sort": sort,
+                "pagination": pagination,
+                "prev_page_url": "/admin/trash" + (f"?{prev_query}" if prev_query else ""),
+                "next_page_url": "/admin/trash" + (f"?{next_query}" if next_query else ""),
+                "restored_count": restored_count,
+                "hard_deleted_count": hard_deleted_count,
                 "admin_user": admin,
                 "csrf_token": current_csrf_token(request),
             },
@@ -4229,6 +4807,8 @@ def create_app() -> FastAPI:
         due_status: str = Query(""),
         sort: str = Query("newest"),
         page: int = Query(1),
+        archived_count: int = Query(0),
+        deleted_count: int = Query(0),
     ) -> HTMLResponse:
         filters = {
             "store_name": store_name,
@@ -4270,6 +4850,23 @@ def create_app() -> FastAPI:
                 "pagination": pagination,
                 "prev_page_url": "/admin" + (f"?{prev_query}" if prev_query else ""),
                 "next_page_url": "/admin" + (f"?{next_query}" if next_query else ""),
+                "archived_count": max(archived_count, 0),
+                "deleted_count": max(deleted_count, 0),
+                "admin_user": admin,
+                "csrf_token": current_csrf_token(request),
+            },
+        )
+
+    @app.get("/admin/my-work", response_class=HTMLResponse)
+    def admin_my_work(request: Request, admin: str = Depends(require_admin)) -> HTMLResponse:
+        config = load_app_config()
+        work = fetch_my_work(admin, config)
+        return templates.TemplateResponse(
+            request,
+            "my_work.html",
+            {
+                "request": request,
+                "work": work,
                 "admin_user": admin,
                 "csrf_token": current_csrf_token(request),
             },
@@ -4364,9 +4961,85 @@ def create_app() -> FastAPI:
             },
         )
 
+    @app.get("/admin/archive", response_class=HTMLResponse)
+    def admin_archive(
+        request: Request,
+        admin: str = Depends(require_admin),
+        store_name: str = Query(""),
+        request_type: str = Query(""),
+        urgency: str = Query(""),
+        status: str = Query(""),
+        assigned_to: str = Query(""),
+        date_start: str = Query(""),
+        date_end: str = Query(""),
+        keyword: str = Query(""),
+        due_status: str = Query(""),
+        sort: str = Query("newest"),
+        page: int = Query(1),
+        unarchived_count: int = Query(0),
+        deleted_count: int = Query(0),
+    ) -> HTMLResponse:
+        filters = ticket_filters_from_params(
+            store_name,
+            request_type,
+            urgency,
+            status,
+            assigned_to,
+            date_start,
+            date_end,
+            keyword,
+            due_status,
+            scope="archive",
+        )
+        return render_archive_page(
+            request,
+            admin,
+            filters=filters,
+            sort=sort,
+            page=page,
+            unarchived_count=max(unarchived_count, 0),
+            deleted_count=max(deleted_count, 0),
+        )
+
     @app.get("/admin/trash", response_class=HTMLResponse)
-    def admin_trash(request: Request, admin: str = Depends(require_admin)) -> HTMLResponse:
-        return render_trash_page(request, admin)
+    def admin_trash(
+        request: Request,
+        admin: str = Depends(require_admin),
+        store_name: str = Query(""),
+        request_type: str = Query(""),
+        urgency: str = Query(""),
+        status: str = Query(""),
+        assigned_to: str = Query(""),
+        date_start: str = Query(""),
+        date_end: str = Query(""),
+        keyword: str = Query(""),
+        due_status: str = Query(""),
+        sort: str = Query("newest"),
+        page: int = Query(1),
+        restored_count: int = Query(0),
+        hard_deleted_count: int = Query(0),
+    ) -> HTMLResponse:
+        filters = ticket_filters_from_params(
+            store_name,
+            request_type,
+            urgency,
+            status,
+            assigned_to,
+            date_start,
+            date_end,
+            keyword,
+            due_status,
+            scope="deleted",
+        )
+        return render_trash_page(
+            request,
+            admin,
+            filters=filters,
+            sort=sort,
+            page=page,
+            restored_count=max(restored_count, 0),
+            hard_deleted_count=max(hard_deleted_count, 0),
+        )
 
     @app.get("/admin/cleanup", response_class=HTMLResponse)
     def admin_cleanup(
@@ -4648,6 +5321,140 @@ def create_app() -> FastAPI:
             upload_error=upload_error,
             return_url=return_url,
         )
+
+    @app.post("/admin/ticket/{ticket_id}/accept")
+    def accept_ticket_route(
+        request: Request,
+        ticket_id: int,
+        admin: str = Depends(require_admin),
+        return_url: str = Form(""),
+        csrf_token: str = Form(""),
+    ) -> RedirectResponse:
+        require_admin_csrf(request, csrf_token)
+        accept_ticket(ticket_id, admin)
+        if return_url.strip():
+            return RedirectResponse(url=safe_admin_return_url(return_url), status_code=303)
+        return RedirectResponse(url=build_ticket_detail_url(ticket_id, "/admin/my-work", saved="1"), status_code=303)
+
+    @app.post("/admin/tickets/bulk-archive")
+    def bulk_archive_tickets_route(
+        request: Request,
+        admin: str = Depends(require_admin),
+        filters: Dict[str, str] = Depends(admin_ticket_filters_from_form),
+        ticket_ids: Optional[List[int]] = Form(None),
+        select_scope: str = Form("selected"),
+        sort: str = Form("newest"),
+        archive_reason: str = Form("批量归档"),
+        csrf_token: str = Form(""),
+    ) -> RedirectResponse:
+        require_admin_csrf(request, csrf_token)
+        filters["__ticket_scope"] = "active"
+        ids = bulk_ticket_ids_from_scope(ticket_ids or [], select_scope, filters, sort, load_app_config())
+        if not ids:
+            raise HTTPException(status_code=400, detail="请选择要归档的工单。")
+        archived_count = bulk_archive_tickets(ids, admin, archive_reason)
+        return RedirectResponse(url=f"/admin?archived_count={archived_count}", status_code=303)
+
+    @app.post("/admin/tickets/bulk-delete")
+    def bulk_delete_tickets_route(
+        request: Request,
+        admin: str = Depends(require_admin),
+        filters: Dict[str, str] = Depends(admin_ticket_filters_from_form),
+        ticket_ids: Optional[List[int]] = Form(None),
+        select_scope: str = Form("selected"),
+        sort: str = Form("newest"),
+        delete_reason: str = Form("批量移入回收站"),
+        csrf_token: str = Form(""),
+    ) -> RedirectResponse:
+        require_admin_csrf(request, csrf_token)
+        ids = bulk_ticket_ids_from_scope(ticket_ids or [], select_scope, filters, sort, load_app_config())
+        if not ids:
+            raise HTTPException(status_code=400, detail="请选择要移入回收站的工单。")
+        deleted_count = bulk_soft_delete_tickets(ids, admin, delete_reason)
+        return_path = "/admin/archive" if filters.get("__ticket_scope") == "archive" else "/admin"
+        return RedirectResponse(url=f"{return_path}?deleted_count={deleted_count}", status_code=303)
+
+    @app.post("/admin/tickets/bulk-unarchive")
+    def bulk_unarchive_tickets_route(
+        request: Request,
+        admin: str = Depends(require_admin),
+        filters: Dict[str, str] = Depends(admin_ticket_filters_from_form),
+        ticket_ids: Optional[List[int]] = Form(None),
+        select_scope: str = Form("selected"),
+        sort: str = Form("newest"),
+        csrf_token: str = Form(""),
+    ) -> RedirectResponse:
+        require_admin_csrf(request, csrf_token)
+        filters["__ticket_scope"] = "archive"
+        ids = bulk_ticket_ids_from_scope(ticket_ids or [], select_scope, filters, sort, load_app_config())
+        if not ids:
+            raise HTTPException(status_code=400, detail="请选择要取消归档的工单。")
+        unarchived_count = bulk_unarchive_tickets(ids, admin)
+        return RedirectResponse(url=f"/admin/archive?unarchived_count={unarchived_count}", status_code=303)
+
+    @app.post("/admin/tickets/bulk-restore")
+    def bulk_restore_tickets_route(
+        request: Request,
+        admin: str = Depends(require_admin),
+        filters: Dict[str, str] = Depends(admin_ticket_filters_from_form),
+        ticket_ids: Optional[List[int]] = Form(None),
+        select_scope: str = Form("selected"),
+        sort: str = Form("newest"),
+        csrf_token: str = Form(""),
+    ) -> RedirectResponse:
+        require_admin_csrf(request, csrf_token)
+        filters["__ticket_scope"] = "deleted"
+        ids = bulk_ticket_ids_from_scope(ticket_ids or [], select_scope, filters, sort, load_app_config())
+        if not ids:
+            raise HTTPException(status_code=400, detail="请选择要恢复的工单。")
+        restored_count = bulk_restore_tickets(ids, admin)
+        return RedirectResponse(url=f"/admin/trash?restored_count={restored_count}", status_code=303)
+
+    @app.post("/admin/tickets/bulk-hard-delete")
+    def bulk_hard_delete_tickets_route(
+        request: Request,
+        admin: str = Depends(require_admin),
+        filters: Dict[str, str] = Depends(admin_ticket_filters_from_form),
+        ticket_ids: Optional[List[int]] = Form(None),
+        select_scope: str = Form("selected"),
+        sort: str = Form("newest"),
+        confirm_delete: str = Form(""),
+        csrf_token: str = Form(""),
+    ) -> RedirectResponse:
+        require_admin_csrf(request, csrf_token)
+        if confirm_delete not in {"1", "true", "on", "yes"}:
+            raise HTTPException(status_code=400, detail="请二次确认永久删除。")
+        filters["__ticket_scope"] = "deleted"
+        ids = bulk_ticket_ids_from_scope(ticket_ids or [], select_scope, filters, sort, load_app_config())
+        if not ids:
+            raise HTTPException(status_code=400, detail="请选择要永久删除的回收站工单。")
+        hard_deleted_count = bulk_hard_delete_tickets(ids, admin)
+        return RedirectResponse(url=f"/admin/trash?hard_deleted_count={hard_deleted_count}", status_code=303)
+
+    @app.post("/admin/ticket/{ticket_id}/archive")
+    def archive_ticket_route(
+        request: Request,
+        ticket_id: int,
+        admin: str = Depends(require_admin),
+        archive_reason: str = Form("后台手动归档"),
+        return_url: str = Form(""),
+        csrf_token: str = Form(""),
+    ) -> RedirectResponse:
+        require_admin_csrf(request, csrf_token)
+        archive_ticket(ticket_id, admin, archive_reason)
+        return RedirectResponse(url=safe_admin_return_url(return_url or "/admin"), status_code=303)
+
+    @app.post("/admin/ticket/{ticket_id}/unarchive")
+    def unarchive_ticket_route(
+        request: Request,
+        ticket_id: int,
+        admin: str = Depends(require_admin),
+        return_url: str = Form(""),
+        csrf_token: str = Form(""),
+    ) -> RedirectResponse:
+        require_admin_csrf(request, csrf_token)
+        unarchive_ticket(ticket_id, admin)
+        return RedirectResponse(url=safe_admin_return_url(return_url or "/admin/archive"), status_code=303)
 
     @app.post("/admin/ticket/{ticket_id}/delete")
     def delete_ticket_route(
@@ -5064,6 +5871,41 @@ def create_app() -> FastAPI:
             media_type="application/octet-stream",
             filename=str(ticket_file.get("original_filename") or target.name),
             content_disposition_type="attachment",
+        )
+
+    @app.get("/admin/archive/export")
+    def export_archived_tickets(
+        _admin: str = Depends(require_admin),
+        store_name: str = Query(""),
+        request_type: str = Query(""),
+        urgency: str = Query(""),
+        status: str = Query(""),
+        assigned_to: str = Query(""),
+        date_start: str = Query(""),
+        date_end: str = Query(""),
+        keyword: str = Query(""),
+        due_status: str = Query(""),
+        sort: str = Query("newest"),
+    ) -> StreamingResponse:
+        filters = ticket_filters_from_params(
+            store_name,
+            request_type,
+            urgency,
+            status,
+            assigned_to,
+            date_start,
+            date_end,
+            keyword,
+            due_status,
+            scope="archive",
+        )
+        config = load_app_config()
+        output = build_excel(fetch_tickets(filters, sort, config))
+        filename = f"{config.excel_filename_prefix}_归档_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+        return StreamingResponse(
+            output,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"},
         )
 
     @app.get("/admin/export")

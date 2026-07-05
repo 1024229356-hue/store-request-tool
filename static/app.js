@@ -148,6 +148,60 @@ document.addEventListener("DOMContentLoaded", () => {
     notificationCount.hidden = value <= 0;
   }
 
+  function notificationActionList(notification) {
+    if (Array.isArray(notification.actions) && notification.actions.length > 0) {
+      return notification.actions;
+    }
+    const actions = [];
+    if (notification.detail_url) {
+      actions.push({ label: "查看工单", url: notification.detail_url, method: "get" });
+    }
+    actions.push({
+      label: "标记已读",
+      url: `/admin/api/notifications/${notification.id}/read`,
+      method: "post",
+      disabled: Boolean(notification.is_read),
+    });
+    return actions;
+  }
+
+  function createNotificationActionControl(action, onComplete) {
+    const method = String(action.method || "get").toLowerCase();
+    if (method === "post") {
+      const button = document.createElement("button");
+      button.className = action.danger ? "danger-button compact" : "ghost-button compact";
+      button.type = "button";
+      button.textContent = action.label || "操作";
+      button.disabled = Boolean(action.disabled);
+      button.dataset.notificationActionUrl = action.url || "";
+      if (typeof onComplete === "function") {
+        button.addEventListener("click", async (event) => {
+          event.preventDefault();
+          if (!button.dataset.notificationActionUrl) {
+            return;
+          }
+          await notificationPost(button.dataset.notificationActionUrl);
+          await onComplete(action);
+        });
+      }
+      return button;
+    }
+    const link = document.createElement("a");
+    link.className = action.danger ? "danger-button compact" : "ghost-button compact";
+    link.href = action.url || "#";
+    link.textContent = action.label || "查看";
+    return link;
+  }
+
+  function appendNotificationActions(container, notification, onComplete) {
+    notificationActionList(notification).forEach((action) => {
+      if (!action || !action.url) {
+        return;
+      }
+      container.appendChild(createNotificationActionControl(action, onComplete));
+    });
+  }
+
   function createNotificationItem(notification) {
     const item = document.createElement("article");
     item.className = `notification-item ${notification.is_read ? "read" : "unread"}`;
@@ -179,20 +233,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
     const actions = document.createElement("div");
     actions.className = "notification-item-actions";
-    if (notification.detail_url) {
-      const detail = document.createElement("a");
-      detail.className = "ghost-button compact";
-      detail.href = notification.detail_url;
-      detail.textContent = "查看工单";
-      actions.appendChild(detail);
-    }
-    const read = document.createElement("button");
-    read.className = "ghost-button compact";
-    read.type = "button";
-    read.dataset.notificationRead = String(notification.id);
-    read.disabled = Boolean(notification.is_read);
-    read.textContent = notification.is_read ? "已读" : "标记已读";
-    actions.appendChild(read);
+    appendNotificationActions(actions, notification);
     item.appendChild(actions);
     return item;
   }
@@ -275,23 +316,10 @@ document.addEventListener("DOMContentLoaded", () => {
 
     const actions = document.createElement("div");
     actions.className = "notification-item-actions";
-    if (notification.detail_url) {
-      const detail = document.createElement("a");
-      detail.className = "ghost-button compact";
-      detail.href = notification.detail_url;
-      detail.textContent = "查看工单";
-      actions.appendChild(detail);
-    }
-    const read = document.createElement("button");
-    read.className = "ghost-button compact";
-    read.type = "button";
-    read.textContent = "标记已读";
-    read.addEventListener("click", async () => {
-      await notificationPost(`/admin/api/notifications/${notification.id}/read`);
+    appendNotificationActions(actions, notification, async () => {
       toast.remove();
       refreshNotifications();
     });
-    actions.appendChild(read);
     toast.appendChild(actions);
 
     toast.addEventListener("mouseenter", () => {
@@ -362,6 +390,146 @@ document.addEventListener("DOMContentLoaded", () => {
     } finally {
       document.body.removeChild(textarea);
     }
+  }
+
+  const bulkRoot = document.querySelector("[data-bulk-root]");
+  const ticketCheckboxes = Array.from(document.querySelectorAll("[data-ticket-select], [data-ticket-checkbox]"));
+  const selectCurrentControls = Array.from(
+    document.querySelectorAll("[data-select-current-page], [data-select-current-page-button]"),
+  );
+  const clearSelectionButton = document.querySelector("[data-clear-selection]");
+  const selectFilteredButton = document.querySelector("[data-select-filtered]");
+  const selectedCountElement = document.querySelector("[data-selected-count]");
+  const filteredNotice = document.querySelector("[data-filtered-notice]");
+  const bulkForms = Array.from(document.querySelectorAll("[data-bulk-form]"));
+  let filteredSelectionActive = false;
+
+  function selectedTicketIds() {
+    return ticketCheckboxes.filter((checkbox) => checkbox.checked).map((checkbox) => checkbox.value);
+  }
+
+  function setBulkScope(scope) {
+    document.querySelectorAll("[data-select-scope]").forEach((input) => {
+      input.value = scope;
+    });
+  }
+
+  function updateBulkSelectionState() {
+    const selectedCount = selectedTicketIds().length;
+    if (selectedCountElement) {
+      selectedCountElement.textContent = String(selectedCount);
+    }
+    if (filteredNotice) {
+      filteredNotice.hidden = !filteredSelectionActive;
+    }
+    const allChecked = ticketCheckboxes.length > 0 && selectedCount === ticketCheckboxes.length;
+    selectCurrentControls.forEach((control) => {
+      if (control.matches('input[type="checkbox"]')) {
+        control.checked = allChecked;
+        control.indeterminate = selectedCount > 0 && !allChecked;
+      }
+    });
+  }
+
+  function clearGeneratedTicketInputs(form) {
+    form.querySelectorAll("[data-generated-ticket-id]").forEach((input) => input.remove());
+  }
+
+  function appendSelectedTicketInputs(form, ids) {
+    ids.forEach((ticketId) => {
+      const input = document.createElement("input");
+      input.type = "hidden";
+      input.name = "ticket_ids";
+      input.value = ticketId;
+      input.dataset.generatedTicketId = "1";
+      form.appendChild(input);
+    });
+  }
+
+  if (bulkRoot && ticketCheckboxes.length > 0) {
+    const filteredCount = Number(bulkRoot.dataset.filteredCount || "0");
+    ticketCheckboxes.forEach((checkbox) => {
+      checkbox.addEventListener("change", () => {
+        filteredSelectionActive = false;
+        setBulkScope("selected");
+        updateBulkSelectionState();
+      });
+    });
+
+    selectCurrentControls.forEach((control) => {
+      if (control.matches('input[type="checkbox"]')) {
+        control.addEventListener("change", () => {
+          filteredSelectionActive = false;
+          setBulkScope("selected");
+          ticketCheckboxes.forEach((checkbox) => {
+            checkbox.checked = control.checked;
+          });
+          updateBulkSelectionState();
+        });
+        return;
+      }
+      control.addEventListener("click", (event) => {
+        event.preventDefault();
+        filteredSelectionActive = false;
+        setBulkScope("selected");
+        ticketCheckboxes.forEach((checkbox) => {
+          checkbox.checked = true;
+        });
+        updateBulkSelectionState();
+      });
+    });
+
+    if (clearSelectionButton) {
+      clearSelectionButton.addEventListener("click", (event) => {
+        event.preventDefault();
+        filteredSelectionActive = false;
+        setBulkScope("selected");
+        ticketCheckboxes.forEach((checkbox) => {
+          checkbox.checked = false;
+        });
+        updateBulkSelectionState();
+      });
+    }
+
+    if (selectFilteredButton) {
+      selectFilteredButton.addEventListener("click", (event) => {
+        event.preventDefault();
+        if (filteredCount <= 0) {
+          window.alert("当前筛选条件下没有可操作工单。");
+          return;
+        }
+        filteredSelectionActive = true;
+        setBulkScope("filtered");
+        updateBulkSelectionState();
+      });
+    }
+
+    bulkForms.forEach((form) => {
+      form.addEventListener("submit", (event) => {
+        clearGeneratedTicketInputs(form);
+        const scope = filteredSelectionActive ? "filtered" : "selected";
+        setBulkScope(scope);
+        const ids = selectedTicketIds();
+        if (scope === "selected") {
+          if (ids.length === 0) {
+            event.preventDefault();
+            window.alert("请先选择工单。");
+            return;
+          }
+          appendSelectedTicketInputs(form, ids);
+        } else if (filteredCount <= 0) {
+          event.preventDefault();
+          window.alert("当前筛选条件下没有可操作工单。");
+          return;
+        }
+        const message = scope === "filtered" ? form.dataset.confirmFiltered : form.dataset.confirmSelected;
+        if (message && !window.confirm(message)) {
+          event.preventDefault();
+        }
+      });
+    });
+
+    updateBulkSelectionState();
   }
 
   function renderImages() {
@@ -575,6 +743,17 @@ document.addEventListener("DOMContentLoaded", () => {
 
     if (notificationList) {
       notificationList.addEventListener("click", async (event) => {
+        const actionButton = event.target.closest("[data-notification-action-url]");
+        if (actionButton) {
+          event.preventDefault();
+          const actionUrl = actionButton.dataset.notificationActionUrl || "";
+          if (!actionUrl) {
+            return;
+          }
+          await notificationPost(actionUrl);
+          await refreshNotifications();
+          return;
+        }
         const readButton = event.target.closest("[data-notification-read]");
         if (!readButton) {
           return;

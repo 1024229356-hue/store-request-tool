@@ -1,7 +1,7 @@
 {% set page_title = ticket.ticket_no %}
-{% set page_subtitle = '工单详情 · 提交信息、附件、处理面板和日志留痕。' %}
-{% set page_eyebrow = '工单详情' %}
-{% set current_menu = 'tickets' %}
+{% set page_subtitle = '协作工作台 · 负责人、协作人、评论、子任务和门店补充集中处理。' %}
+{% set page_eyebrow = '工单协作' %}
+{% set current_menu = 'my-work' if return_url.startswith('/admin/my-work') else ('archive' if ticket.archived_at else 'tickets') %}
 {% extends "base_admin.html" %}
 
 {% block header_meta %}
@@ -9,11 +9,28 @@
   <span class="badge status-badge status-{{ ticket.status }}">{{ ticket.status }}</span>
   <span class="badge status-badge urgency-{{ ticket.urgency }}">{{ ticket.urgency }}</span>
   <span class="badge status-badge due-{{ ticket.due_status_class }}">{{ ticket.due_status }}</span>
+  {% if ticket.archived_at %}
+  <span class="badge archive-badge">已归档</span>
+  {% endif %}
 </div>
 {% endblock %}
 
 {% block topbar_actions %}
 <a class="ghost-button compact" href="{{ return_url }}">返回列表</a>
+{% if ticket.archived_at %}
+<form class="inline-action-form" method="post" action="/admin/ticket/{{ ticket.id }}/unarchive" onsubmit="return confirm('确认将该工单恢复到活跃列表吗？');">
+  <input type="hidden" name="return_url" value="{{ return_url }}">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <button class="secondary-button compact" type="submit">取消归档</button>
+</form>
+{% else %}
+<form class="inline-action-form" method="post" action="/admin/ticket/{{ ticket.id }}/archive" onsubmit="return confirm('确认将该工单归档吗？');">
+  <input type="hidden" name="return_url" value="{{ return_url }}">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <input type="hidden" name="archive_reason" value="后台手动归档">
+  <button class="secondary-button compact" type="submit">归档工单</button>
+</form>
+{% endif %}
 <form class="inline-action-form" method="post" action="/admin/ticket/{{ ticket.id }}/delete" onsubmit="return confirm('确认将该工单移入回收站吗？');">
   <input type="hidden" name="return_url" value="{{ return_url }}">
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -37,6 +54,22 @@
 {% if ticket.due_status == '已超时' %}
 <div class="alert alert-error">该工单已超过期望完成时间，请优先处理。</div>
 {% endif %}
+{% if close_prompt %}
+<div class="alert alert-success close-ticket-prompt">
+  <div>
+    <strong>所有子任务已完成，是否关闭工单？</strong>
+    <span>关闭后会记录完成时间，工单仍可在详情页查看日志和附件。</span>
+  </div>
+  <form class="inline-action-form" method="post" action="/admin/ticket/{{ ticket.id }}">
+    <input type="hidden" name="return_url" value="{{ return_url }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="status" value="已完成">
+    <input type="hidden" name="assigned_to" value="{{ ticket.assigned_to or admin_user }}">
+    <input type="hidden" name="handler_note" value="{{ ticket.handler_note or '所有子任务已完成，确认关闭工单。' }}">
+    <button class="primary-button compact" type="submit">关闭工单</button>
+  </form>
+</div>
+{% endif %}
 
 <section class="detail-summary-card work-card">
   <div>
@@ -54,6 +87,45 @@
   <div>
     <span>最后更新时间</span>
     <strong>{{ ticket.updated_at }}</strong>
+  </div>
+</section>
+
+<section class="detail-section work-card collaboration-workbench">
+  <div class="section-heading">
+    <h2>协作工作台</h2>
+    <p>把负责人、协作人、门店沟通和下一步动作放在同一个视图里。</p>
+  </div>
+  <div class="workbench-grid">
+    <article>
+      <span>谁负责</span>
+      <strong>{{ ticket.assigned_to or '暂未指定' }}</strong>
+      <a href="#handler-panel">调整处理人</a>
+    </article>
+    <article>
+      <span>谁协作</span>
+      <strong>{{ participants | length }} 人</strong>
+      <a href="#participants">维护协作人</a>
+    </article>
+    <article>
+      <span>谁需要回复</span>
+      <strong>{{ '门店需要补充资料' if ticket.status == '待门店补充' else ('总部待回复门店' if supplements or comments else '暂无阻塞') }}</strong>
+      <a href="#comments">查看沟通</a>
+    </article>
+    <article>
+      <span>下一步</span>
+      <strong>
+        {% if close_prompt %}
+        确认是否关闭工单
+        {% elif ticket.status == '待门店补充' %}
+        等待门店补充资料
+        {% elif open_task_count %}
+        推进 {{ open_task_count }} 个未完成子任务
+        {% else %}
+        更新处理进度
+        {% endif %}
+      </strong>
+      <a href="#tasks">查看子任务</a>
+    </article>
   </div>
 </section>
 
@@ -125,7 +197,7 @@
       <p class="description-box">{{ ticket.description }}</p>
     </section>
 
-    <section class="detail-section work-card collaboration-section">
+    <section class="detail-section work-card collaboration-section" id="participants">
       <div class="section-heading">
         <h2>协作人区域</h2>
         <p>记录参与处理该工单的总部、门店或外部协作方。</p>
@@ -177,7 +249,7 @@
       </form>
     </section>
 
-    <section class="detail-section work-card collaboration-section">
+    <section class="detail-section work-card collaboration-section" id="tasks">
       <div class="section-heading">
         <h2>子任务区域</h2>
         <p>把需要总部内部跟进的动作拆成可追踪事项。</p>
@@ -253,9 +325,9 @@
       </form>
     </section>
 
-    <section class="detail-section work-card collaboration-section">
+    <section class="detail-section work-card collaboration-section" id="comments">
       <div class="section-heading">
-        <h2>沟通记录</h2>
+        <h2>沟通记录：门店可见回复 / 内部备注</h2>
         <p>门店可见回复会展示在门店详情页，内部备注只在后台可见。</p>
       </div>
       {% if comments %}
@@ -268,7 +340,7 @@
           </div>
           <div class="tag-list">
             <span class="tag-chip">{{ '门店' if comment.author_type == 'store' else '总部' }}</span>
-            <span class="tag-chip">{{ '内部备注' if comment.visibility == 'internal' else '门店可见' }}</span>
+            <span class="tag-chip">{{ '内部备注' if comment.visibility == 'internal' else '门店可见回复' }}</span>
           </div>
           <p>{{ comment.content }}</p>
           <form class="record-delete-form" method="post" action="/admin/ticket/{{ ticket.id }}/comment/{{ comment.id }}/delete" onsubmit="return confirm('确认删除这条沟通记录吗？');">
@@ -292,7 +364,7 @@
         <label>
           <span>可见范围</span>
           <select name="visibility">
-            <option value="public">门店可见</option>
+            <option value="public">门店可见回复</option>
             <option value="internal">内部备注</option>
           </select>
         </label>
@@ -404,7 +476,7 @@
     </section>
   </div>
 
-  <aside class="handler-panel work-card">
+  <aside class="handler-panel work-card" id="handler-panel">
     <h2>总部处理面板</h2>
     <p class="panel-note">状态改为已完成会记录完成时间，请确认处理结果后保存。</p>
     <form method="post" action="/admin/ticket/{{ ticket.id }}">

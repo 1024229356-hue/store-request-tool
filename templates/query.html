@@ -106,7 +106,12 @@
         <td class="summary-cell" title="{{ ticket.description }}">
           <div class="summary-text">{{ ticket.description_summary }}</div>
         </td>
-        <td><span class="badge status-{{ ticket.status }}">{{ ticket.status }}</span></td>
+        <td>
+          <span class="badge status-{{ ticket.status }}">{{ ticket.status }}</span>
+          {% if ticket.archived_at %}
+          <span class="badge archive-badge">已归档</span>
+          {% endif %}
+        </td>
         <td>{{ ticket.assigned_to or '' }}</td>
         <td>{{ ticket.handler_note or '' }}</td>
         <td>{{ ticket.updated_at }}</td>

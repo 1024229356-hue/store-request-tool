@@ -24,8 +24,14 @@
         <a class="sidebar-link {% if current_menu == 'dashboard' %}active{% endif %}" href="/admin/dashboard">
           <span>业务总览</span>
         </a>
+        <a class="sidebar-link {% if current_menu == 'my-work' %}active{% endif %}" href="/admin/my-work">
+          <span>我的待办</span>
+        </a>
         <a class="sidebar-link {% if current_menu == 'tickets' %}active{% endif %}" href="/admin">
           <span>工单管理</span>
+        </a>
+        <a class="sidebar-link {% if current_menu == 'archive' %}active{% endif %}" href="/admin/archive">
+          <span>归档工单</span>
         </a>
         <a class="sidebar-link" href="/query">
           <span>门店查询</span>

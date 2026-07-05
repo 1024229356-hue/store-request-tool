@@ -1,68 +1,29 @@
-{% set page_title = '工单管理' %}
-{% set page_subtitle = '统一查看、筛选、处理门店需求，保持处理过程可追踪。' %}
-{% set page_eyebrow = '止痒工单后台' %}
-{% set current_menu = 'tickets' %}
+{% set page_title = '归档工单' %}
+{% set page_subtitle = '长期保留已完成、历史沉淀或暂不处理的工单；归档不是删除。' %}
+{% set page_eyebrow = '工单归档' %}
+{% set current_menu = 'archive' %}
 {% extends "base_admin.html" %}
 
 {% block topbar_actions %}
-<a class="quick-action-button" href="{{ export_url }}">导出 Excel</a>
-<a class="ghost-button compact" href="/admin/dashboard">查看统计</a>
-<a class="ghost-button compact" href="/admin/cleanup">清理测试数据</a>
+<a class="quick-action-button" href="{{ export_url }}">导出归档 Excel</a>
+<a class="ghost-button compact" href="/admin">返回活跃工单</a>
+<a class="ghost-button compact" href="/admin/trash">回收站</a>
 {% endblock %}
 
 {% block content %}
-{% if archived_count %}
-<div class="alert alert-success">已归档 {{ archived_count }} 条工单。</div>
+{% if unarchived_count %}
+<div class="alert alert-success">已恢复 {{ unarchived_count }} 条工单到活跃列表。</div>
 {% endif %}
 {% if deleted_count %}
 <div class="alert alert-success">已移入回收站 {{ deleted_count }} 条工单。</div>
 {% endif %}
 
-<section class="stats-section work-card" aria-label="统计概览">
-  <div class="section-heading admin-section-heading">
-    <h2>统计概览</h2>
-    <p>统计基于当前筛选条件，不受分页影响。</p>
-  </div>
-  <div class="stats-grid">
-    <article class="stat-card metric-card" data-summary-total="{{ summary.total_count }}">
-      <span>当前筛选结果</span>
-      <strong>{{ summary.total_count }}</strong>
-      <small>共 {{ pagination.total_pages }} 页</small>
-    </article>
-    <article class="stat-card metric-card">
-      <span>当前页工单</span>
-      <strong>{{ tickets|length }}</strong>
-      <small>每页 {{ pagination.page_size }} 条</small>
-    </article>
-    <article class="stat-card metric-card" data-summary-pending="{{ summary.pending_count }}">
-      <span>待处理</span>
-      <strong>{{ summary.pending_count }}</strong>
-      <small>需要分配或跟进</small>
-    </article>
-    <article class="stat-card metric-card" data-summary-processing="{{ summary.processing_count }}">
-      <span>处理中</span>
-      <strong>{{ summary.processing_count }}</strong>
-      <small>总部已接手</small>
-    </article>
-    <article class="stat-card metric-card stat-alert" data-summary-today-urgent="{{ summary.today_urgent_count }}">
-      <span>当天必须处理</span>
-      <strong>{{ summary.today_urgent_count }}</strong>
-      <small>优先查看</small>
-    </article>
-    <article class="stat-card metric-card" data-summary-completed="{{ summary.completed_count }}">
-      <span>已完成</span>
-      <strong>{{ summary.completed_count }}</strong>
-      <small>已闭环</small>
-    </article>
-  </div>
-</section>
-
 <section class="filter-card work-card">
   <div class="section-heading admin-section-heading">
     <h2>筛选条件</h2>
-    <p>按门店、状态、日期和关键词快速定位工单。</p>
+    <p>筛选归档工单，导出范围会跟随当前筛选条件。</p>
   </div>
-  <form class="filter-bar" method="get" action="/admin">
+  <form class="filter-bar" method="get" action="/admin/archive">
     <label>
       <span>门店</span>
       <select name="store_name">
@@ -108,15 +69,6 @@
         {% endfor %}
       </select>
     </label>
-    <label>
-      <span>时效</span>
-      <select name="due_status">
-        <option value="">全部</option>
-        {% for item in due_status_options %}
-        <option value="{{ item }}" {% if filters.get('due_status') == item %}selected{% endif %}>{{ item }}</option>
-        {% endfor %}
-      </select>
-    </label>
     <div class="date-range">
       <label>
         <span>开始日期</span>
@@ -141,7 +93,7 @@
     </label>
     <div class="filter-actions">
       <button class="primary-button compact" type="submit">筛选</button>
-      <a class="ghost-button compact" href="/admin">重置</a>
+      <a class="ghost-button compact" href="/admin/archive">重置</a>
     </div>
   </form>
 </section>
@@ -149,27 +101,26 @@
 <section class="bulk-action-bar work-card" data-bulk-toolbar data-bulk-root data-filtered-count="{{ pagination.total_count }}">
   <div class="bulk-selected-count">
     当前页已选 <strong data-selected-count>0</strong> 条
-    <span data-filtered-notice hidden>已选择当前筛选条件下全部 {{ pagination.total_count }} 条工单。</span>
+    <span data-filtered-notice hidden>已选择当前筛选条件下全部 {{ pagination.total_count }} 条归档工单。</span>
   </div>
   <div class="bulk-actions">
     <button class="ghost-button compact" type="button" data-select-current-page-button>全选当前页</button>
     <button class="ghost-button compact" type="button" data-clear-selection>清空选择</button>
     <button class="ghost-button compact" type="button" data-select-filtered>按当前筛选条件选择全部结果</button>
-    <form class="inline-action-form" method="post" action="/admin/tickets/bulk-archive" data-bulk-form data-confirm-selected="确认将选中工单归档吗？" data-confirm-filtered="确认对当前筛选条件下全部 {{ pagination.total_count }} 条工单执行归档吗？">
+    <form class="inline-action-form" method="post" action="/admin/tickets/bulk-unarchive" data-bulk-form data-confirm-selected="确认将选中工单恢复到活跃列表吗？" data-confirm-filtered="确认对当前筛选条件下全部 {{ pagination.total_count }} 条归档工单执行恢复吗？">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <input name="select_scope" value="selected" type="hidden" data-select-scope>
-      <input type="hidden" name="source_view" value="active">
+      <input type="hidden" name="source_view" value="archive">
       <input type="hidden" name="sort" value="{{ sort }}">
-      <input type="hidden" name="archive_reason" value="批量归档">
       {% for key in ['store_name', 'request_type', 'urgency', 'status', 'assigned_to', 'date_start', 'date_end', 'keyword', 'due_status'] %}
       <input type="hidden" name="{{ key }}" value="{{ filters.get(key, '') }}">
       {% endfor %}
-      <button class="secondary-button compact" type="submit">批量归档</button>
+      <button class="secondary-button compact" type="submit">批量恢复</button>
     </form>
-    <form class="inline-action-form" method="post" action="/admin/tickets/bulk-delete" data-bulk-form data-confirm-selected="确认将选中工单移入回收站吗？" data-confirm-filtered="确认对当前筛选条件下全部 {{ pagination.total_count }} 条工单执行移入回收站吗？">
+    <form class="inline-action-form" method="post" action="/admin/tickets/bulk-delete" data-bulk-form data-confirm-selected="确认将选中工单移入回收站吗？" data-confirm-filtered="确认对当前筛选条件下全部 {{ pagination.total_count }} 条归档工单执行移入回收站吗？">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <input name="select_scope" value="selected" type="hidden" data-select-scope>
-      <input type="hidden" name="source_view" value="active">
+      <input type="hidden" name="source_view" value="archive">
       <input type="hidden" name="sort" value="{{ sort }}">
       <input type="hidden" name="delete_reason" value="批量移入回收站">
       {% for key in ['store_name', 'request_type', 'urgency', 'status', 'assigned_to', 'date_start', 'date_end', 'keyword', 'due_status'] %}
@@ -181,7 +132,7 @@
 </section>
 
 <section class="table-wrap work-card">
-  <table class="ticket-table erp-table">
+  <table class="ticket-table erp-table archive-table">
     <thead>
       <tr>
         <th class="ticket-select-cell"><input class="ticket-select-all" type="checkbox" data-select-current-page aria-label="全选当前页"></th>
@@ -190,18 +141,12 @@
         <th>门店</th>
         <th>提报人</th>
         <th>需求类型</th>
-        <th>紧急程度</th>
-        <th>品牌</th>
-        <th>商品名称</th>
-        <th>规格条码</th>
-        <th>数量</th>
-        <th>问题说明摘要</th>
-        <th>图片数 / 文件数</th>
-        <th>当前状态</th>
-        <th>时效</th>
+        <th>状态</th>
         <th>处理人</th>
-        <th>完成时间</th>
-        <th>最后更新时间</th>
+        <th>归档时间</th>
+        <th>归档人</th>
+        <th>归档原因</th>
+        <th>操作</th>
       </tr>
     </thead>
     <tbody>
@@ -213,31 +158,18 @@
         <td title="{{ ticket.store_name }}"><div class="multi-value-text">{{ ticket.store_name }}</div></td>
         <td>{{ ticket.submitter }}</td>
         <td>{{ ticket.request_type }}</td>
-        <td><span class="badge status-badge urgency-{{ ticket.urgency }}">{{ ticket.urgency }}</span></td>
-        <td title="{{ ticket.brand or '' }}"><div class="multi-value-text">{{ ticket.brand or '' }}</div></td>
-        <td>{{ ticket.product_name or '' }}</td>
-        <td>{{ ticket.sku_barcode or '' }}</td>
-        <td>{{ ticket.quantity if ticket.quantity is not none else '' }}</td>
-        <td class="summary-cell" title="{{ ticket.description }}">
-          <div class="summary-text">{{ ticket.description_summary }}</div>
-        </td>
-        <td title="图片 {{ ticket.image_count or 0 }} / 文件 {{ ticket.file_count or 0 }}">
-          <div class="attachment-counts">
-            <span class="attachment-badge">图片 {{ ticket.image_count or 0 }}</span>
-            <span class="attachment-badge">文件 {{ ticket.file_count or 0 }}</span>
-          </div>
-        </td>
         <td><span class="badge status-badge status-{{ ticket.status }}">{{ ticket.status }}</span></td>
-        <td><span class="badge status-badge due-{{ ticket.due_status_class }}">{{ ticket.due_status }}</span></td>
         <td>{{ ticket.assigned_to or '' }}</td>
-        <td>{{ ticket.closed_at or '' }}</td>
-        <td>{{ ticket.updated_at }}</td>
+        <td>{{ ticket.archived_at }}</td>
+        <td>{{ ticket.archived_by or '' }}</td>
+        <td>{{ ticket.archive_reason or '' }}</td>
+        <td><a class="ghost-button compact" href="{{ ticket.detail_url }}">查看</a></td>
       </tr>
       {% else %}
       <tr>
-        <td class="empty-cell" colspan="18">
-          <strong>当前条件下暂无工单</strong>
-          <span>可以调整筛选条件，或等待门店提交新的需求。</span>
+        <td class="empty-cell" colspan="12">
+          <strong>当前条件下暂无归档工单</strong>
+          <span>活跃工单归档后会显示在这里。</span>
         </td>
       </tr>
       {% endfor %}
@@ -245,7 +177,7 @@
   </table>
 </section>
 
-<nav class="pagination-bar" aria-label="后台分页">
+<nav class="pagination-bar" aria-label="归档工单分页">
   <div>当前第 {{ pagination.current_page }} 页 / 共 {{ pagination.total_pages }} 页 / 共 {{ pagination.total_count }} 条工单</div>
   <div class="pagination-actions">
     {% if pagination.has_prev %}

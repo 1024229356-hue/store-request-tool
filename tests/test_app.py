@@ -240,6 +240,14 @@ def admin_post(client, url, data=None, **kwargs):
     return client.post(url, data=payload, **kwargs)
 
 
+def ticket_action_logs(tmp_path, ticket_id):
+    return [
+        row
+        for row in rows_for(tmp_path, "ticket_logs")
+        if int(row["ticket_id"]) == int(ticket_id)
+    ]
+
+
 def basic_auth_headers(username=ADMIN_AUTH[0], password=ADMIN_AUTH[1]):
     credentials = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
     return {"Authorization": f"Basic {credentials}"}
@@ -646,6 +654,142 @@ def test_admin_tasks_lifecycle_logs_notifications_and_participants(tmp_path, mon
     assert "总部商品" in admin_detail.text
     assert "联系供应商确认库存" in admin_detail.text
     assert "已完成" in admin_detail.text
+
+
+def test_admin_my_work_shows_assigned_tickets_and_user_tasks(tmp_path, monkeypatch):
+    client, main = build_client(
+        tmp_path,
+        monkeypatch,
+        admin_users="admin:123456,caigou:123456",
+        config_overrides={"handlers.json": ["admin", "caigou", "总部商品"]},
+    )
+    submit_ticket(client, description="admin 负责的协作工单")
+    submit_ticket(client, description="采购子任务工单")
+
+    assert_login_success(login_admin(client, "admin", "123456"))
+    admin_post(
+        client,
+        "/admin/ticket/1",
+        data={"status": "处理中", "assigned_to": "admin", "handler_note": "admin 接手"},
+        follow_redirects=False,
+    )
+    admin_post(
+        client,
+        "/admin/ticket/1/tasks",
+        data={"title": "跟进供应商报价", "assignee": "admin", "status": "待处理"},
+        follow_redirects=False,
+    )
+    admin_post(
+        client,
+        "/admin/ticket/2/tasks",
+        data={"title": "采购确认库存", "assignee": "caigou", "status": "待处理"},
+        follow_redirects=False,
+    )
+
+    admin_work = client.get("/admin/my-work")
+    assert admin_work.status_code == 200
+    assert "我的待办" in admin_work.text
+    assert "负责工单" in admin_work.text
+    assert "子任务" in admin_work.text
+    assert "admin 负责的协作工单" in admin_work.text
+    assert "跟进供应商报价" in admin_work.text
+    assert "采购确认库存" not in admin_work.text
+
+    caigou_client = TestClient(main.app)
+    assert_login_success(login_admin(caigou_client, "caigou", "123456"))
+    caigou_work = caigou_client.get("/admin/my-work")
+    assert caigou_work.status_code == 200
+    assert "采购确认库存" in caigou_work.text
+    assert "跟进供应商报价" not in caigou_work.text
+
+
+def test_ticket_detail_workbench_comment_modes_and_close_prompt(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch)
+    submit_ticket(client, description="协作工作台提示工单")
+    logged_in_client(client)
+    admin_post(
+        client,
+        "/admin/ticket/1/tasks",
+        data={"title": "完成收尾确认", "assignee": ADMIN_AUTH[0], "status": "已完成"},
+        follow_redirects=False,
+    )
+
+    detail = client.get("/admin/ticket/1")
+    assert detail.status_code == 200
+    assert "协作工作台" in detail.text
+    assert "谁负责" in detail.text
+    assert "谁协作" in detail.text
+    assert "下一步" in detail.text
+    assert "门店可见回复" in detail.text
+    assert "内部备注" in detail.text
+    assert 'option value="public"' in detail.text
+    assert 'option value="internal"' in detail.text
+    assert "所有子任务已完成" in detail.text
+    assert "是否关闭工单" in detail.text
+
+
+def test_notification_workflow_actions_and_accept_ticket(tmp_path, monkeypatch):
+    client, _ = build_client(
+        tmp_path,
+        monkeypatch,
+        admin_users="admin:123456,caigou:123456",
+        config_overrides={"handlers.json": ["admin", "caigou", "总部商品"]},
+    )
+    submit_ticket(client, description="待接单提醒工单")
+
+    assert_login_success(login_admin(client, "admin", "123456"))
+    payload = client.get("/admin/api/notifications").json()
+    notification = payload["notifications"][0]
+    labels = [action["label"] for action in notification["actions"]]
+    assert labels == ["查看工单", "接单", "回复", "标记已读"]
+    accept_action = next(action for action in notification["actions"] if action["label"] == "接单")
+    assert accept_action["method"] == "post"
+    assert accept_action["url"] == "/admin/ticket/1/accept"
+
+    accept = client.post(
+        "/admin/ticket/1/accept",
+        data={"csrf_token": csrf_token_for(client), "return_url": "/admin/my-work"},
+        follow_redirects=False,
+    )
+    assert accept.status_code == 303
+    assert accept.headers["location"].startswith("/admin/my-work")
+    assert rows_for(tmp_path, "tickets")[0]["assigned_to"] == "admin"
+    assert ticket_action_logs(tmp_path, 1)[-1]["action"] == "接单"
+
+    work = client.get("/admin/my-work")
+    assert "待接单提醒工单" in work.text
+
+
+def test_store_need_supplement_highlight_and_supplement_reminds_handler(tmp_path, monkeypatch):
+    client, _ = build_client(
+        tmp_path,
+        monkeypatch,
+        admin_users="admin:123456",
+        config_overrides={"handlers.json": ["admin", "总部商品"]},
+    )
+    submit_ticket(client, store_name="南京门东店", description="需要门店补充的工单")
+    assert_login_success(login_admin(client, "admin", "123456"))
+    admin_post(
+        client,
+        "/admin/ticket/1",
+        data={"status": "待门店补充", "assigned_to": "admin", "handler_note": "请补充现场照片和到货说明"},
+        follow_redirects=False,
+    )
+
+    store_detail = client.get("/query/ticket/1?store_name=南京门东店")
+    assert store_detail.status_code == 200
+    assert "需要补充资料" in store_detail.text
+    assert "请补充现场照片和到货说明" in store_detail.text
+
+    supplement = client.post(
+        "/query/ticket/1/supplement",
+        data={"store_name": "南京门东店", "submitter": "小李", "note": "已补充现场照片"},
+    )
+    assert supplement.status_code == 200
+    events = rows_for(tmp_path, "notification_events")
+    assert events[-1]["event_type"] == "store_supplement"
+    assert events[-1]["title"] == "门店补充资料"
+    assert "admin" in events[-1]["content"]
 
 
 def test_cookie_login_logout_switch_account_and_operator_log(tmp_path, monkeypatch):
@@ -1338,6 +1482,256 @@ def test_ticket_soft_delete_restore_hard_delete_and_filters(tmp_path, monkeypatc
     assert not file_path.exists()
 
 
+def test_admin_list_exposes_bulk_selection_controls(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch)
+    submit_ticket(client, description="bulk selection ticket A")
+    submit_ticket(client, description="bulk selection ticket B")
+    logged_in_client(client)
+
+    page = client.get("/admin")
+
+    assert page.status_code == 200
+    assert 'class="bulk-action-bar' in page.text
+    assert 'data-bulk-toolbar' in page.text
+    assert 'data-select-current-page' in page.text
+    assert 'data-clear-selection' in page.text
+    assert 'data-select-filtered' in page.text
+    assert 'data-filtered-count="2"' in page.text
+    assert 'class="ticket-select-all"' in page.text
+    assert 'class="ticket-select"' in page.text
+    assert 'class="ticket-select-cell"' in page.text
+    assert 'name="ticket_ids"' in page.text
+    assert 'value="1"' in page.text
+    assert 'value="2"' in page.text
+    assert 'action="/admin/tickets/bulk-archive"' in page.text
+    assert 'action="/admin/tickets/bulk-delete"' in page.text
+    assert 'name="select_scope" value="selected"' in page.text
+    assert 'name="csrf_token"' in page.text
+
+
+def test_archive_trash_routes_and_sidebar_navigation(tmp_path, monkeypatch):
+    client, main = build_client(tmp_path, monkeypatch)
+
+    unauth_archive = TestClient(main.app).get("/admin/archive", follow_redirects=False)
+    assert unauth_archive.status_code == 303
+    assert unauth_archive.headers["location"].startswith("/admin/login")
+    unauth_trash = TestClient(main.app).get("/admin/trash", follow_redirects=False)
+    assert unauth_trash.status_code == 303
+    assert unauth_trash.headers["location"].startswith("/admin/login")
+
+    logged_in_client(client)
+    admin_page = client.get("/admin")
+    assert admin_page.status_code == 200
+    assert 'href="/admin/archive"' in admin_page.text
+    assert 'href="/admin/trash"' in admin_page.text
+
+    archive_page = client.get("/admin/archive")
+    assert archive_page.status_code == 200
+    assert "归档工单" in archive_page.text
+    assert 'href="/admin/archive"' in archive_page.text
+    trash_page = client.get("/admin/trash")
+    assert trash_page.status_code == 200
+    assert "回收站" in trash_page.text
+    assert 'href="/admin/trash"' in trash_page.text
+
+
+def test_bulk_selection_css_keeps_checkboxes_and_toolbar_compact():
+    style = (PROJECT_DIR / "static" / "style.css").read_text(encoding="utf-8")
+
+    assert ".ticket-select-cell" in style
+    assert ".ticket-select,\n.ticket-select-all" in style
+    assert "width: 18px;" in style
+    assert "height: 18px;" in style
+    assert "min-height: 0;" in style
+    assert ".bulk-action-bar" in style
+    assert "min-height: 34px;" in style
+
+
+def test_bulk_archive_selected_ticket_moves_to_archive_and_can_unarchive(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch)
+    submit_ticket(client, description="archive selected ticket")
+    submit_ticket(client, description="active neighbor ticket")
+    ticket_no = rows_for(tmp_path, "tickets")[0]["ticket_no"]
+    store_name = rows_for(tmp_path, "tickets")[0]["store_name"]
+    logged_in_client(client)
+
+    archive = admin_post(
+        client,
+        "/admin/tickets/bulk-archive",
+        data={"ticket_ids": ["1"], "select_scope": "selected", "archive_reason": "batch archive reason"},
+        follow_redirects=False,
+    )
+
+    assert archive.status_code == 303
+    assert archive.headers["location"] == "/admin?archived_count=1"
+    tickets = rows_for(tmp_path, "tickets")
+    assert tickets[0]["archived_at"]
+    assert tickets[0]["archived_by"] == ADMIN_AUTH[0]
+    assert tickets[0]["archive_reason"] == "batch archive reason"
+    assert tickets[1]["archived_at"] is None
+    assert "归档工单" in [row["action"] for row in ticket_action_logs(tmp_path, 1)]
+
+    admin_page = client.get("/admin")
+    assert "archive selected ticket" not in admin_page.text
+    assert "active neighbor ticket" in admin_page.text
+    archive_page = client.get("/admin/archive")
+    assert archive_page.status_code == 200
+    assert ticket_no in archive_page.text
+    assert "batch archive reason" in archive_page.text
+    query_page = client.get("/query", params={"store_name": store_name, "keyword": "archive selected"})
+    assert query_page.status_code == 200
+    assert ticket_no in query_page.text
+    assert "已归档" in query_page.text
+
+    unarchive = admin_post(
+        client,
+        "/admin/tickets/bulk-unarchive",
+        data={"ticket_ids": ["1"], "select_scope": "selected"},
+        follow_redirects=False,
+    )
+
+    assert unarchive.status_code == 303
+    assert unarchive.headers["location"] == "/admin/archive?unarchived_count=1"
+    assert rows_for(tmp_path, "tickets")[0]["archived_at"] is None
+    assert ticket_no in client.get("/admin").text
+    assert ticket_no not in client.get("/admin/archive").text
+    assert "取消归档" in [row["action"] for row in ticket_action_logs(tmp_path, 1)]
+
+
+def test_bulk_ticket_operations_require_csrf(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch)
+    submit_ticket(client, description="bulk csrf ticket")
+    logged_in_client(client)
+
+    missing_csrf = client.post(
+        "/admin/tickets/bulk-archive",
+        data={"ticket_ids": ["1"], "select_scope": "selected"},
+        follow_redirects=False,
+    )
+
+    assert missing_csrf.status_code == 403
+
+
+def test_bulk_archive_filtered_scope_and_archive_export(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch)
+    submit_ticket(client, description="filtered archive one")
+    submit_ticket(client, description="filtered archive two")
+    submit_ticket(client, description="regular active ticket")
+    logged_in_client(client)
+
+    archive = admin_post(
+        client,
+        "/admin/tickets/bulk-archive",
+        data={
+            "select_scope": "filtered",
+            "keyword": "filtered archive",
+            "archive_reason": "filtered archive reason",
+        },
+        follow_redirects=False,
+    )
+
+    assert archive.status_code == 303
+    assert archive.headers["location"] == "/admin?archived_count=2"
+    tickets = rows_for(tmp_path, "tickets")
+    assert tickets[0]["archived_at"]
+    assert tickets[1]["archived_at"]
+    assert tickets[2]["archived_at"] is None
+    archived_ticket_nos = {tickets[0]["ticket_no"], tickets[1]["ticket_no"]}
+
+    active_export = load_workbook(BytesIO(client.get("/admin/export?keyword=filtered+archive").content))
+    assert active_export.active.max_row == 1
+    archive_page = client.get("/admin/archive?keyword=filtered+archive")
+    assert archived_ticket_nos.issubset(set(re.findall(r"REQ-\d{8}-\d{4}", archive_page.text)))
+    archived_export = load_workbook(BytesIO(client.get("/admin/archive/export?keyword=filtered+archive").content))
+    values = {cell.value for cell in archived_export.active["K"]}
+    assert "filtered archive one" in values
+    assert "filtered archive two" in values
+
+
+def test_bulk_delete_restore_and_hard_delete_preserve_archive_state(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch)
+    submit_ticket_with_image_and_file(
+        client,
+        image_filename="bulk-delete.png",
+        file_filename="bulk-delete.xlsx",
+        description="bulk delete active ticket",
+    )
+    submit_ticket(client, description="bulk delete archived ticket")
+    active_ticket_no = rows_for(tmp_path, "tickets")[0]["ticket_no"]
+    archived_ticket_no = rows_for(tmp_path, "tickets")[1]["ticket_no"]
+    image_path = tmp_path / rows_for(tmp_path, "ticket_images")[0]["image_path"]
+    file_path = tmp_path / rows_for(tmp_path, "ticket_files")[0]["file_path"]
+    logged_in_client(client)
+
+    admin_post(
+        client,
+        "/admin/tickets/bulk-archive",
+        data={"ticket_ids": ["2"], "select_scope": "selected", "archive_reason": "archive before trash"},
+        follow_redirects=False,
+    )
+    delete = admin_post(
+        client,
+        "/admin/tickets/bulk-delete",
+        data={"ticket_ids": ["1", "2"], "select_scope": "selected", "delete_reason": "bulk trash reason"},
+        follow_redirects=False,
+    )
+
+    assert delete.status_code == 303
+    assert delete.headers["location"] == "/admin?deleted_count=2"
+    tickets = rows_for(tmp_path, "tickets")
+    assert tickets[0]["deleted_at"]
+    assert tickets[1]["deleted_at"]
+    assert tickets[1]["archived_at"]
+    assert active_ticket_no not in client.get("/admin").text
+    assert archived_ticket_no not in client.get("/admin/archive").text
+    trash = client.get("/admin/trash")
+    assert trash.status_code == 200
+    assert active_ticket_no in trash.text
+    assert archived_ticket_no in trash.text
+    assert 'name="ticket_ids"' in trash.text
+    assert 'action="/admin/tickets/bulk-restore"' in trash.text
+    assert 'action="/admin/tickets/bulk-hard-delete"' in trash.text
+    assert "建议先执行 backup.sh" in trash.text
+    assert "移入回收站" in [row["action"] for row in ticket_action_logs(tmp_path, 1)]
+
+    restore = admin_post(
+        client,
+        "/admin/tickets/bulk-restore",
+        data={"ticket_ids": ["1", "2"], "select_scope": "selected"},
+        follow_redirects=False,
+    )
+
+    assert restore.status_code == 303
+    restored_tickets = rows_for(tmp_path, "tickets")
+    assert restored_tickets[0]["deleted_at"] is None
+    assert restored_tickets[0]["archived_at"] is None
+    assert restored_tickets[1]["deleted_at"] is None
+    assert restored_tickets[1]["archived_at"]
+    assert active_ticket_no in client.get("/admin").text
+    assert archived_ticket_no in client.get("/admin/archive").text
+    assert "恢复工单" in [row["action"] for row in ticket_action_logs(tmp_path, 1)]
+
+    admin_post(
+        client,
+        "/admin/tickets/bulk-delete",
+        data={"ticket_ids": ["1"], "select_scope": "selected", "delete_reason": "hard delete setup"},
+        follow_redirects=False,
+    )
+    hard_delete = admin_post(
+        client,
+        "/admin/tickets/bulk-hard-delete",
+        data={"ticket_ids": ["1"], "confirm_delete": "1"},
+        follow_redirects=False,
+    )
+
+    assert hard_delete.status_code == 303
+    assert [row["id"] for row in rows_for(tmp_path, "tickets")] == [2]
+    assert rows_for(tmp_path, "ticket_images") == []
+    assert rows_for(tmp_path, "ticket_files") == []
+    assert not image_path.exists()
+    assert not file_path.exists()
+
+
 def test_admin_can_soft_delete_collaboration_items_and_supplements(tmp_path, monkeypatch):
     client, _ = build_client(tmp_path, monkeypatch)
     submit_ticket(client)
@@ -1653,6 +2047,7 @@ def test_legacy_database_is_migrated_without_losing_existing_rows(tmp_path, monk
     assert "ticket_tasks" in tables
     assert "embedded_pages" in tables
     assert {"storage_type", "entry_file", "file_size"}.issubset(embedded_columns)
+    assert {"archived_at", "archived_by", "archive_reason"}.issubset(ticket_columns)
     for table in soft_delete_tables:
         assert {"deleted_at", "deleted_by", "delete_reason"}.issubset(migrated_columns[table])
     assert ticket_count == 1
