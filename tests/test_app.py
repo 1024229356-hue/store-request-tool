@@ -1694,6 +1694,68 @@ def test_admin_core_pages_return_200_after_login(tmp_path, monkeypatch):
         assert '{"detail":"Not Found"}' not in response.text
 
 
+def test_version_endpoint_reports_runtime_route_health(tmp_path, monkeypatch):
+    client, main = build_client(tmp_path, monkeypatch)
+    required_paths = [
+        "/admin/my-work",
+        "/admin/archive",
+        "/admin/trash",
+        "/admin/employees",
+        "/admin/shift-types",
+        "/admin/schedules",
+        "/admin/tickets/bulk-archive",
+        "/admin/tickets/bulk-delete",
+    ]
+
+    response = client.get("/__version")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["app"] == "store-request-tool"
+    assert Path(payload["main_file"]).resolve() == (PROJECT_DIR / "main.py").resolve()
+    assert payload["route_count"] == len(main.app.routes)
+    assert payload["required_missing_routes"] == []
+    assert set(required_paths).issubset({route.path for route in main.app.routes if hasattr(route, "path")})
+    assert payload["git_commit"]
+    assert "started_at" in payload
+    assert ".env" not in json.dumps(payload, ensure_ascii=False)
+
+
+def test_admin_not_found_uses_diagnostic_html(tmp_path, monkeypatch):
+    client, main = build_client(tmp_path, monkeypatch)
+    unauthenticated = TestClient(main.app).get("/admin/old-missing-link", follow_redirects=False)
+    assert unauthenticated.status_code == 303
+    assert unauthenticated.headers["location"].startswith("/admin/login")
+
+    logged_in_client(client)
+    response = client.get("/admin/old-missing-link")
+
+    assert response.status_code == 404
+    assert "text/html" in response.headers["content-type"]
+    assert "data-admin-not-found" in response.text
+    assert "/admin/old-missing-link" in response.text
+    assert "GET" in response.text
+    assert "你可能访问了旧链接" in response.text
+    assert "/admin/dashboard" in response.text
+    assert "/admin/route-health" in response.text
+    assert '{"detail":"Not Found"}' not in response.text
+
+
+def test_run_bat_prints_startup_route_diagnostics():
+    content = (PROJECT_DIR / "run.bat").read_text(encoding="utf-8")
+
+    assert "PYTHONUTF8=1" in content
+    assert "PYTHONIOENCODING=utf-8" in content
+    assert "CURRENT_DIR=" in content
+    assert "GIT_COMMIT=" in content
+    assert "PYTHON_EXE=" in content
+    assert "MAIN_FILE=" in content
+    assert "ROUTE_COUNT=" in content
+    assert "MISSING_ROUTES=" in content
+    assert "Critical routes missing. Do not continue startup." in content
+    assert "python -m uvicorn main:app --host 127.0.0.1 --port 8701" in content
+
+
 def test_modal_open_and_close_controls_do_not_submit_or_navigate():
     for template_name in ("employees.html", "schedules.html", "shift_types.html"):
         text = (PROJECT_DIR / "templates" / template_name).read_text(encoding="utf-8")

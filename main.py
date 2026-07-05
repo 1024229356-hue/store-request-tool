@@ -9,6 +9,7 @@ import os
 import secrets
 import shutil
 import sqlite3
+import subprocess
 import uuid
 import zipfile
 from collections import Counter
@@ -21,7 +22,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import quote, urlencode, urlsplit
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile, status as http_status
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from openpyxl import Workbook
@@ -62,10 +63,21 @@ LEGACY_ADMIN_REDIRECTS = {
     "/admin/recycle": "/admin/trash",
     "/admin/trashes": "/admin/trash",
 }
+REQUIRED_RUNTIME_ROUTES = [
+    "/admin/my-work",
+    "/admin/archive",
+    "/admin/trash",
+    "/admin/employees",
+    "/admin/shift-types",
+    "/admin/schedules",
+    "/admin/tickets/bulk-archive",
+    "/admin/tickets/bulk-delete",
+]
 BULK_SELECTION_REQUIRED_MESSAGE = "请选择要操作的工单"
 ROUTE_HEALTH_ATTRIBUTE_RE = re.compile(r'\b(href|action|formaction)\s*=\s*(["\'])(.*?)\2', re.IGNORECASE | re.DOTALL)
 ROUTE_HEALTH_FORM_METHOD_RE = re.compile(r'\bmethod\s*=\s*(["\']?)(get|post)\1', re.IGNORECASE)
 ROUTE_HEALTH_JINJA_EXPRESSION_RE = re.compile(r"{{.*?}}", re.DOTALL)
+APP_STARTED_AT = datetime.now().isoformat(timespec="seconds")
 DEFAULT_SYSTEM = {
     "app_name": "门店需求工单系统",
     "port": 8701,
@@ -563,6 +575,35 @@ def scan_template_admin_routes(app: FastAPI) -> List[Dict[str, object]]:
                 }
             )
     return results
+
+
+def required_missing_routes(app: FastAPI) -> List[str]:
+    paths = {getattr(route, "path", "") for route in app.routes}
+    return [path for path in REQUIRED_RUNTIME_ROUTES if path not in paths]
+
+
+def current_git_commit() -> str:
+    git_candidates = [
+        "git",
+        r"C:\Program Files\Git\cmd\git.exe",
+        r"C:\Program Files\Git\bin\git.exe",
+    ]
+    for git_exe in git_candidates:
+        try:
+            result = subprocess.run(
+                [git_exe, "rev-parse", "--short", "HEAD"],
+                cwd=BASE_DIR,
+                capture_output=True,
+                text=True,
+                timeout=3,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        commit = result.stdout.strip()
+        if result.returncode == 0 and commit:
+            return commit
+    return "unknown"
 
 
 def get_db_path() -> Path:
@@ -4733,6 +4774,43 @@ def create_app() -> FastAPI:
     templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
     templates.env.globals["embedded_nav_pages"] = fetch_enabled_embedded_pages
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+    @app.get("/__version")
+    def version_info() -> Dict[str, object]:
+        return {
+            "app": "store-request-tool",
+            "main_file": str(BASE_DIR / "main.py"),
+            "route_count": len(app.routes),
+            "git_commit": current_git_commit(),
+            "required_missing_routes": required_missing_routes(app),
+            "started_at": APP_STARTED_AT,
+        }
+
+    @app.exception_handler(404)
+    def admin_not_found_handler(request: Request, exc: HTTPException):
+        if not request.url.path.startswith("/admin"):
+            return JSONResponse({"detail": getattr(exc, "detail", "Not Found")}, status_code=404)
+        admin = current_admin_username(request)
+        if not admin:
+            return RedirectResponse(url=login_redirect_location(request), status_code=303)
+        admin_routes = [
+            {"method": method, "path": path}
+            for method, path in registered_route_pairs(app)
+            if path.startswith("/admin")
+        ]
+        return templates.TemplateResponse(
+            request,
+            "not_found.html",
+            {
+                "request": request,
+                "admin_user": admin,
+                "csrf_token": current_csrf_token(request),
+                "request_path": request.url.path,
+                "request_method": request.method,
+                "admin_routes": admin_routes,
+            },
+            status_code=404,
+        )
 
     def make_legacy_admin_redirect(target_path: str):
         def legacy_admin_redirect(_admin: str = Depends(require_admin)) -> RedirectResponse:
