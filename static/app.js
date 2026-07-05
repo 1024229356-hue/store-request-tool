@@ -45,6 +45,8 @@ function initializeStoreRequestApp() {
   const drawerCloseButtons = Array.from(document.querySelectorAll("[data-drawer-close]"));
   const drawerOverlays = Array.from(document.querySelectorAll("[data-drawer]"));
   const feedbackForms = Array.from(document.querySelectorAll("[data-feedback-form]"));
+  const preserveScrollForms = Array.from(document.querySelectorAll("form[data-preserve-scroll]"));
+  const cleanEmptyQueryForms = Array.from(document.querySelectorAll("form[data-clean-empty-query]"));
   const filterToggleButtons = Array.from(document.querySelectorAll("[data-filter-toggle]"));
   const restShiftButton = document.querySelector("[data-select-rest-shift]");
   const copyYesterdayButton = document.querySelector("[data-copy-yesterday-ui]");
@@ -207,6 +209,64 @@ function initializeStoreRequestApp() {
     toast.textContent = message;
     toastArea.appendChild(toast);
     window.setTimeout(() => toast.remove(), 1800);
+  }
+
+  function shouldPreserveAdminScroll() {
+    const path = window.location.pathname;
+    return [
+      "/admin",
+      "/admin/schedules",
+      "/admin/employees",
+      "/admin/shift-types",
+      "/admin/archive",
+      "/admin/trash",
+    ].includes(path);
+  }
+
+  function adminScrollStorageKey() {
+    return `storeRequestScroll:${window.location.pathname}`;
+  }
+
+  function saveAdminScrollPosition() {
+    if (!shouldPreserveAdminScroll()) {
+      return;
+    }
+    try {
+      window.sessionStorage.setItem(adminScrollStorageKey(), String(window.scrollY || 0));
+    } catch (_error) {
+      // Session storage can be disabled. Forms still submit normally.
+    }
+  }
+
+  function restoreAdminScrollPosition() {
+    if (!shouldPreserveAdminScroll()) {
+      return;
+    }
+    if (window.location.hash) {
+      const target = document.getElementById(window.location.hash.slice(1));
+      if (target) {
+        window.setTimeout(() => target.scrollIntoView({ block: "start" }), 0);
+      }
+      try {
+        window.sessionStorage.removeItem(adminScrollStorageKey());
+      } catch (_error) {
+        // Ignore storage cleanup failures.
+      }
+      return;
+    }
+    let savedY = "";
+    try {
+      savedY = window.sessionStorage.getItem(adminScrollStorageKey()) || "";
+      window.sessionStorage.removeItem(adminScrollStorageKey());
+    } catch (_error) {
+      savedY = "";
+    }
+    if (savedY) {
+      const y = Number(savedY);
+      if (!Number.isNaN(y)) {
+        window.setTimeout(() => window.scrollTo(0, y), 0);
+      }
+    }
   }
 
   function setModalError(form, message) {
@@ -997,6 +1057,22 @@ function initializeStoreRequestApp() {
       submitter.disabled = true;
     });
   });
+
+  preserveScrollForms.forEach((form) => {
+    form.addEventListener("submit", saveAdminScrollPosition);
+  });
+
+  cleanEmptyQueryForms.forEach((form) => {
+    form.addEventListener("submit", () => {
+      Array.from(form.querySelectorAll('input[name="shift_type_id"], select[name="shift_type_id"]')).forEach((field) => {
+        if (!field.value) {
+          field.disabled = true;
+        }
+      });
+    });
+  });
+
+  restoreAdminScrollPosition();
 
   document.querySelectorAll(".alert-success, .alert-error").forEach((alert) => {
     const message = alert.textContent ? alert.textContent.trim() : "";

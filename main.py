@@ -749,6 +749,41 @@ def normalize_employee_record_scope(value: str) -> str:
     return clean_value if clean_value in {"active", "archive", "trash"} else "active"
 
 
+def parse_optional_int(value: object) -> Optional[int]:
+    clean_value = str(value or "").strip()
+    if not clean_value:
+        return None
+    try:
+        return int(clean_value)
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_optional_positive_int(value: object) -> Optional[int]:
+    parsed = parse_optional_int(value)
+    return parsed if parsed and parsed > 0 else None
+
+
+def parse_optional_int_list(values: Optional[List[object]]) -> Tuple[List[int], bool]:
+    parsed_values: List[int] = []
+    has_invalid = False
+    for value in values or []:
+        clean_value = str(value or "").strip()
+        if not clean_value:
+            continue
+        parsed = parse_optional_positive_int(clean_value)
+        if parsed is None:
+            has_invalid = True
+            continue
+        if parsed not in parsed_values:
+            parsed_values.append(parsed)
+    return parsed_values, has_invalid
+
+
+def combine_error_messages(*messages: str) -> str:
+    return "；".join(message.strip() for message in messages if message and message.strip())
+
+
 def normalize_brand_names(
     raw_brands: Optional[List[str]],
     brand_extra: str = "",
@@ -3201,6 +3236,7 @@ def schedule_redirect_url(
     created_count: int = 0,
     updated_count: int = 0,
     skipped_count: int = 0,
+    anchor: str = "schedule-view",
 ) -> str:
     try:
         normalized_month = normalize_month(month)
@@ -3221,7 +3257,8 @@ def schedule_redirect_url(
         params["deleted"] = str(deleted)
     if error:
         params["error"] = error
-    return "/admin/schedules?" + urlencode({key: value for key, value in params.items() if value})
+    hash_fragment = f"#{anchor.strip()}" if anchor.strip() else ""
+    return "/admin/schedules?" + urlencode({key: value for key, value in params.items() if value}) + hash_fragment
 
 
 def schedule_filters(store_name: str, month: str, employee_status: str = "", shift_type_id: int = 0) -> Dict[str, str]:
@@ -3332,9 +3369,16 @@ def fetch_schedule_context(
     query_items.extend(("employee_ids", employee_id) for employee_id in selected_id_strings)
     if show_cross_store:
         query_items.append(("show_cross_store", "1"))
+    view_anchors = {
+        "calendar": "calendar-summary",
+        "employee": "employee-schedule-view",
+        "table": "schedule-table-view",
+        "store-summary": "store-summary-view",
+    }
     view_urls = {
         view_name: "/admin/schedules?"
         + urlencode([*query_items, ("view_mode", view_name)])
+        + f"#{view_anchors[view_name]}"
         for view_name in ("calendar", "employee", "table", "store-summary")
     }
     toggle_cross_store_url = "/admin/schedules?" + urlencode(
@@ -3343,7 +3387,7 @@ def fetch_schedule_context(
     global_view_url = "/admin/schedules?" + urlencode(
         [(key, value) for key, value in {**base_query, "store_name": "", "scope": "all"}.items() if value]
         + [("view_mode", "store-summary")]
-    )
+    ) + "#store-summary-view"
     calendar_summary = build_schedule_calendar_summary(days, rows)
     export_query = [("month", filters["month"])]
     if filters["store_name"]:
@@ -3476,7 +3520,7 @@ def existing_schedule_for(employee_id: int, schedule_date: str) -> Optional[Dict
     return dict(row) if row else None
 
 
-def normalize_schedule_employee_ids(employee_ids: Optional[List[int]], employee_id: int = 0) -> List[int]:
+def normalize_schedule_employee_ids(employee_ids: Optional[List[object]], employee_id: object = 0) -> List[int]:
     raw_ids = list(employee_ids or [])
     if not raw_ids and employee_id:
         raw_ids = [employee_id]
@@ -3525,6 +3569,8 @@ def bulk_upsert_schedules(
         raise ValueError("请选择至少 1 名员工和 1 个日期。")
     if total_count > max_bulk_count:
         raise ValueError(f"一次最多批量生成 {max_bulk_count} 条排班，请减少员工或日期数量。")
+    if shift_type_id <= 0:
+        raise ValueError("请选择班次。")
     shift_type = fetch_shift_type(shift_type_id)
     if not shift_type:
         raise ValueError("班次不存在。")
@@ -6906,8 +6952,8 @@ def create_app() -> FastAPI:
         view: str = Query(""),
         view_mode: str = Query(""),
         employee_scope: str = Query("all"),
-        employee_ids: Optional[List[int]] = Query(None),
-        shift_type_id: int = Query(0),
+        employee_ids: Optional[List[str]] = Query(None),
+        shift_type_id: str = Query(""),
         show_cross_store: str = Query(""),
         scope: str = Query("store"),
         saved: int = Query(0),
@@ -6918,6 +6964,13 @@ def create_app() -> FastAPI:
         deleted: int = Query(0),
         error: str = Query(""),
     ) -> HTMLResponse:
+        parsed_employee_ids, has_invalid_employee_ids = parse_optional_int_list(employee_ids)
+        parsed_shift_type_id = parse_optional_positive_int(shift_type_id)
+        parameter_error = ""
+        if str(shift_type_id or "").strip() and parsed_shift_type_id is None:
+            parameter_error = combine_error_messages(parameter_error, "班次筛选参数无效，已忽略。")
+        if has_invalid_employee_ids:
+            parameter_error = combine_error_messages(parameter_error, "员工筛选参数无效，已忽略。")
         return render_schedules_page(
             request,
             admin,
@@ -6928,15 +6981,15 @@ def create_app() -> FastAPI:
             show_cross_store in {"1", "true", "on", "yes"},
             scope,
             employee_scope,
-            employee_ids,
-            shift_type_id,
+            parsed_employee_ids,
+            parsed_shift_type_id or 0,
             saved,
             saved_count,
             created_count,
             updated_count,
             skipped_count,
             deleted,
-            error=error,
+            error=combine_error_messages(error, parameter_error),
         )
 
     @app.post("/admin/schedules")
@@ -6944,11 +6997,11 @@ def create_app() -> FastAPI:
         request: Request,
         admin: str = Depends(require_admin),
         store_name: str = Form(""),
-        employee_ids: Optional[List[int]] = Form(None),
+        employee_ids: Optional[List[str]] = Form(None),
         schedule_dates: Optional[List[str]] = Form(None),
-        employee_id: int = Form(0),
+        employee_id: str = Form(""),
         schedule_date: str = Form(""),
-        shift_type_id: int = Form(0),
+        shift_type_id: str = Form(""),
         note: str = Form(""),
         overwrite_existing: str = Form(""),
         csrf_token: str = Form(""),
@@ -6959,13 +7012,16 @@ def create_app() -> FastAPI:
             config = load_app_config()
             clean_employee_ids = normalize_schedule_employee_ids(employee_ids, employee_id)
             clean_dates = normalize_schedule_dates(schedule_dates, schedule_date)
+            clean_shift_type_id = parse_optional_positive_int(shift_type_id)
+            if clean_shift_type_id is None:
+                raise ValueError("请选择班次。")
             month_for_return = clean_dates[0][:7]
             is_legacy_single_submission = not employee_ids and not schedule_dates and bool(employee_id and schedule_date.strip())
             result = bulk_upsert_schedules(
                 store_name,
                 clean_employee_ids,
                 clean_dates,
-                shift_type_id,
+                clean_shift_type_id,
                 note,
                 is_legacy_single_submission or overwrite_existing in {"1", "true", "on", "yes"},
                 admin,
@@ -7010,14 +7066,17 @@ def create_app() -> FastAPI:
         request: Request,
         admin: str = Depends(require_admin),
         store_name: str = Form(""),
-        employee_id: int = Form(0),
+        employee_id: str = Form(""),
         month: str = Form(""),
         csrf_token: str = Form(""),
     ) -> RedirectResponse:
         require_admin_csrf(request, csrf_token)
         month_for_return = month.strip() or datetime.now().strftime("%Y-%m")
         try:
-            deleted_count = clear_employee_month_schedules(store_name, employee_id, month_for_return, admin)
+            clean_employee_id = parse_optional_positive_int(employee_id)
+            if clean_employee_id is None:
+                raise ValueError("员工不存在。")
+            deleted_count = clear_employee_month_schedules(store_name, clean_employee_id, month_for_return, admin)
         except (ValueError, HTTPException) as exc:
             return RedirectResponse(url=schedule_redirect_url(store_name, month_for_return, error=form_error_message(exc)), status_code=303)
         return RedirectResponse(
@@ -8087,11 +8146,11 @@ def create_app() -> FastAPI:
         _admin: str = Depends(require_admin),
         store_name: str = Query(""),
         month: str = Query(""),
-        shift_type_id: int = Query(0),
+        shift_type_id: str = Query(""),
     ) -> StreamingResponse:
         selected_month = normalize_month(month)
         selected_store = store_name.strip()
-        rows = fetch_schedule_rows(selected_store, selected_month, shift_type_id=shift_type_id)
+        rows = fetch_schedule_rows(selected_store, selected_month, shift_type_id=parse_optional_positive_int(shift_type_id) or 0)
         output = build_schedule_excel(rows)
         filename_store = selected_store or "全部门店"
         filename = f"门店排班_{filename_store}_{selected_month.replace('-', '')}.xlsx"

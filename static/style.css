@@ -636,6 +636,12 @@ a:focus-visible {
   border: 1px solid #a9ddbd;
 }
 
+.alert-info {
+  background: var(--primary-soft);
+  color: var(--primary-dark);
+  border: 1px solid #bfd3e8;
+}
+
 .modal-overlay {
   position: fixed;
   inset: 0;
@@ -2242,6 +2248,44 @@ a:focus-visible {
   align-items: end;
 }
 
+.schedule-workspace-card {
+  border-radius: 12px;
+  background: var(--panel);
+}
+
+.schedule-filter-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(180px, 1fr));
+  gap: 16px;
+  align-items: end;
+  border-top: 1px solid var(--line);
+  padding: 14px 16px 16px;
+}
+
+.schedule-filter-grid > label,
+.schedule-filter-employees {
+  min-width: 0;
+}
+
+.schedule-filter-grid input,
+.schedule-filter-grid select {
+  min-height: 38px;
+  padding: 7px 9px;
+  font-size: 13px;
+}
+
+.schedule-filter-actions {
+  display: flex;
+  align-items: end;
+  gap: 10px;
+}
+
+.schedule-filter-actions .primary-button,
+.schedule-filter-actions .ghost-button {
+  min-height: 38px;
+  min-width: 92px;
+}
+
 .schedule-form {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -2386,17 +2430,17 @@ a:focus-visible {
 
 .schedule-table {
   width: 100%;
-  min-width: 1180px;
+  min-width: 980px;
   border-collapse: collapse;
   background: #fff;
-  font-size: 13px;
+  font-size: 12px;
 }
 
 .schedule-table th,
 .schedule-table td {
   border-bottom: 1px solid var(--line);
   border-right: 1px solid var(--line);
-  padding: 8px;
+  padding: 6px;
   text-align: center;
   vertical-align: top;
 }
@@ -2430,7 +2474,23 @@ a:focus-visible {
 }
 
 .schedule-cell {
-  min-width: 86px;
+  min-width: 64px;
+}
+
+.schedule-table-scroll {
+  max-width: 100%;
+  overflow: auto;
+}
+
+.sticky-employee-col {
+  position: sticky;
+  left: 0;
+}
+
+.sticky-date-header {
+  position: sticky;
+  top: 0;
+  z-index: 2;
 }
 
 .schedule-weekend {
@@ -2484,6 +2544,7 @@ a:focus-visible {
 
 .schedule-action-layer {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   align-items: center;
   gap: 16px;
@@ -2492,6 +2553,15 @@ a:focus-visible {
 
 .schedule-action-layer h2 {
   font-size: 22px;
+}
+
+.schedule-hero-card {
+  align-items: flex-start;
+}
+
+.schedule-bulk-card,
+.schedule-view-card {
+  padding: 16px;
 }
 
 .schedule-action-buttons,
@@ -2612,6 +2682,23 @@ a:focus-visible {
 .schedule-calendar-summary .schedule-calendar-day {
   min-width: 0;
   min-height: 154px;
+}
+
+.schedule-day-card {
+  transition: border-color 0.16s ease, box-shadow 0.16s ease, transform 0.16s ease;
+}
+
+.schedule-day-card:hover {
+  border-color: #c8d5e3;
+  box-shadow: 0 8px 20px rgba(25, 42, 62, 0.08);
+}
+
+.schedule-day-card.weekend {
+  background: #fff8e6;
+}
+
+.schedule-day-card.today {
+  border-color: var(--primary);
 }
 
 .schedule-calendar-day.is-empty {
@@ -2999,6 +3086,10 @@ a:focus-visible {
 }
 
 @media (max-width: 1100px) {
+  .schedule-filter-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .schedule-calendar-summary,
   .store-summary-calendar {
     grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -3006,6 +3097,15 @@ a:focus-visible {
 }
 
 @media (max-width: 680px) {
+  .schedule-filter-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .schedule-filter-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
   .schedule-calendar-summary,
   .store-summary-calendar {
     grid-template-columns: 1fr;

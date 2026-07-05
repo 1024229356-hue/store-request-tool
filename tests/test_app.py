@@ -2601,7 +2601,7 @@ def test_schedule_workbench_supports_view_mode_employee_filter_and_store_summary
     assert 'data-schedule-view="employee"' in employee_page.text
     assert 'name="employee_ids"' in employee_page.text
     assert "南昌支援南京" in employee_page.text
-    assert employee_page.text.count('class="schedule-employee-card') == 1
+    assert employee_page.text.count('<article class="schedule-employee-card') == 1
     assert "休息天数" in employee_page.text
 
     store_summary_page = client.get("/admin/schedules?store_name=&month=2026-07&view_mode=store-summary")
@@ -2629,6 +2629,98 @@ def test_schedule_workbench_supports_view_mode_employee_filter_and_store_summary
     row_prefixes = {row[:9] for row in rows}
     assert ("南京门东店", "2026-07-06", "周一", "南京主店", "店员", "早班", "09:30", "17:30", 8) in row_prefixes
     assert ("山城巷店", "2026-07-06", "周一", "山城员工", "店员", "晚班", "14:00", "22:00", 8) in row_prefixes
+
+
+def test_schedule_filters_ignore_empty_numeric_query_values_without_json(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch)
+    logged_in_client(client)
+    create_schedule_employee(client, "FilterSafeEmp")
+
+    empty_shift = client.get(
+        "/admin/schedules?store_name=南京门东店&month=2026-07&view_mode=calendar&shift_type_id="
+    )
+    assert empty_shift.status_code == 200
+    assert "text/html" in empty_shift.headers["content-type"]
+    assert '{"detail":' not in empty_shift.text
+    assert 'data-schedule-view="calendar"' in empty_shift.text
+
+    invalid_shift = client.get(
+        "/admin/schedules?store_name=南京门东店&month=2026-07&view_mode=calendar&shift_type_id=abc"
+    )
+    assert invalid_shift.status_code == 200
+    assert "text/html" in invalid_shift.headers["content-type"]
+    assert "班次筛选参数无效" in invalid_shift.text
+    assert "alert-error" in invalid_shift.text
+    assert '{"detail":' not in invalid_shift.text
+
+    invalid_employee = client.get(
+        "/admin/schedules?store_name=南京门东店&month=2026-07&view_mode=employee&employee_ids=abc"
+    )
+    assert invalid_employee.status_code == 200
+    assert "员工筛选参数无效" in invalid_employee.text
+    assert '{"detail":' not in invalid_employee.text
+
+    empty_shift_post = admin_post(
+        client,
+        "/admin/schedules",
+        data={
+            "store_name": "南京门东店",
+            "employee_ids": ["1"],
+            "schedule_dates": ["2026-07-06"],
+            "shift_type_id": "",
+        },
+        follow_redirects=False,
+    )
+    assert empty_shift_post.status_code == 303
+    empty_shift_post_page = client.get(empty_shift_post.headers["location"])
+    assert "请选择班次" in empty_shift_post_page.text
+    assert '{"detail":' not in empty_shift_post_page.text
+
+
+def test_schedule_layout_hash_and_preserve_scroll_contract(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch)
+    logged_in_client(client)
+    create_schedule_employee(client, "LayoutEmp")
+
+    page = client.get("/admin/schedules?store_name=南京门东店&month=2026-07&view_mode=calendar")
+
+    assert page.status_code == 200
+    for expected in (
+        "schedule-hero-card",
+        "schedule-filter-card",
+        "schedule-bulk-card",
+        "schedule-view-card",
+        'id="schedule-filters"',
+        'id="bulk-schedule"',
+        'id="schedule-view"',
+        'id="calendar-summary"',
+        "schedule-filter-grid",
+        "schedule-filter-actions",
+        "data-preserve-scroll",
+    ):
+        assert expected in page.text
+
+    filter_form_start = page.text.index('<form class="schedule-filter-grid')
+    filter_form_end = page.text.index("</form>", filter_form_start)
+    filter_form = page.text[filter_form_start:filter_form_end]
+    assert 'method="get"' in filter_form
+    assert 'type="submit">查看排班' in filter_form
+    assert 'href="/admin/schedules#schedule-view"' in filter_form
+
+    assert "view_mode=calendar#calendar-summary" in page.text
+    assert "view_mode=employee#employee-schedule-view" in page.text
+    assert "view_mode=table#schedule-table-view" in page.text
+    assert "view_mode=store-summary#store-summary-view" in page.text
+
+    table_page = client.get("/admin/schedules?store_name=南京门东店&month=2026-07&view_mode=table")
+    assert table_page.status_code == 200
+    assert "精细查看可横向滚动，推荐日常使用日历视图或员工视图。" in table_page.text
+    assert "schedule-table-scroll" in table_page.text
+
+    app_js = (PROJECT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+    assert "data-preserve-scroll" in app_js
+    assert "sessionStorage" in app_js
+    assert "window.location.hash" in app_js
 
 
 def test_bulk_schedule_creates_updates_and_skips_existing_rows(tmp_path, monkeypatch):

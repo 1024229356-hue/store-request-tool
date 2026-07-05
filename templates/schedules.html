@@ -19,18 +19,22 @@
 {% if error %}<div class="alert alert-error">{{ error }}</div>{% endif %}
 
 <section class="schedule-workbench" data-schedule-view="{{ context.view }}">
-  <div class="schedule-action-layer ops-card">
+  <div class="schedule-hero-card schedule-action-layer schedule-workspace-card ops-card">
     <div>
       <p class="eyebrow">运营排班工作台</p>
       <h2>{{ context.filters.month }} · {{ context.filters.store_name or '全部门店' }}</h2>
       <p class="subtle">排班操作只面向具体门店；查看区支持单店和全店经营视图。</p>
     </div>
     <div class="schedule-action-buttons">
+      <a class="quick-action-button compact" href="{{ context.export_url }}">导出排班 Excel</a>
       <a class="ghost-button compact" href="{{ context.global_view_url }}">全部门店汇总</a>
-      <button class="ghost-button compact" type="button" data-filter-toggle="schedule-filter-panel">筛选</button>
+      <button class="ghost-button compact" type="button" data-filter-toggle="schedule-filters">筛选</button>
+      <a class="ghost-button compact" href="/admin/employees">员工管理</a>
+      <a class="ghost-button compact" href="/admin/shift-types">班次设置</a>
+      <a class="ghost-button compact" href="/schedule">门店查看</a>
     </div>
     {% if context.form_store %}
-    <form class="schedule-copy-form" method="post" action="/admin/schedules/copy-day" data-feedback-form data-loading-label="复制中..." onsubmit="return confirm('确认按前一天排班复制到目标日期吗？');">
+    <form class="schedule-copy-form" method="post" action="/admin/schedules/copy-day" data-feedback-form data-preserve-scroll data-loading-label="复制中..." onsubmit="return confirm('确认按前一天排班复制到目标日期吗？');">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <input type="hidden" name="store_name" value="{{ context.form_store }}">
       <label><span>复制昨日到</span><input name="target_date" type="date" value="{{ context.filters.month }}-01" required></label>
@@ -47,12 +51,12 @@
     <article class="ops-card metric-card"><span>休息班次数</span><strong>{{ context.stats.rest_shift_count }}</strong></article>
   </div>
 
-  <details class="schedule-filter-layer ops-card" id="schedule-filter-panel" open>
+  <details class="schedule-filter-card schedule-filter-layer schedule-workspace-card ops-card" id="schedule-filters" open>
     <summary>
       <span>筛选条件</span>
-      <small>门店、月份、员工状态和视图模式</small>
+      <small>按门店、月份、员工状态和视图模式查看排班。</small>
     </summary>
-    <form class="filter-bar schedule-filter" method="get" action="/admin/schedules" data-feedback-form data-loading-label="筛选中...">
+    <form class="schedule-filter-grid schedule-filter" method="get" action="/admin/schedules#schedule-view" data-feedback-form data-preserve-scroll data-clean-empty-query data-loading-label="筛选中...">
       <label>
         <span>门店</span>
         <select name="store_name">
@@ -98,6 +102,7 @@
           {% endfor %}
         </select>
       </label>
+      {% if context.view == 'employee' %}
       <div class="schedule-filter-employees full-span">
         <span>员工筛选</span>
         <div class="schedule-filter-chip-grid">
@@ -111,13 +116,15 @@
           {% endfor %}
         </div>
       </div>
-      <div class="filter-actions">
+      {% endif %}
+      <div class="schedule-filter-actions">
         <button class="primary-button compact" type="submit">查看排班</button>
+        <a class="ghost-button compact" href="/admin/schedules#schedule-view">重置</a>
       </div>
     </form>
   </details>
 
-  <details class="admin-section ops-card schedule-operation-panel">
+  <details class="schedule-bulk-card schedule-workspace-card admin-section ops-card schedule-operation-panel" id="bulk-schedule">
     <summary class="section-heading admin-section-heading">
       <span>
         <h2>批量排班</h2>
@@ -127,7 +134,7 @@
     {% if not context.form_store %}
     <div class="alert alert-error">请选择具体门店后进行排班操作。</div>
     {% else %}
-    <form class="schedule-form schedule-bulk-form" method="post" action="/admin/schedules" data-schedule-bulk-form data-feedback-form data-loading-label="保存中..." data-max-bulk-schedule-count="{{ context.max_bulk_schedule_count }}">
+    <form class="schedule-form schedule-bulk-form" method="post" action="/admin/schedules" data-schedule-bulk-form data-feedback-form data-preserve-scroll data-loading-label="保存中..." data-max-bulk-schedule-count="{{ context.max_bulk_schedule_count }}">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <input type="hidden" name="store_name" value="{{ context.form_store }}">
       <label>
@@ -158,7 +165,7 @@
             </span>
           </label>
           {% else %}
-          <p class="empty-note">当前范围暂无在职员工。</p>
+          <p class="empty-note">当前门店暂无可排员工，请先到员工管理绑定员工。</p>
           {% endfor %}
         </div>
       </div>
@@ -206,12 +213,12 @@
     {% endif %}
   </details>
 
-  <section class="schedule-data-layer ops-card">
+  <section class="schedule-view-card schedule-workspace-card schedule-data-layer ops-card" id="schedule-view">
     <div class="section-heading admin-section-heading">
       <h2>本月排班</h2>
       <p>在表格、日历和员工视图之间切换，数据范围随上方筛选变化。</p>
     </div>
-    <nav class="schedule-view-switch" aria-label="排班视图切换">
+    <nav class="schedule-view-tabs schedule-view-switch" aria-label="排班视图切换">
       <a class="ghost-button compact {% if context.view == 'table' %}active{% endif %}" href="{{ context.view_urls.table }}">表格视图</a>
       <a class="ghost-button compact {% if context.view == 'calendar' %}active{% endif %}" href="{{ context.view_urls.calendar }}">日历视图</a>
       <a class="ghost-button compact {% if context.view == 'employee' %}active{% endif %}" href="{{ context.view_urls.employee }}">员工视图</a>
@@ -219,7 +226,7 @@
     </nav>
 
     {% if context.view == 'calendar' %}
-    <div class="schedule-calendar-grid schedule-calendar-summary">
+    <div class="schedule-calendar-grid schedule-calendar-summary" id="calendar-summary">
       <div class="schedule-calendar-week-head">周一</div>
       <div class="schedule-calendar-week-head">周二</div>
       <div class="schedule-calendar-week-head">周三</div>
@@ -229,10 +236,10 @@
       <div class="schedule-calendar-week-head weekend">周日</div>
       {% for item in context.calendar_summary %}
       {% set day = item.day %}
-      <article class="schedule-calendar-day {% if day.is_weekend %}schedule-weekend{% endif %} {% if day.is_today %}schedule-today{% endif %}">
+      <article class="schedule-day-card schedule-calendar-day {% if day.is_weekend %}weekend schedule-weekend{% endif %} {% if day.is_today %}today schedule-today{% endif %}">
         <header><strong>{{ day.day }}</strong><span>{{ day.weekday }}</span></header>
-        <div class="calendar-day-count">{{ item.schedule_count }} 人排班</div>
-        <div class="calendar-shift-counts">
+        <div class="schedule-day-count calendar-day-count">{{ item.schedule_count }} 人排班</div>
+        <div class="schedule-shift-summary calendar-shift-counts">
           {% for shift_name, count in item.shift_counts.items() %}
           <span>{{ shift_name }} {{ count }} 人</span>
           {% else %}
@@ -256,7 +263,7 @@
       {% endfor %}
     </div>
     {% elif context.view == 'employee' %}
-    <div class="schedule-employee-view">
+    <div class="schedule-employee-card-grid schedule-employee-view" id="employee-schedule-view">
       {% for summary in context.employee_summaries %}
       {% set employee = summary.employee %}
       <article class="schedule-employee-card {% if employee.is_cross_store_visible %}cross-store-readonly{% endif %}">
@@ -281,7 +288,7 @@
           </span>
           {% endfor %}
         </div>
-        <form method="post" action="/admin/schedules/clear-employee" data-feedback-form data-loading-label="清空中..." onsubmit="return confirm('确认清空该员工本月排班吗？');">
+        <form method="post" action="/admin/schedules/clear-employee" data-feedback-form data-preserve-scroll data-loading-label="清空中..." onsubmit="return confirm('确认清空该员工本月排班吗？');">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <input type="hidden" name="store_name" value="{{ context.filters.store_name }}">
           <input type="hidden" name="employee_id" value="{{ employee.id }}">
@@ -294,10 +301,10 @@
       {% endfor %}
     </div>
     {% elif context.view == 'store-summary' %}
-    <div class="store-summary-calendar">
+    <div class="store-summary-calendar" id="store-summary-view">
       {% for item in context.store_summary_calendar %}
       {% set day = item.day %}
-      <article class="store-summary-day {% if day.is_weekend %}schedule-weekend{% endif %} {% if day.is_today %}schedule-today{% endif %}">
+      <article class="schedule-day-card store-summary-day {% if day.is_weekend %}weekend schedule-weekend{% endif %} {% if day.is_today %}today schedule-today{% endif %}">
         <header><strong>{{ day.date }}</strong><span>{{ day.weekday }}</span></header>
         <div class="store-summary-counts">
           {% for store_name, count in item.store_counts.items() %}
@@ -315,25 +322,26 @@
       {% endfor %}
     </div>
     {% else %}
-    <div class="schedule-table-wrap">
+    <div class="alert alert-info">精细查看可横向滚动，推荐日常使用日历视图或员工视图。</div>
+    <div class="schedule-table-scroll schedule-table-wrap" id="schedule-table-view">
       <table class="schedule-table">
         <thead>
           <tr>
-            <th class="schedule-employee-col">员工</th>
+            <th class="sticky-employee-col schedule-employee-col">员工</th>
             {% for day in context.days %}
-            <th class="{% if day.is_weekend %}schedule-weekend{% endif %} {% if day.is_today %}schedule-today{% endif %}">
+            <th class="sticky-date-header {% if day.is_weekend %}schedule-weekend{% endif %} {% if day.is_today %}schedule-today{% endif %}">
               <span>{{ day.day }}</span>
               <small>{{ day.weekday }}</small>
             </th>
             {% endfor %}
-            <th class="hours-summary">本月工时</th>
+            <th class="sticky-date-header hours-summary">本月工时</th>
           </tr>
         </thead>
         <tbody>
           {% for employee in context.employees %}
           {% set employee_hours = namespace(total=0) %}
           <tr>
-            <th class="schedule-employee-col">
+            <th class="sticky-employee-col schedule-employee-col">
               <strong>{{ employee.employee_name }}</strong>
               <span>{{ employee.role or '' }} · {{ employee.status }}</span>
               <small class="store-tag-primary">主门店：{{ employee.primary_store or '-' }}</small>
@@ -349,7 +357,7 @@
               {% if schedule %}
               <span class="shift-badge" style="--shift-color: {{ schedule.color or '#64748b' }}">{{ schedule.shift_name }}</span>
               {% if schedule.note %}<small>{{ schedule.note }}</small>{% endif %}
-              <form method="post" action="/admin/schedules/{{ schedule.id }}/delete" onsubmit="return confirm('确认删除这条排班吗？');" data-feedback-form data-loading-label="删除中...">
+              <form method="post" action="/admin/schedules/{{ schedule.id }}/delete" onsubmit="return confirm('确认删除这条排班吗？');" data-feedback-form data-preserve-scroll data-loading-label="删除中...">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                 <button class="ghost-button compact" type="submit">删除</button>
               </form>
