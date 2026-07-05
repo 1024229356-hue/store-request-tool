@@ -2727,9 +2727,16 @@ a:focus-visible {
   overflow-x: auto;
 }
 
+.schedule-date-calendar,
 .schedule-calendar-summary {
+  display: grid;
   grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 8px;
   overflow-x: visible;
+}
+
+.schedule-date-calendar {
+  min-width: 100%;
 }
 
 .schedule-calendar-week-head {
@@ -2764,6 +2771,52 @@ a:focus-visible {
   min-height: 154px;
 }
 
+.schedule-date-card {
+  min-height: 82px;
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  gap: 3px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--text);
+  padding: 8px;
+  cursor: pointer;
+  transition: border-color 0.16s ease, box-shadow 0.16s ease, transform 0.16s ease;
+}
+
+.schedule-date-card input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.schedule-date-card span {
+  font-size: 18px;
+  font-weight: 900;
+}
+
+.schedule-date-card small,
+.schedule-date-card em {
+  color: var(--muted);
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 800;
+  text-align: center;
+}
+
+.schedule-date-card:hover {
+  border-color: #a8bfd6;
+  box-shadow: 0 6px 16px rgba(25, 42, 62, 0.08);
+}
+
+.schedule-date-card.selected {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+  box-shadow: inset 0 0 0 1px var(--primary);
+}
+
 .schedule-day-card {
   transition: border-color 0.16s ease, box-shadow 0.16s ease, transform 0.16s ease;
 }
@@ -2773,12 +2826,31 @@ a:focus-visible {
   box-shadow: 0 8px 20px rgba(25, 42, 62, 0.08);
 }
 
+.schedule-date-card.weekend,
 .schedule-day-card.weekend {
   background: #fff8e6;
 }
 
+.schedule-date-card.holiday,
+.schedule-day-card.holiday {
+  border-color: #c084fc;
+  background: #faf5ff;
+}
+
+.schedule-date-card.holiday span,
+.schedule-day-card.holiday .holiday-name {
+  color: #7e22ce;
+}
+
+.schedule-date-card.today,
 .schedule-day-card.today {
   border-color: var(--primary);
+  box-shadow: inset 0 0 0 1px var(--primary);
+}
+
+.schedule-date-card.outside-month,
+.schedule-calendar-day.outside-month {
+  opacity: 0.45;
 }
 
 .schedule-calendar-day.is-empty {
@@ -2805,6 +2877,28 @@ a:focus-visible {
   padding: 5px 7px;
   font-size: 12px;
   font-weight: 900;
+}
+
+.schedule-day-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px;
+}
+
+.schedule-day-summary span {
+  border-radius: 8px;
+  background: var(--primary-soft);
+  color: var(--primary-dark);
+  padding: 5px 7px;
+  font-size: 12px;
+  font-weight: 900;
+  text-align: center;
+}
+
+.schedule-time-line {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
 }
 
 .calendar-shift-counts,
@@ -3095,6 +3189,15 @@ a:focus-visible {
   font-weight: 900;
 }
 
+.employee-timeline .employee-schedule-store {
+  width: 100%;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.72);
+  color: inherit;
+  padding: 2px 4px;
+  text-align: center;
+}
+
 .employee-timeline .has-shift {
   background: var(--primary-soft);
   color: var(--primary-dark);
@@ -3198,6 +3301,38 @@ a:focus-visible {
   gap: 8px;
 }
 
+.schedule-mode-segment {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.schedule-mode-segment > span {
+  flex-basis: 100%;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.schedule-mode-segment label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #fff;
+  padding: 7px 10px;
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.schedule-mode-segment label:has(input:checked) {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+  color: var(--primary-dark);
+}
+
 .daily-count-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
@@ -3211,6 +3346,10 @@ a:focus-visible {
   padding: 9px;
 }
 
+.daily-overview-card.muted {
+  opacity: 0.58;
+}
+
 .daily-count-grid strong,
 .daily-count-grid span {
   display: block;
@@ -3220,6 +3359,14 @@ a:focus-visible {
   margin-top: 4px;
   color: var(--muted);
   font-size: 13px;
+}
+
+.daily-count-grid small {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
 }
 
 .schedule-operation-panel > summary {
@@ -3238,12 +3385,33 @@ a:focus-visible {
 
 .custom-schedule-fields {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 12px;
 }
 
 .custom-schedule-fields[hidden] {
   display: none;
+}
+
+.custom-schedule-panel {
+  border: 1px dashed #bfd0e0;
+  border-radius: 10px;
+  background: #f8fafc;
+  padding: 12px;
+}
+
+.custom-duration-row {
+  min-width: 0;
+}
+
+.employee-all-store-summary {
+  border: 1px solid #bfdbfe;
+  border-radius: 10px;
+  background: #eff6ff;
+  color: #1d4ed8;
+  padding: 10px 12px;
+  font-size: 13px;
+  font-weight: 900;
 }
 
 .compact-chip-grid {

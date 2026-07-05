@@ -82,6 +82,7 @@
       <small>已选 {{ context.selected_store_count }} 个门店 / 已选 {{ context.selected_employee_ids|length }} 名员工 / 已选 {{ context.filters.shift_type_ids|length + (1 if context.filters.include_custom_shift else 0) }} 个班次</small>
     </summary>
     <form class="schedule-filter-grid schedule-filter" method="get" action="/admin/schedules#schedule-view" data-feedback-form data-preserve-scroll data-clean-empty-query data-loading-label="筛选中...">
+      <input type="hidden" name="store_scope" value="{{ context.store_scope }}">
       <div class="schedule-filter-employees full-span">
         <span>门店筛选 · 已选 {{ context.selected_store_count }} 个门店</span>
         <div class="schedule-filter-chip-grid compact-chip-grid">
@@ -216,26 +217,34 @@
             <button class="ghost-button compact" type="button" data-select-all-schedule-dates>全选本月</button>
             <button class="ghost-button compact" type="button" data-select-weekdays>只选工作日</button>
             <button class="ghost-button compact" type="button" data-select-weekends>只选周末</button>
+            <button class="ghost-button compact" type="button" data-select-holidays>只选节假日</button>
             <button class="ghost-button compact" type="button" data-clear-schedule-dates>清空日期</button>
           </div>
         </div>
-        <div class="schedule-date-choice-grid">
-          {% for day in context.days %}
-          <label class="choice-chip schedule-date-chip {% if day.is_weekend %}weekend{% endif %} {% if day.is_today %}today{% endif %}" data-weekend="{{ '1' if day.is_weekend else '0' }}">
-            <input type="checkbox" name="schedule_dates" value="{{ day.date }}">
-            <span>{{ day.day }}<small>{{ day.weekday }}</small></span>
+        <div class="schedule-date-calendar">
+          <div class="schedule-calendar-week-head">周一</div>
+          <div class="schedule-calendar-week-head">周二</div>
+          <div class="schedule-calendar-week-head">周三</div>
+          <div class="schedule-calendar-week-head">周四</div>
+          <div class="schedule-calendar-week-head">周五</div>
+          <div class="schedule-calendar-week-head weekend">周六</div>
+          <div class="schedule-calendar-week-head weekend">周日</div>
+          {% for day in context.calendar_days %}
+          <label class="schedule-date-card {% if not day.is_current_month %}muted outside-month{% endif %} {% if day.is_weekend %}weekend{% endif %} {% if day.is_holiday %}holiday{% endif %} {% if day.is_today %}today{% endif %}" data-date="{{ day.date }}" data-weekday-label="{{ day.weekday_label }}" data-weekend="{{ '1' if day.is_weekend else '0' }}" data-holiday="{{ '1' if day.is_holiday else '0' }}" data-current-month="{{ '1' if day.is_current_month else '0' }}">
+            {% if day.is_current_month %}<input type="checkbox" name="schedule_dates" value="{{ day.date }}">{% endif %}
+            <span>{{ day.day }}</span>
+            <small>{{ day.weekday_label }}</small>
+            {% if day.holiday_name %}<em>{{ day.holiday_name }}</em>{% endif %}
           </label>
           {% endfor %}
         </div>
       </div>
 
-      <label>
+      <div class="schedule-mode-segment">
         <span>排班方式</span>
-        <select name="schedule_mode" data-custom-schedule-mode>
-          <option value="shift">选择已有班次</option>
-          <option value="custom">自定义时间</option>
-        </select>
-      </label>
+        <label><input type="radio" name="schedule_mode" value="shift" data-custom-schedule-mode checked><span>选择已有班次</span></label>
+        <label><input type="radio" name="schedule_mode" value="custom" data-custom-schedule-mode><span>自定义时间</span></label>
+      </div>
       <label>
         <span>班次</span>
         <select name="shift_type_id" data-shift-select>
@@ -244,11 +253,13 @@
           {% endfor %}
         </select>
       </label>
-      <div class="custom-schedule-fields full-span" data-custom-schedule-fields hidden>
+      <div class="custom-schedule-panel custom-schedule-fields full-span" data-custom-schedule-fields hidden>
         <label><span>自定义名称</span><input name="custom_label" placeholder="加班 / 盘点 / 临时支援"></label>
         <label><span>自定义开始</span><input name="custom_start_time" type="time"></label>
         <label><span>自定义结束</span><input name="custom_end_time" type="time"></label>
-        <label><span>自定义工时</span><input name="custom_duration_hours" type="number" min="0" step="0.25" placeholder="留空自动计算"></label>
+        <label><span>休息分钟</span><input name="custom_break_minutes" type="number" min="0" step="1" value="0"></label>
+        <label class="custom-duration-row"><span>自定义工时</span><input name="custom_duration_hours" type="number" min="0" step="0.25" placeholder="留空自动计算"></label>
+        <button class="ghost-button compact" type="button" data-recalculate-custom-duration>重新计算工时</button>
       </div>
       <label><span>备注</span><input name="note" placeholder="可填写交接、特殊安排"></label>
       <label class="checkbox-line schedule-overwrite-line">
@@ -278,7 +289,7 @@
     </nav>
 
     {% if context.view == 'calendar' %}
-    <div class="schedule-calendar-grid schedule-calendar-summary" id="calendar-summary">
+    <div class="schedule-calendar-grid schedule-calendar-summary schedule-calendar-view" id="schedule-calendar-view">
       <div class="schedule-calendar-week-head">周一</div>
       <div class="schedule-calendar-week-head">周二</div>
       <div class="schedule-calendar-week-head">周三</div>
@@ -288,9 +299,16 @@
       <div class="schedule-calendar-week-head weekend">周日</div>
       {% for item in context.calendar_summary %}
       {% set day = item.day %}
-      <article class="schedule-day-card schedule-calendar-day {% if day.is_weekend %}weekend schedule-weekend{% endif %} {% if day.is_today %}today schedule-today{% endif %}">
-        <header><strong>{{ day.day }}</strong><span>{{ day.weekday }}</span></header>
-        <div class="schedule-day-count calendar-day-count">{{ item.schedule_count }} 人排班</div>
+      <article class="schedule-day-card schedule-calendar-day {% if item.schedule_count %}has-schedule{% endif %} {% if not day.is_current_month %}is-empty outside-month{% endif %} {% if day.is_weekend %}weekend schedule-weekend{% endif %} {% if day.is_holiday %}holiday schedule-holiday{% endif %} {% if day.is_today %}today schedule-today{% endif %}" data-date="{{ day.date }}" data-weekday-label="{{ day.weekday_label }}">
+        <header>
+          <strong>{{ day.day }}</strong>
+          <span>{{ day.weekday_label }}</span>
+        </header>
+        {% if day.holiday_name %}<small class="holiday-name">{{ day.holiday_name }}</small>{% endif %}
+        <div class="schedule-day-summary">
+          <span>{{ item.scheduled_people_count }} 人</span>
+          <span>{{ item.display_hours }}</span>
+        </div>
         <div class="schedule-shift-summary calendar-shift-counts">
           {% for shift_name, count in item.shift_counts.items() %}
           <span>{{ shift_name }} {{ count }} 人</span>
@@ -304,7 +322,8 @@
           <button class="schedule-calendar-shift {% if schedule.is_custom_time %}custom-shift-badge{% endif %}" type="button" data-schedule-edit style="--shift-color: {{ schedule.color or '#64748b' }}">
             <span>{{ schedule.employee_name }}</span>
             <strong>{{ schedule.shift_name }}</strong>
-            <small>{{ schedule.store_name }} · {{ schedule.duration_hours or 0 }} 小时</small>
+            <small>{{ schedule.store_name }}</small>
+            <small class="schedule-time-line">{{ schedule.display_time }} · {{ schedule.display_hours }}</small>
             {% if schedule.note %}<small>{{ schedule.note }}</small>{% endif %}
           </button>
           {% else %}
@@ -316,6 +335,11 @@
     </div>
     {% elif context.view == 'employee' %}
     <div class="schedule-employee-card-grid schedule-employee-view" id="employee-schedule-view">
+      {% if context.store_scope == 'employee-all-stores' %}
+      <div class="employee-all-store-summary full-span">
+        当前为员工全可排门店视图，已汇总 {{ context.filters.store_names_text }} 的排班。
+      </div>
+      {% endif %}
       {% for summary in context.employee_summaries %}
       {% set employee = summary.employee %}
       <article class="schedule-employee-card {% if employee.is_cross_store_visible %}cross-store-readonly{% endif %}">
@@ -333,10 +357,12 @@
         </div>
         <div class="employee-timeline">
           {% for item in summary.timeline %}
-          {% set schedule = item.schedule %}
-          <span class="{% if schedule %}has-shift{% endif %}" title="{{ item.day.date }}">
+          {% set schedules = item.schedules %}
+          <span class="{% if schedules %}has-shift{% endif %}" title="{{ item.day.date }}">
             {{ item.day.day }}
-            {% if schedule %}<small>{{ schedule.shift_name }}</small>{% endif %}
+            {% for schedule in schedules %}
+            <small class="employee-schedule-store">{{ schedule.store_name }} · {{ schedule.shift_name }} · {{ schedule.display_time }} · {{ schedule.display_hours }}</small>
+            {% endfor %}
           </span>
           {% endfor %}
         </div>
@@ -370,6 +396,14 @@
           <span>{{ shift_name }} {{ count }}</span>
           {% endfor %}
         </div>
+        <details class="calendar-day-detail">
+          <summary>明细</summary>
+          {% for schedule in item.rows %}
+          <div class="schedule-time-line">{{ schedule.employee_name }} · {{ schedule.store_name }} · {{ schedule.shift_name }} · {{ schedule.display_time }} · {{ schedule.display_hours }}</div>
+          {% else %}
+          <small class="empty-note">当前日期暂无排班。</small>
+          {% endfor %}
+        </details>
       </article>
       {% endfor %}
     </div>
@@ -408,6 +442,7 @@
             <td class="schedule-cell {% if day.is_weekend %}schedule-weekend{% endif %} {% if day.is_today %}schedule-today{% endif %}">
               {% if schedule %}
               <span class="shift-badge {% if schedule.is_custom_time %}custom-shift-badge{% endif %}" style="--shift-color: {{ schedule.color or '#64748b' }}">{{ schedule.shift_name }}</span>
+              <small class="schedule-time-line">{{ schedule.display_time }} · {{ schedule.display_hours }}</small>
               {% if schedule.note %}<small>{{ schedule.note }}</small>{% endif %}
               <form method="post" action="/admin/schedules/{{ schedule.id }}/delete" onsubmit="return confirm('确认删除这条排班吗？');" data-feedback-form data-preserve-scroll data-loading-label="删除中...">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -431,14 +466,17 @@
 
   <section class="admin-section ops-card">
     <div class="section-heading admin-section-heading">
-      <h2>每天每个门店排班人数</h2>
+      <h2>每日排班概览</h2>
+      <p>按当前筛选汇总每日排班人数、计划工时和班次数。</p>
     </div>
     <div class="daily-count-grid">
-      {% for day in context.days %}
-      {% set counts = context.daily_store_counts.get(day.date, {}) %}
-      <div>
-        <strong>{{ day.date }} {{ day.weekday }}</strong>
-        <span>{{ context.filters.store_names_text }}：{{ counts.get(context.filters.store_name, 0) if context.filters.store_name else counts.values() | sum }} 人</span>
+      {% for item in context.daily_overview %}
+      {% set day = item.day %}
+      <div class="daily-overview-card {% if item.scheduled_people_count == 0 %}muted{% endif %}">
+        <strong>{{ day.date }} {{ day.weekday_label }}</strong>
+        <span>{{ item.scheduled_people_count }} 人</span>
+        <span>{{ item.display_hours }}</span>
+        <small>{{ item.shift_count }} 个班次</small>
       </div>
       {% endfor %}
     </div>

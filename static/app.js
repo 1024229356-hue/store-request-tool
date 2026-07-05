@@ -62,9 +62,11 @@ function initializeStoreRequestApp() {
   const selectAllScheduleDatesButton = document.querySelector("[data-select-all-schedule-dates]");
   const selectWeekdaysButton = document.querySelector("[data-select-weekdays]");
   const selectWeekendsButton = document.querySelector("[data-select-weekends]");
+  const selectHolidaysButton = document.querySelector("[data-select-holidays]");
   const clearScheduleDatesButton = document.querySelector("[data-clear-schedule-dates]");
-  const customScheduleMode = document.querySelector("[data-custom-schedule-mode]");
+  const customScheduleModeInputs = Array.from(document.querySelectorAll("[data-custom-schedule-mode]"));
   const customScheduleFields = document.querySelector("[data-custom-schedule-fields]");
+  const recalculateCustomDurationButton = document.querySelector("[data-recalculate-custom-duration]");
 
   let selectedImages = [];
   let selectedFiles = [];
@@ -346,22 +348,91 @@ function initializeStoreRequestApp() {
     scheduleBulkSummary.classList.toggle("is-over-limit", Boolean(maxCount && total > maxCount));
   }
 
-  function updateCustomScheduleFields() {
-    if (!customScheduleMode || !customScheduleFields) {
+  function selectedScheduleMode() {
+    const checkedMode = customScheduleModeInputs.find((input) => input.checked);
+    return checkedMode ? checkedMode.value : "shift";
+  }
+
+  function customDurationInput() {
+    return scheduleBulkForm ? scheduleBulkForm.querySelector('input[name="custom_duration_hours"]') : null;
+  }
+
+  function customTimeInput(name) {
+    return scheduleBulkForm ? scheduleBulkForm.querySelector(`input[name="${name}"]`) : null;
+  }
+
+  function minutesFromTime(value) {
+    const match = String(value || "").match(/^(\d{2}):(\d{2})$/);
+    if (!match) {
+      return null;
+    }
+    return Number(match[1]) * 60 + Number(match[2]);
+  }
+
+  function calculateCustomDurationHours() {
+    const startInput = customTimeInput("custom_start_time");
+    const endInput = customTimeInput("custom_end_time");
+    const breakInput = customTimeInput("custom_break_minutes");
+    const start = minutesFromTime(startInput ? startInput.value : "");
+    let end = minutesFromTime(endInput ? endInput.value : "");
+    if (start === null || end === null) {
+      return "";
+    }
+    if (end <= start) {
+      end += 24 * 60;
+    }
+    const breakMinutes = Math.max(Number(breakInput ? breakInput.value || 0 : 0), 0);
+    const hours = Math.max((end - start - breakMinutes) / 60, 0);
+    return hours > 0 ? String(Math.round(hours * 100) / 100) : "";
+  }
+
+  function recalculateCustomDuration(force = false) {
+    const durationInput = customDurationInput();
+    if (!durationInput) {
       return;
     }
-    const isCustom = customScheduleMode.value === "custom";
+    if (!force && durationInput.dataset.manualOverride === "1") {
+      return;
+    }
+    const calculated = calculateCustomDurationHours();
+    if (calculated) {
+      durationInput.value = calculated;
+      durationInput.dataset.autoCalculated = "1";
+    }
+  }
+
+  function updateCustomScheduleFields() {
+    if (!customScheduleModeInputs.length || !customScheduleFields) {
+      return;
+    }
+    const isCustom = selectedScheduleMode() === "custom";
     customScheduleFields.hidden = !isCustom;
     Array.from(customScheduleFields.querySelectorAll("input, select, textarea")).forEach((field) => {
       field.disabled = !isCustom;
     });
+    const shiftSelect = scheduleBulkForm ? scheduleBulkForm.querySelector("[data-shift-select]") : null;
+    if (shiftSelect) {
+      shiftSelect.disabled = isCustom;
+      shiftSelect.required = !isCustom;
+    }
+    if (isCustom) {
+      recalculateCustomDuration(false);
+    }
   }
 
   function setScheduleInputsChecked(inputs, checked) {
     inputs.forEach((input) => {
       input.checked = checked;
+      syncScheduleDateCard(input);
     });
     updateScheduleBulkSummary();
+  }
+
+  function syncScheduleDateCard(input) {
+    const card = input ? input.closest(".schedule-date-card, .schedule-date-chip, [data-weekend]") : null;
+    if (card) {
+      card.classList.toggle("selected", Boolean(input.checked));
+    }
   }
 
   function setScheduleEmployeesByRole(role) {
@@ -381,6 +452,16 @@ function initializeStoreRequestApp() {
       const chip = input.closest("[data-weekend]");
       const isWeekend = chip ? chip.dataset.weekend === "1" : false;
       input.checked = weekendOnly ? isWeekend : !isWeekend;
+      syncScheduleDateCard(input);
+    });
+    updateScheduleBulkSummary();
+  }
+
+  function setScheduleDatesByHoliday() {
+    scheduleDateInputs().forEach((input) => {
+      const chip = input.closest("[data-holiday]");
+      input.checked = chip ? chip.dataset.holiday === "1" : false;
+      syncScheduleDateCard(input);
     });
     updateScheduleBulkSummary();
   }
@@ -990,11 +1071,40 @@ function initializeStoreRequestApp() {
 
   if (scheduleBulkForm) {
     updateCustomScheduleFields();
-    if (customScheduleMode) {
-      customScheduleMode.addEventListener("change", updateCustomScheduleFields);
+    customScheduleModeInputs.forEach((input) => {
+      input.addEventListener("change", updateCustomScheduleFields);
+    });
+    ["custom_start_time", "custom_end_time", "custom_break_minutes"].forEach((name) => {
+      const input = customTimeInput(name);
+      if (input) {
+        input.addEventListener("input", () => recalculateCustomDuration(false));
+        input.addEventListener("change", () => recalculateCustomDuration(false));
+      }
+    });
+    const durationInput = customDurationInput();
+    if (durationInput) {
+      durationInput.addEventListener("input", () => {
+        durationInput.dataset.manualOverride = durationInput.value ? "1" : "0";
+      });
+    }
+    if (recalculateCustomDurationButton) {
+      recalculateCustomDurationButton.addEventListener("click", (event) => {
+        event.preventDefault();
+        const input = customDurationInput();
+        if (input) {
+          input.dataset.manualOverride = "0";
+        }
+        recalculateCustomDuration(true);
+      });
     }
     scheduleEmployeeInputs().forEach((input) => input.addEventListener("change", updateScheduleBulkSummary));
-    scheduleDateInputs().forEach((input) => input.addEventListener("change", updateScheduleBulkSummary));
+    scheduleDateInputs().forEach((input) => {
+      input.addEventListener("change", () => {
+        syncScheduleDateCard(input);
+        updateScheduleBulkSummary();
+      });
+      syncScheduleDateCard(input);
+    });
   if (selectAllEmployeesButton) {
     selectAllEmployeesButton.addEventListener("click", () => setScheduleInputsChecked(scheduleEmployeeInputs(), true));
   }
@@ -1015,6 +1125,9 @@ function initializeStoreRequestApp() {
     }
     if (selectWeekendsButton) {
       selectWeekendsButton.addEventListener("click", () => setScheduleDatesByWeekend(true));
+    }
+    if (selectHolidaysButton) {
+      selectHolidaysButton.addEventListener("click", () => setScheduleDatesByHoliday());
     }
     if (clearScheduleDatesButton) {
       clearScheduleDatesButton.addEventListener("click", () => setScheduleInputsChecked(scheduleDateInputs(), false));

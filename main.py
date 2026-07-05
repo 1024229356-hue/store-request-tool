@@ -931,6 +931,11 @@ def normalize_schedule_view(value: str) -> str:
     return clean_value if clean_value in {"calendar", "employee", "table", "store-summary"} else "calendar"
 
 
+def normalize_schedule_store_scope(value: str) -> str:
+    clean_value = value.strip()
+    return clean_value if clean_value in {"selected_stores", "employee-all-stores", "all"} else "selected_stores"
+
+
 def normalize_employee_record_scope(value: str) -> str:
     clean_value = value.strip()
     return clean_value if clean_value in {"active", "archive", "trash"} else "active"
@@ -1235,6 +1240,84 @@ def recreate_shift_types_without_unique_name(connection: sqlite3.Connection) -> 
     connection.execute(f"DROP TABLE {backup_table}")
 
 
+def store_schedules_has_employee_date_unique_constraint(connection: sqlite3.Connection) -> bool:
+    if not table_exists(connection, "store_schedules"):
+        return False
+    for index_row in connection.execute("PRAGMA index_list(store_schedules)").fetchall():
+        if int(index_row["unique"] or 0) != 1:
+            continue
+        index_name = str(index_row["name"] or "")
+        columns = [str(row["name"]) for row in connection.execute(f"PRAGMA index_info({index_name})").fetchall()]
+        if columns == ["employee_id", "schedule_date"]:
+            return True
+    return False
+
+
+def recreate_store_schedules_with_store_date_unique(connection: sqlite3.Connection) -> None:
+    if not store_schedules_has_employee_date_unique_constraint(connection):
+        return
+    backup_table = f"store_schedules_unique_backup_{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
+    existing_columns = {
+        str(row["name"])
+        for row in connection.execute("PRAGMA table_info(store_schedules)").fetchall()
+    }
+
+    def source_expr(column_name: str, fallback: str) -> str:
+        return column_name if column_name in existing_columns else fallback
+
+    connection.execute(f"ALTER TABLE store_schedules RENAME TO {backup_table}")
+    connection.execute(
+        """
+        CREATE TABLE store_schedules (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            store_name TEXT NOT NULL,
+            employee_id INTEGER NOT NULL,
+            schedule_date TEXT NOT NULL,
+            shift_type_id INTEGER NOT NULL DEFAULT 0,
+            note TEXT,
+            is_custom_time INTEGER DEFAULT 0,
+            custom_start_time TEXT,
+            custom_end_time TEXT,
+            custom_duration_hours REAL,
+            custom_label TEXT,
+            created_by TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(store_name, employee_id, schedule_date),
+            FOREIGN KEY (employee_id) REFERENCES employees(id),
+            FOREIGN KEY (shift_type_id) REFERENCES shift_types(id)
+        )
+        """
+    )
+    connection.execute(
+        f"""
+        INSERT INTO store_schedules (
+            id, store_name, employee_id, schedule_date, shift_type_id, note,
+            is_custom_time, custom_start_time, custom_end_time, custom_duration_hours,
+            custom_label, created_by, created_at, updated_at
+        )
+        SELECT
+            {source_expr('id', 'NULL')},
+            {source_expr('store_name', "''")},
+            {source_expr('employee_id', '0')},
+            {source_expr('schedule_date', "''")},
+            {source_expr('shift_type_id', '0')},
+            {source_expr('note', "''")},
+            {source_expr('is_custom_time', '0')},
+            {source_expr('custom_start_time', "''")},
+            {source_expr('custom_end_time', "''")},
+            {source_expr('custom_duration_hours', 'NULL')},
+            {source_expr('custom_label', "''")},
+            {source_expr('created_by', "''")},
+            {source_expr('created_at', "datetime('now')")},
+            {source_expr('updated_at', "datetime('now')")}
+        FROM {backup_table}
+        ORDER BY id
+        """
+    )
+    connection.execute(f"DROP TABLE {backup_table}")
+
+
 def ensure_schedule_schema_migrations(connection: sqlite3.Connection) -> None:
     add_column_if_missing(connection, "shift_types", "store_name", "TEXT")
     add_column_if_missing(connection, "shift_types", "is_global", "INTEGER DEFAULT 0")
@@ -1267,6 +1350,7 @@ def ensure_schedule_schema_migrations(connection: sqlite3.Connection) -> None:
     add_column_if_missing(connection, "store_schedules", "custom_end_time", "TEXT")
     add_column_if_missing(connection, "store_schedules", "custom_duration_hours", "REAL")
     add_column_if_missing(connection, "store_schedules", "custom_label", "TEXT")
+    recreate_store_schedules_with_store_date_unique(connection)
 
 
 def init_db() -> None:
@@ -1558,7 +1642,7 @@ def init_db() -> None:
                 created_by TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
-                UNIQUE(employee_id, schedule_date),
+                UNIQUE(store_name, employee_id, schedule_date),
                 FOREIGN KEY (employee_id) REFERENCES employees(id),
                 FOREIGN KEY (shift_type_id) REFERENCES shift_types(id)
             )
@@ -3144,31 +3228,75 @@ def normalize_schedule_date(value: str) -> str:
         raise ValueError("排班日期格式不正确。") from exc
 
 
+WEEKDAY_LABELS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+
+
 def weekday_label(date_text: str) -> str:
-    labels = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
     parsed = datetime.strptime(date_text, "%Y-%m-%d")
-    return labels[parsed.weekday()]
+    return WEEKDAY_LABELS[parsed.weekday()]
+
+
+def load_holiday_map() -> Dict[str, str]:
+    raw_holidays = load_json_file("holidays.json", {})
+    holiday_map: Dict[str, str] = {}
+    if isinstance(raw_holidays, dict):
+        holiday_items = raw_holidays.items()
+    elif isinstance(raw_holidays, list):
+        holiday_items = []
+        for item in raw_holidays:
+            if isinstance(item, str):
+                holiday_items.append((item, "节假日"))
+            elif isinstance(item, dict):
+                holiday_items.append((item.get("date") or item.get("day"), item.get("name") or item.get("label") or "节假日"))
+    else:
+        holiday_items = []
+    for raw_date, raw_name in holiday_items:
+        try:
+            date_text = normalize_schedule_date(str(raw_date or ""))
+        except ValueError:
+            continue
+        holiday_name = str(raw_name or "").strip() or "节假日"
+        holiday_map[date_text] = holiday_name
+    return holiday_map
+
+
+def build_month_calendar(year: int, month: int) -> List[Dict[str, object]]:
+    first_day = date(year, month, 1)
+    last_day_number = calendar.monthrange(year, month)[1]
+    last_day = date(year, month, last_day_number)
+    cursor = first_day - timedelta(days=first_day.weekday())
+    end_day = last_day + timedelta(days=6 - last_day.weekday())
+    today_text = date.today().isoformat()
+    holiday_map = load_holiday_map()
+    days: List[Dict[str, object]] = []
+    while cursor <= end_day:
+        date_text = cursor.isoformat()
+        weekday_index = cursor.weekday()
+        holiday_name = holiday_map.get(date_text, "")
+        is_current_month = cursor.year == year and cursor.month == month
+        days.append(
+            {
+                "date": date_text,
+                "day": cursor.day,
+                "month": cursor.month,
+                "weekday_index": weekday_index,
+                "weekday_label": WEEKDAY_LABELS[weekday_index],
+                "weekday": WEEKDAY_LABELS[weekday_index],
+                "is_weekend": weekday_index >= 5,
+                "is_today": date_text == today_text,
+                "is_holiday": bool(holiday_name),
+                "holiday_name": holiday_name,
+                "is_current_month": is_current_month,
+            }
+        )
+        cursor += timedelta(days=1)
+    return days
 
 
 def month_date_items(month: str) -> List[Dict[str, object]]:
     normalized = normalize_month(month)
     year, month_number = [int(part) for part in normalized.split("-")]
-    last_day = calendar.monthrange(year, month_number)[1]
-    today = datetime.now().strftime("%Y-%m-%d")
-    days: List[Dict[str, object]] = []
-    for day in range(1, last_day + 1):
-        date_text = f"{normalized}-{day:02d}"
-        weekday = weekday_label(date_text)
-        days.append(
-            {
-                "date": date_text,
-                "day": day,
-                "weekday": weekday,
-                "is_weekend": weekday in {"周六", "周日"},
-                "is_today": date_text == today,
-            }
-        )
-    return days
+    return [day for day in build_month_calendar(year, month_number) if day["is_current_month"]]
 
 
 def calendar_week_rows(days: List[Dict[str, object]]) -> List[List[Optional[Dict[str, object]]]]:
@@ -3225,8 +3353,8 @@ def build_schedule_employee_summaries(
         scheduled_dates = {str(row.get("schedule_date") or "") for row in employee_rows}
         timeline = []
         for day in days:
-            matching = next((row for row in employee_rows if str(row.get("schedule_date") or "") == str(day["date"])), None)
-            timeline.append({"day": day, "schedule": matching})
+            matching_rows = [row for row in employee_rows if str(row.get("schedule_date") or "") == str(day["date"])]
+            timeline.append({"day": day, "schedule": matching_rows[0] if matching_rows else None, "schedules": matching_rows})
         summaries.append(
             {
                 "employee": employee,
@@ -3239,6 +3367,41 @@ def build_schedule_employee_summaries(
             }
         )
     return summaries
+
+
+def format_hours_value(value: object) -> str:
+    try:
+        hours = round(float(value or 0), 2)
+    except (TypeError, ValueError):
+        hours = 0.0
+    return f"{hours:g}"
+
+
+def format_schedule_time_range(start_time: object, end_time: object) -> Tuple[str, bool]:
+    start_text = str(start_time or "").strip()
+    end_text = str(end_time or "").strip()
+    if not start_text or not end_text:
+        return "-", False
+    try:
+        is_cross_day = time_to_minutes(end_text) <= time_to_minutes(start_text)
+    except ValueError:
+        is_cross_day = False
+    suffix = "（跨天）" if is_cross_day else ""
+    return f"{start_text}-{end_text}{suffix}", is_cross_day
+
+
+def decorate_schedule_display(row: Dict[str, object]) -> Dict[str, object]:
+    display_time, is_cross_day = format_schedule_time_range(row.get("start_time"), row.get("end_time"))
+    display_hours = f"{format_hours_value(row.get('duration_hours'))} 小时"
+    shift_name = str(row.get("shift_name") or "未设置班次").strip()
+    row["display_time"] = display_time
+    row["display_hours"] = display_hours
+    row["is_cross_day"] = is_cross_day
+    if display_time == "-":
+        row["display_label"] = f"{shift_name} · {display_hours}"
+    else:
+        row["display_label"] = f"{shift_name} · {display_time} · {display_hours}"
+    return row
 
 
 def build_schedule_calendar_summary(days: List[Dict[str, object]], rows: List[Dict[str, object]]) -> List[Dict[str, object]]:
@@ -3256,16 +3419,41 @@ def build_schedule_calendar_summary(days: List[Dict[str, object]], rows: List[Di
             store_name = str(row.get("store_name") or "未设置门店")
             shift_counts[shift_name] = shift_counts.get(shift_name, 0) + 1
             store_counts[store_name] = store_counts.get(store_name, 0) + 1
+        total_hours = round(sum(float(row.get("duration_hours") or 0) for row in day_rows), 2)
         summary.append(
             {
                 "day": day,
                 "rows": day_rows,
                 "schedule_count": len(day_rows),
+                "scheduled_people_count": len({int(row["employee_id"]) for row in day_rows}) if day_rows else 0,
+                "total_hours": total_hours,
+                "display_hours": f"{format_hours_value(total_hours)} 小时",
                 "shift_counts": shift_counts,
                 "store_counts": store_counts,
             }
         )
     return summary
+
+
+def build_daily_schedule_overview(days: List[Dict[str, object]], rows: List[Dict[str, object]]) -> List[Dict[str, object]]:
+    rows_by_date: Dict[str, List[Dict[str, object]]] = {}
+    for row in rows:
+        rows_by_date.setdefault(str(row["schedule_date"]), []).append(row)
+    overview: List[Dict[str, object]] = []
+    for day in days:
+        day_rows = rows_by_date.get(str(day["date"]), [])
+        total_hours = round(sum(float(row.get("duration_hours") or 0) for row in day_rows), 2)
+        overview.append(
+            {
+                "day": day,
+                "rows": day_rows,
+                "scheduled_people_count": len({int(row["employee_id"]) for row in day_rows}) if day_rows else 0,
+                "total_hours": total_hours,
+                "display_hours": f"{format_hours_value(total_hours)} 小时",
+                "shift_count": len(day_rows),
+            }
+        )
+    return overview
 
 
 def build_schedule_dashboard(rows: List[Dict[str, object]], month: str) -> Dict[str, object]:
@@ -3371,17 +3559,35 @@ def employee_store_map_for_ids(connection: sqlite3.Connection, employee_ids: Ite
     return store_map
 
 
+def store_names_for_employee_ids(employee_ids: Iterable[int]) -> List[str]:
+    ids = [int(employee_id) for employee_id in employee_ids if int(employee_id) > 0]
+    if not ids:
+        return []
+    placeholders = ",".join("?" for _ in ids)
+    with get_connection() as connection:
+        rows = connection.execute(
+            f"""
+            SELECT id, store_name, primary_store_name
+            FROM employees
+            WHERE id IN ({placeholders})
+            """,
+            ids,
+        ).fetchall()
+        store_map = employee_store_map_for_ids(connection, ids)
+    store_names: List[str] = []
+    for row in rows:
+        employee_id = int(row["id"])
+        primary_store = str(row["primary_store_name"] or row["store_name"] or "").strip()
+        store_names.extend(unique_clean_values([primary_store, *store_map.get(employee_id, []), *split_multi_value_text(row["store_name"])]))
+    return unique_clean_values(store_names)
+
+
 def build_employee_schedule_url(employee: Dict[str, object]) -> str:
     employee_id = str(employee.get("id") or "").strip()
-    primary_store = str(employee.get("primary_store_name") or employee.get("store_name") or "").strip()
-    store_names = list(employee.get("store_names") or [])
-    target_store = primary_store or (str(store_names[0]).strip() if store_names else "")
-    query_items: List[Tuple[str, str]] = []
-    if target_store:
-        query_items.append(("store_names", target_store))
+    query_items: List[Tuple[str, str]] = [("view_mode", "employee")]
     if employee_id:
         query_items.append(("employee_ids", employee_id))
-    query_items.append(("view_mode", "employee"))
+    query_items.append(("store_scope", "employee-all-stores"))
     return "/admin/schedules?" + urlencode(query_items) + "#employee-schedule-view"
 
 
@@ -4089,6 +4295,7 @@ def fetch_schedule_rows(
     shift_type_ids: Optional[List[int]] = None,
     include_custom_shift: bool = False,
     is_all_stores: bool = False,
+    selected_employee_ids: Optional[List[int]] = None,
 ) -> List[Dict[str, object]]:
     filters = schedule_filters(
         store_name,
@@ -4115,6 +4322,11 @@ def fetch_schedule_rows(
         placeholders = ",".join("?" for _ in selected_employee_statuses)
         clauses.append(f"employees.status IN ({placeholders})")
         params.extend(selected_employee_statuses)
+    clean_employee_ids = [int(employee_id) for employee_id in selected_employee_ids or [] if int(employee_id) > 0]
+    if clean_employee_ids:
+        placeholders = ",".join("?" for _ in clean_employee_ids)
+        clauses.append(f"schedules.employee_id IN ({placeholders})")
+        params.extend(clean_employee_ids)
     selected_shift_type_ids = [int(value) for value in filters["shift_type_ids"]]
     include_custom = bool(filters["include_custom_shift"])
     if selected_shift_type_ids and include_custom:
@@ -4162,6 +4374,7 @@ def fetch_schedule_rows(
             row["shift_name"] = row.get("shift_name") or "未设置班次"
             row["duration_hours"] = float(row.get("duration_hours") or 0)
         row["weekday"] = weekday_label(str(row["schedule_date"]))
+        decorate_schedule_display(row)
     return result
 
 
@@ -4181,9 +4394,20 @@ def fetch_schedule_context(
     shift_type_ids: Optional[List[int]] = None,
     include_custom_shift: bool = False,
     is_all_stores: bool = False,
+    store_scope: str = "selected_stores",
 ) -> Dict[str, object]:
     normalized_view = normalize_schedule_view(view)
+    normalized_store_scope = normalize_schedule_store_scope(store_scope)
     selected_store_names = unique_clean_values(store_names or ([store_name.strip()] if store_name.strip() and not is_all_stores else []))
+    selected_ids = [int(employee_id) for employee_id in selected_employee_ids or [] if int(employee_id) > 0]
+    if normalized_store_scope == "employee-all-stores" and selected_ids:
+        selected_store_names = store_names_for_employee_ids(selected_ids)
+        is_all_stores = False
+        scope = "store"
+    elif normalized_store_scope == "all":
+        selected_store_names = []
+        is_all_stores = True
+        scope = "all"
     normalized_scope = "all" if is_all_stores or scope == "all" or (normalized_view == "store-summary" and not selected_store_names) else "store"
     if normalized_scope == "all":
         selected_store_names = []
@@ -4198,9 +4422,10 @@ def fetch_schedule_context(
         include_custom_shift=include_custom_shift,
         is_all_stores=normalized_scope == "all",
     )
-    days = month_date_items(filters["month"])
+    year, month_number = [int(part) for part in str(filters["month"]).split("-")]
+    calendar_days = build_month_calendar(year, month_number)
+    days = [day for day in calendar_days if day["is_current_month"]]
     normalized_employee_scope = normalize_employee_scope(employee_scope)
-    selected_ids = [int(employee_id) for employee_id in selected_employee_ids or [] if int(employee_id) > 0]
     selected_store_names = list(filters["store_names"])
     is_all = bool(filters["is_all_stores"])
     employee_status_filters = list(filters["employee_statuses"]) or ["在职"]
@@ -4225,6 +4450,7 @@ def fetch_schedule_context(
         shift_type_ids=[int(value) for value in filters["shift_type_ids"]],
         include_custom_shift=bool(filters["include_custom_shift"]),
         is_all_stores=is_all,
+        selected_employee_ids=selected_ids,
     )
     schedule_map: Dict[str, Dict[int, Dict[str, object]]] = {}
     daily_store_counts: Dict[str, Dict[str, int]] = {}
@@ -4243,7 +4469,12 @@ def fetch_schedule_context(
         "rest_shift_count": sum(1 for row in rows if str(row.get("shift_name") or "") == "休息"),
     }
     selected_id_strings = [str(employee_id) for employee_id in selected_ids]
-    query_items: List[Tuple[str, str]] = [("month", str(filters["month"])), ("employee_scope", normalized_employee_scope), ("scope", normalized_scope)]
+    query_items: List[Tuple[str, str]] = [
+        ("month", str(filters["month"])),
+        ("employee_scope", normalized_employee_scope),
+        ("scope", normalized_scope),
+        ("store_scope", normalized_store_scope),
+    ]
     if selected_store_names:
         query_items.extend(("store_names", store) for store in selected_store_names)
     else:
@@ -4256,7 +4487,7 @@ def fetch_schedule_context(
     if show_cross_store:
         query_items.append(("show_cross_store", "1"))
     view_anchors = {
-        "calendar": "calendar-summary",
+        "calendar": "schedule-calendar-view",
         "employee": "employee-schedule-view",
         "table": "schedule-table-view",
         "store-summary": "store-summary-view",
@@ -4273,7 +4504,8 @@ def fetch_schedule_context(
     global_view_url = "/admin/schedules?" + urlencode(
         [("store_names", "__all__"), ("month", str(filters["month"])), ("scope", "all"), ("view_mode", "store-summary")]
     ) + "#store-summary-view"
-    calendar_summary = build_schedule_calendar_summary(days, rows)
+    calendar_summary = build_schedule_calendar_summary(calendar_days, rows)
+    daily_overview = build_daily_schedule_overview(days, rows)
     export_query = [("month", filters["month"])]
     export_query.extend(("store_names", store) for store in selected_store_names)
     export_query.extend(("employee_statuses", status) for status in filters["employee_statuses"])
@@ -4292,6 +4524,7 @@ def fetch_schedule_context(
         "is_single_store": is_single_store,
         "is_multi_store": len(selected_store_names) > 1,
         "days": days,
+        "calendar_days": calendar_days,
         "employees": employees,
         "bulk_employees": employee_options,
         "employee_options": employee_options,
@@ -4302,6 +4535,7 @@ def fetch_schedule_context(
         "rows": rows,
         "schedule_map": schedule_map,
         "daily_store_counts": daily_store_counts,
+        "daily_overview": daily_overview,
         "calendar_summary": calendar_summary,
         "store_summary_calendar": calendar_summary,
         "stats": stats,
@@ -4311,6 +4545,7 @@ def fetch_schedule_context(
         "view": normalized_view,
         "show_cross_store": show_cross_store,
         "scope": normalized_scope,
+        "store_scope": normalized_store_scope,
         "form_store": filters["store_name"] if is_single_store else "",
         "view_urls": view_urls,
         "toggle_cross_store_url": toggle_cross_store_url,
@@ -4404,8 +4639,8 @@ def upsert_schedule(
     }
     with get_connection() as connection:
         existing = connection.execute(
-            "SELECT * FROM store_schedules WHERE employee_id = ? AND schedule_date = ?",
-            (employee_id, clean_date),
+            "SELECT * FROM store_schedules WHERE store_name = ? AND employee_id = ? AND schedule_date = ?",
+            (clean_store, employee_id, clean_date),
         ).fetchone()
         if existing:
             old_value = dict(existing)
@@ -4463,11 +4698,17 @@ def upsert_schedule(
         return schedule_id
 
 
-def existing_schedule_for(employee_id: int, schedule_date: str) -> Optional[Dict[str, object]]:
+def existing_schedule_for(employee_id: int, schedule_date: str, store_name: str = "") -> Optional[Dict[str, object]]:
+    clean_store = store_name.strip()
+    clauses = ["employee_id = ?", "schedule_date = ?"]
+    params: List[object] = [employee_id, schedule_date]
+    if clean_store:
+        clauses.append("store_name = ?")
+        params.append(clean_store)
     with get_connection() as connection:
         row = connection.execute(
-            "SELECT * FROM store_schedules WHERE employee_id = ? AND schedule_date = ?",
-            (employee_id, schedule_date),
+            f"SELECT * FROM store_schedules WHERE {' AND '.join(clauses)} ORDER BY id LIMIT 1",
+            params,
         ).fetchone()
     return dict(row) if row else None
 
@@ -4512,12 +4753,25 @@ def time_to_minutes(value: str) -> int:
     return parsed_time.hour * 60 + parsed_time.minute
 
 
-def calculate_duration_from_times(start_time: str, end_time: str) -> float:
+def parse_break_minutes(value: str) -> int:
+    clean_value = str(value or "").strip()
+    if not clean_value:
+        return 0
+    try:
+        minutes = int(float(clean_value))
+    except ValueError as exc:
+        raise ValueError("休息分钟必须是数字。") from exc
+    if minutes < 0:
+        raise ValueError("休息分钟不能小于 0。")
+    return minutes
+
+
+def calculate_duration_from_times(start_time: str, end_time: str, break_minutes: int = 0) -> float:
     start_minutes = time_to_minutes(start_time)
     end_minutes = time_to_minutes(end_time)
     if end_minutes <= start_minutes:
         end_minutes += 24 * 60
-    return round((end_minutes - start_minutes) / 60, 2)
+    return round((end_minutes - start_minutes - max(break_minutes, 0)) / 60, 2)
 
 
 def normalize_custom_schedule_payload(
@@ -4527,6 +4781,7 @@ def normalize_custom_schedule_payload(
     custom_start_time: str,
     custom_end_time: str,
     custom_duration_hours: str,
+    custom_break_minutes: str = "",
 ) -> Tuple[int, Optional[Dict[str, object]]]:
     is_custom = schedule_mode.strip() == "custom"
     if not is_custom:
@@ -4539,7 +4794,7 @@ def normalize_custom_schedule_payload(
         raise ValueError("自定义时间必须填写开始时间和结束时间。")
     duration = parse_duration_hours(custom_duration_hours)
     if duration <= 0:
-        duration = calculate_duration_from_times(start_time, end_time)
+        duration = calculate_duration_from_times(start_time, end_time, parse_break_minutes(custom_break_minutes))
     if duration <= 0:
         raise ValueError("自定义工时必须大于 0。")
     return 0, {
@@ -4595,7 +4850,7 @@ def bulk_upsert_schedules(
     skipped_count = 0
     for selected_employee_id in employee_ids:
         for selected_date in schedule_dates:
-            existing = existing_schedule_for(selected_employee_id, selected_date)
+            existing = existing_schedule_for(selected_employee_id, selected_date, clean_store)
             if existing and not overwrite_existing:
                 skipped_count += 1
                 continue
@@ -4695,7 +4950,7 @@ def build_schedule_excel(rows: List[Dict[str, object]]) -> BytesIO:
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "门店排班"
-    headers = ["门店", "员工", "日期", "星期", "班次", "开始时间", "结束时间", "工时", "是否自定义", "备注"]
+    headers = ["门店", "员工", "日期", "星期", "班次", "排班时间", "工时", "是否自定义", "备注"]
     sheet.append(headers)
     header_fill = PatternFill(fill_type="solid", fgColor="E8EEF7")
     for cell in sheet[1]:
@@ -4710,14 +4965,13 @@ def build_schedule_excel(rows: List[Dict[str, object]]) -> BytesIO:
                 row.get("schedule_date"),
                 row.get("weekday"),
                 row.get("shift_name"),
-                row.get("start_time") or "",
-                row.get("end_time") or "",
-                row.get("duration_hours") or 0,
+                row.get("display_time") or "-",
+                row.get("display_hours") or f"{format_hours_value(row.get('duration_hours'))} 小时",
                 "是" if int(row.get("is_custom_time") or 0) == 1 else "否",
                 row.get("note") or "",
             ]
         )
-    widths = [18, 16, 14, 10, 14, 12, 12, 10, 12, 28]
+    widths = [18, 16, 14, 10, 14, 18, 12, 12, 28]
     for index, width in enumerate(widths, start=1):
         sheet.column_dimensions[get_column_letter(index)].width = width
     for row in sheet.iter_rows(min_row=2):
@@ -7080,6 +7334,7 @@ def create_app() -> FastAPI:
         view: str = "calendar",
         show_cross_store: bool = False,
         scope: str = "store",
+        store_scope: str = "selected_stores",
         employee_scope: str = "all",
         employee_ids: Optional[List[int]] = None,
         shift_type_id: int = 0,
@@ -7099,14 +7354,19 @@ def create_app() -> FastAPI:
     ) -> HTMLResponse:
         config = load_app_config()
         selected_view = normalize_schedule_view(view)
-        default_to_first = not (scope == "all" or (selected_view == "store-summary" and not store_name.strip() and store_names is None))
+        normalized_store_scope = normalize_schedule_store_scope(store_scope)
+        default_to_first = not (
+            scope == "all"
+            or normalized_store_scope in {"all", "employee-all-stores"}
+            or (selected_view == "store-summary" and not store_name.strip() and store_names is None)
+        )
         selected_store_names, is_all_stores, invalid_store = normalize_schedule_store_filter(
             store_names,
             store_name,
             config,
             default_to_first=default_to_first,
         )
-        selected_scope = "all" if is_all_stores or scope == "all" or (selected_view == "store-summary" and not selected_store_names) else "store"
+        selected_scope = "all" if is_all_stores or scope == "all" or normalized_store_scope == "all" or (selected_view == "store-summary" and not selected_store_names) else "store"
         selected_store = selected_store_names[0] if len(selected_store_names) == 1 else ""
         combined_error = combine_error_messages(
             error,
@@ -7128,6 +7388,7 @@ def create_app() -> FastAPI:
             shift_type_ids=shift_type_ids,
             include_custom_shift=include_custom_shift,
             is_all_stores=selected_scope == "all",
+            store_scope=normalized_store_scope,
         )
         return templates.TemplateResponse(
             request,
@@ -8290,6 +8551,7 @@ def create_app() -> FastAPI:
         shift_type_ids: Optional[List[str]] = Query(None),
         show_cross_store: str = Query(""),
         scope: str = Query("store"),
+        store_scope: str = Query("selected_stores"),
         saved: int = Query(0),
         saved_count: int = Query(0),
         created_count: int = Query(0),
@@ -8328,6 +8590,7 @@ def create_app() -> FastAPI:
             view_mode or view or "calendar",
             show_cross_store in {"1", "true", "on", "yes"},
             scope,
+            store_scope,
             normalized_employee_scope,
             parsed_employee_ids,
             parsed_shift_type_id or 0,
@@ -8360,6 +8623,7 @@ def create_app() -> FastAPI:
         custom_label: str = Form(""),
         custom_start_time: str = Form(""),
         custom_end_time: str = Form(""),
+        custom_break_minutes: str = Form(""),
         custom_duration_hours: str = Form(""),
         note: str = Form(""),
         overwrite_existing: str = Form(""),
@@ -8391,6 +8655,7 @@ def create_app() -> FastAPI:
                 custom_start_time,
                 custom_end_time,
                 custom_duration_hours,
+                custom_break_minutes,
             )
             month_for_return = clean_dates[0][:7]
             is_legacy_single_submission = not employee_ids and not schedule_dates and bool(employee_id and schedule_date.strip())
