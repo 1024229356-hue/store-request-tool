@@ -4,12 +4,12 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}{{ public_title | default('止痒 ERP') }}{% endblock %}</title>
-  <link rel="stylesheet" href="/static/style.css?v=ui20260704">
+  <link rel="stylesheet" href="/static/style.css?v={{ asset_version }}">
 </head>
 <body class="page-submit">
   <header class="public-topbar">
     <a class="public-brand" href="/query">
-      <img class="public-logo-img" src="/static/img/zhiyang-logo.png" alt="止痒商店" onerror="this.style.display='none'">
+      <img class="public-logo-img" src="/static/img/zhiyang-logo.png?v={{ asset_version }}" alt="止痒商店" onerror="this.style.display='none'">
       <span>
         <strong>止痒 ERP</strong>
         <small>{{ public_section | default('门店工单') }}</small>
@@ -28,6 +28,6 @@
   <main class="{% block main_class %}mobile-shell{% endblock %}">
     {% block content %}{% endblock %}
   </main>
-  <script src="/static/app.js?v=ui20260704"></script>
+  <script src="/static/app.js?v={{ asset_version }}"></script>
 </body>
 </html>

@@ -78,18 +78,97 @@ LEGACY_ADMIN_REDIRECTS = {
     "/admin/archive-list": "/admin/archive",
     "/admin/recycle": "/admin/trash",
     "/admin/trashes": "/admin/trash",
+    "/admin/home": "/admin/dashboard",
+    "/admin/index": "/admin/dashboard",
+    "/admin/tickets": "/admin",
+    "/admin/orders": "/admin",
+}
+LEGACY_PUBLIC_REDIRECTS = {
+    "/ticket": "/query",
+    "/tickets": "/query",
+    "/new": "/submit",
+    "/create": "/submit",
+    "/form": "/submit",
+}
+CANONICAL_ACCESS_PATHS = {
+    "home": "/",
+    "submit": "/submit",
+    "query": "/query",
+    "store_schedule": "/schedule",
+    "admin_login": "/admin/login",
+    "dashboard": "/admin/dashboard",
+    "tickets": "/admin",
+    "my_work": "/admin/my-work",
+    "archive": "/admin/archive",
+    "trash": "/admin/trash",
+    "cleanup": "/admin/cleanup",
+    "employees": "/admin/employees",
+    "shift_types": "/admin/shift-types",
+    "schedules": "/admin/schedules",
+    "settings": "/admin/settings",
+    "account": "/admin/account",
+    "system": "/admin/system",
+    "embedded_pages": "/admin/embedded-pages",
+    "route_health": "/admin/route-health",
+    "version": "/__version",
+    "healthz": "/healthz",
 }
 REQUIRED_RUNTIME_ROUTES = [
+    "/",
+    "/submit",
+    "/query",
+    "/query/ticket/{ticket_id}",
+    "/query/ticket/{ticket_id}/supplement",
+    "/schedule",
+    "/admin/login",
+    "/admin/dashboard",
+    "/admin",
     "/admin/my-work",
     "/admin/archive",
     "/admin/trash",
+    "/admin/cleanup",
     "/admin/employees",
     "/admin/shift-types",
     "/admin/schedules",
+    "/admin/settings",
+    "/admin/account",
+    "/admin/system",
+    "/admin/embedded-pages",
+    "/admin/route-health",
     "/admin/tickets/create",
     "/admin/tickets/bulk-archive",
     "/admin/tickets/bulk-delete",
+    "/__version",
+    "/healthz",
 ]
+REQUIRED_RUNTIME_ROUTE_LABELS = {
+    "/": "首页跳转",
+    "/submit": "门店提交工单",
+    "/query": "门店查询工单",
+    "/query/ticket/{ticket_id}": "门店查看工单详情",
+    "/query/ticket/{ticket_id}/supplement": "门店补充资料",
+    "/schedule": "门店查看排班",
+    "/admin/login": "后台登录",
+    "/admin/dashboard": "业务总览",
+    "/admin": "工单管理",
+    "/admin/my-work": "我的待办",
+    "/admin/archive": "归档工单",
+    "/admin/trash": "回收站",
+    "/admin/cleanup": "测试数据清理",
+    "/admin/employees": "员工管理",
+    "/admin/shift-types": "班次设置",
+    "/admin/schedules": "门店排班",
+    "/admin/settings": "配置管理",
+    "/admin/account": "账号设置",
+    "/admin/system": "系统设置",
+    "/admin/embedded-pages": "嵌入页面管理",
+    "/admin/route-health": "路由体检",
+    "/admin/tickets/create": "后台新建工单",
+    "/admin/tickets/bulk-archive": "批量归档工单",
+    "/admin/tickets/bulk-delete": "批量移入回收站",
+    "/__version": "当前运行版本",
+    "/healthz": "健康检查",
+}
 BULK_SELECTION_REQUIRED_MESSAGE = "请选择要操作的工单"
 ROUTE_HEALTH_ATTRIBUTE_RE = re.compile(r'\b(href|action|formaction)\s*=\s*(["\'])(.*?)\2', re.IGNORECASE | re.DOTALL)
 ROUTE_HEALTH_FORM_METHOD_RE = re.compile(r'\bmethod\s*=\s*(["\']?)(get|post)\1', re.IGNORECASE)
@@ -640,6 +719,64 @@ def required_missing_routes(app: FastAPI) -> List[str]:
     return [path for path in REQUIRED_RUNTIME_ROUTES if path not in paths]
 
 
+def required_route_items(app: FastAPI) -> List[Dict[str, object]]:
+    paths = {getattr(route, "path", "") for route in app.routes}
+    return [
+        {
+            "label": REQUIRED_RUNTIME_ROUTE_LABELS.get(path, path),
+            "path": path,
+            "exists": path in paths,
+            "status": "OK" if path in paths else "MISSING",
+        }
+        for path in REQUIRED_RUNTIME_ROUTES
+    ]
+
+
+def public_access_urls(port: Optional[int] = None) -> Dict[str, str]:
+    active_port = int(port or load_app_config().port)
+    base_url = f"http://127.0.0.1:{active_port}"
+    return {key: base_url + path for key, path in CANONICAL_ACCESS_PATHS.items()}
+
+
+def recommended_access_url_entries(port: Optional[int] = None) -> List[Dict[str, str]]:
+    labels = {
+        "submit": "门店提交",
+        "query": "门店查询",
+        "admin_login": "后台登录",
+        "dashboard": "业务总览",
+        "tickets": "工单管理",
+        "schedules": "门店排班",
+        "employees": "员工管理",
+        "shift_types": "班次设置",
+        "embedded_pages": "嵌入页面管理",
+        "route_health": "路由体检",
+        "version": "当前版本",
+        "healthz": "健康检查",
+    }
+    urls = public_access_urls(port)
+    return [{"key": key, "label": label, "url": urls[key]} for key, label in labels.items()]
+
+
+def read_git_head_short() -> str:
+    git_dir = BASE_DIR / ".git"
+    head_file = git_dir / "HEAD"
+    if not head_file.is_file():
+        return "unknown"
+    try:
+        head = head_file.read_text(encoding="utf-8").strip()
+    except OSError:
+        return "unknown"
+    if head.startswith("ref:"):
+        ref_path = git_dir / head.removeprefix("ref:").strip()
+        try:
+            commit = ref_path.read_text(encoding="utf-8").strip()
+        except OSError:
+            commit = ""
+    else:
+        commit = head
+    return commit[:7] if re.fullmatch(r"[0-9a-fA-F]{7,40}", commit or "") else "unknown"
+
+
 def current_git_commit() -> str:
     git_candidates = [
         "git",
@@ -661,7 +798,14 @@ def current_git_commit() -> str:
         commit = result.stdout.strip()
         if result.returncode == 0 and commit:
             return commit
-    return "unknown"
+    return read_git_head_short()
+
+
+def current_asset_version() -> str:
+    commit = current_git_commit()
+    if commit != "unknown":
+        return commit
+    return re.sub(r"\D+", "", APP_STARTED_AT) or "dev"
 
 
 def get_db_path() -> Path:
@@ -6473,17 +6617,45 @@ def create_app() -> FastAPI:
     app = FastAPI(title=load_app_config().app_name)
     templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
     templates.env.globals["embedded_nav_pages"] = fetch_enabled_embedded_pages
+    templates.env.globals["asset_version"] = current_asset_version()
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
     @app.get("/__version")
     def version_info() -> Dict[str, object]:
+        config = load_app_config()
         return {
             "app": "store-request-tool",
+            "name": "止痒 ERP",
             "main_file": str(BASE_DIR / "main.py"),
             "route_count": len(app.routes),
             "git_commit": current_git_commit(),
+            "port": config.port,
             "required_missing_routes": required_missing_routes(app),
             "started_at": APP_STARTED_AT,
+            "urls": public_access_urls(config.port),
+        }
+
+    @app.get("/healthz")
+    def healthz() -> Dict[str, object]:
+        database_ok = False
+        try:
+            with get_connection() as connection:
+                connection.execute("SELECT 1").fetchone()
+            database_ok = True
+        except sqlite3.Error:
+            database_ok = False
+        upload_dir_ok = get_upload_dir().is_dir()
+        try:
+            get_embedded_pages_dir().mkdir(parents=True, exist_ok=True)
+            embedded_pages_dir_ok = get_embedded_pages_dir().is_dir()
+        except OSError:
+            embedded_pages_dir_ok = False
+        return {
+            "ok": bool(database_ok and upload_dir_ok and embedded_pages_dir_ok),
+            "database": database_ok,
+            "upload_dir": upload_dir_ok,
+            "embedded_pages_dir": embedded_pages_dir_ok,
+            "route_count": len(app.routes),
         }
 
     @app.get("/api/handlers")
@@ -6492,10 +6664,9 @@ def create_app() -> FastAPI:
 
     @app.exception_handler(404)
     def admin_not_found_handler(request: Request, exc: HTTPException):
-        if not request.url.path.startswith("/admin"):
-            return JSONResponse({"detail": getattr(exc, "detail", "Not Found")}, status_code=404)
-        admin = current_admin_username(request)
-        if not admin:
+        is_admin_path = request.url.path.startswith("/admin")
+        admin = current_admin_username(request) if is_admin_path else ""
+        if is_admin_path and not admin:
             return RedirectResponse(url=login_redirect_location(request), status_code=303)
         admin_routes = [
             {"method": method, "path": path}
@@ -6504,14 +6675,17 @@ def create_app() -> FastAPI:
         ]
         return templates.TemplateResponse(
             request,
-            "admin_error.html",
+            "not_found.html",
             {
                 "request": request,
                 "admin_user": admin,
-                "csrf_token": current_csrf_token(request),
+                "csrf_token": current_csrf_token(request) if is_admin_path else "",
                 "request_path": request.url.path,
                 "request_method": request.method,
+                "error_detail": str(getattr(exc, "detail", "") or ""),
                 "admin_routes": admin_routes,
+                "is_admin_path": is_admin_path,
+                "recommended_urls": recommended_access_url_entries(),
             },
             status_code=404,
         )
@@ -6528,6 +6702,21 @@ def create_app() -> FastAPI:
             make_legacy_admin_redirect(target_path),
             methods=["GET"],
             name=f"legacy_admin_redirect_{legacy_path.strip('/').replace('/', '_').replace('-', '_')}",
+            include_in_schema=False,
+        )
+
+    def make_legacy_public_redirect(target_path: str):
+        def legacy_public_redirect() -> RedirectResponse:
+            return RedirectResponse(url=target_path, status_code=303)
+
+        return legacy_public_redirect
+
+    for legacy_path, target_path in LEGACY_PUBLIC_REDIRECTS.items():
+        app.add_api_route(
+            legacy_path,
+            make_legacy_public_redirect(target_path),
+            methods=["GET"],
+            name=f"legacy_public_redirect_{legacy_path.strip('/').replace('/', '_').replace('-', '_')}",
             include_in_schema=False,
         )
 
@@ -8390,6 +8579,8 @@ def create_app() -> FastAPI:
         form_references = [item for item in template_references if item["attr"] in {"action", "formaction"}]
         missing_navigation_references = [item for item in navigation_references if not item["exists"]]
         missing_form_references = [item for item in form_references if not item["exists"]]
+        required_routes = required_route_items(app)
+        missing_required_routes = [item for item in required_routes if not item["exists"]]
         return templates.TemplateResponse(
             request,
             "route_health.html",
@@ -8397,9 +8588,12 @@ def create_app() -> FastAPI:
                 "request": request,
                 "admin_user": admin,
                 "csrf_token": current_csrf_token(request),
+                "main_file": str(BASE_DIR / "main.py"),
                 "route_count": len(route_pairs),
                 "admin_get_routes": admin_get_routes,
                 "admin_post_routes": admin_post_routes,
+                "required_routes": required_routes,
+                "missing_required_routes": missing_required_routes,
                 "template_references": template_references,
                 "missing_references": missing_references,
                 "navigation_references": navigation_references,
@@ -8407,6 +8601,7 @@ def create_app() -> FastAPI:
                 "missing_navigation_references": missing_navigation_references,
                 "missing_form_references": missing_form_references,
                 "legacy_redirects": LEGACY_ADMIN_REDIRECTS,
+                "recommended_urls": recommended_access_url_entries(),
             },
         )
 

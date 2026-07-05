@@ -5,23 +5,64 @@
 {% extends "base_admin.html" %}
 
 {% block content %}
-<section class="work-card route-health-summary" data-route-health>
+<section class="work-card route-health-summary" data-route-health data-missing-required-count="{{ missing_required_routes | length }}">
   <div class="section-heading admin-section-heading">
     <h2>路由体检结果</h2>
-    <p>已注册路由 {{ route_count }} 条；模板后台引用 {{ template_references | length }} 条；不匹配 {{ missing_references | length }} 条。</p>
+    <p>已注册路由 {{ route_count }} 条；必备路由缺失 {{ missing_required_routes | length }} 条；模板后台引用 {{ template_references | length }} 条；不匹配 {{ missing_references | length }} 条。</p>
   </div>
-  {% if missing_references %}
-  <div class="alert alert-error">发现模板链接或表单 action 没有对应后端路由，请优先处理下方红色记录。</div>
+  {% if missing_required_routes or missing_references %}
+  <div class="alert alert-error">发现缺失路由或模板链接不匹配，请优先处理下方红色记录。</div>
   {% else %}
-  <div class="alert alert-success">当前扫描到的后台链接和表单 action 均能匹配后端路由。</div>
+  <div class="alert alert-success">后台路由正常。当前扫描到的关键入口、后台链接和表单 action 均能匹配后端路由。</div>
   {% endif %}
   <dl class="detail-grid">
+    <div><dt>main.py</dt><dd><code>{{ main_file }}</code></dd></div>
+    <div><dt>缺失路由数量</dt><dd>{{ missing_required_routes | length }} 条</dd></div>
     <div><dt>GET /admin 路由</dt><dd>{{ admin_get_routes | length }} 条</dd></div>
     <div><dt>POST /admin 路由</dt><dd>{{ admin_post_routes | length }} 条</dd></div>
     <div><dt>未匹配导航项</dt><dd>{{ missing_navigation_references | length }} 条</dd></div>
     <div><dt>未匹配 form action</dt><dd>{{ missing_form_references | length }} 条</dd></div>
     <div><dt>兼容重定向</dt><dd>{{ legacy_redirects | length }} 条</dd></div>
   </dl>
+</section>
+
+<section class="work-card">
+  <div class="section-heading admin-section-heading">
+    <h2>必须存在的关键路由</h2>
+    <p>这些是固定访问入口和核心后台动作，缺失时应重启服务或回滚最近改动。</p>
+  </div>
+  <div class="table-wrap">
+    <table class="ticket-table erp-table route-health-table">
+      <thead>
+        <tr>
+          <th>页面/动作</th>
+          <th>路径</th>
+          <th>状态</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for item in required_routes %}
+        <tr class="{% if not item.exists %}route-health-missing{% endif %}">
+          <td>{{ item.label }}</td>
+          <td><code>{{ item.path }}</code></td>
+          <td>{{ item.status }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="work-card">
+  <div class="section-heading admin-section-heading">
+    <h2>当前推荐访问地址</h2>
+    <p>本地固定端口为 8701；云端部署时只替换域名或服务器 IP，路径保持一致。</p>
+  </div>
+  <div class="route-health-list">
+    {% for item in recommended_urls %}
+    <code>{{ item.label }}：{{ item.url }}</code>
+    {% endfor %}
+  </div>
 </section>
 
 <section class="work-card" data-route-health-navigation>

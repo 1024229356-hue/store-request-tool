@@ -4,14 +4,14 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}{{ page_title | default('止痒轻量 ERP') }}{% endblock %}</title>
-  <link rel="stylesheet" href="/static/style.css?v=ui20260704">
+  <link rel="stylesheet" href="/static/style.css?v={{ asset_version }}">
 </head>
 <body class="page-admin">
   <div class="admin-layout" data-current-menu="{{ current_menu | default('') }}">
     <aside class="sidebar" aria-label="后台导航">
       <a class="sidebar-brand" href="/admin/dashboard">
         <span class="sidebar-logo">
-          <img class="sidebar-logo-img" src="/static/img/zhiyang-logo.png" alt="止痒商店" onerror="this.style.display='none'">
+          <img class="sidebar-logo-img" src="/static/img/zhiyang-logo.png?v={{ asset_version }}" alt="止痒商店" onerror="this.style.display='none'">
           <span class="sidebar-logo-fallback">止</span>
         </span>
         <span>
@@ -147,6 +147,6 @@
       </main>
     </div>
   </div>
-  <script src="/static/app.js?v=ui20260704"></script>
+  <script src="/static/app.js?v={{ asset_version }}"></script>
 </body>
 </html>

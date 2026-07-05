@@ -333,8 +333,8 @@ def test_submit_page_exposes_image_and_file_upload_inputs(tmp_path, monkeypatch)
     assert "data-file-preview" in submit_page.text
     assert "data-clear-files" in submit_page.text
     assert "文件上传" in submit_page.text
-    assert '/static/style.css?v=ui20260704' in submit_page.text
-    assert '/static/app.js?v=ui20260704' in submit_page.text
+    assert re.search(r'/static/style\.css\?v=[A-Za-z0-9._-]+', submit_page.text)
+    assert re.search(r'/static/app\.js\?v=[A-Za-z0-9._-]+', submit_page.text)
 
 
 def test_submit_success_page_highlights_ticket_number_and_copy_action(tmp_path, monkeypatch):
@@ -352,8 +352,8 @@ def test_submit_success_page_highlights_ticket_number_and_copy_action(tmp_path, 
     assert "查询工单" in response.text
     assert "继续提交" in response.text
     assert "后台入口" in response.text
-    assert '/static/style.css?v=ui20260704' in response.text
-    assert '/static/app.js?v=ui20260704' in response.text
+    assert re.search(r'/static/style\.css\?v=[A-Za-z0-9._-]+', response.text)
+    assert re.search(r'/static/app\.js\?v=[A-Za-z0-9._-]+', response.text)
 
 
 def test_upload_script_uses_independent_state_and_clear_selectors():
@@ -1153,7 +1153,7 @@ def test_detail_page_renders_grouped_layout_and_handler_hint(tmp_path, monkeypat
     assert "查看图片" in detail_page.text
     assert "下载文件" in detail_page.text
     assert "timeline-log" in detail_page.text
-    assert '/static/style.css?v=ui20260704' in detail_page.text
+    assert re.search(r'/static/style\.css\?v=[A-Za-z0-9._-]+', detail_page.text)
 
 
 def test_admin_users_allows_multiple_accounts_and_logs_actual_operator(tmp_path, monkeypatch):
@@ -1822,6 +1822,204 @@ def test_version_endpoint_reports_runtime_route_health(tmp_path, monkeypatch):
     assert payload["git_commit"]
     assert "started_at" in payload
     assert ".env" not in json.dumps(payload, ensure_ascii=False)
+
+
+def test_runtime_health_endpoints_report_fixed_access_contract(tmp_path, monkeypatch):
+    client, main = build_client(tmp_path, monkeypatch)
+
+    version = client.get("/__version")
+    health = client.get("/healthz")
+
+    assert version.status_code == 200
+    payload = version.json()
+    assert payload["app"] == "store-request-tool"
+    assert payload["name"] == "止痒 ERP"
+    assert Path(payload["main_file"]).resolve() == (PROJECT_DIR / "main.py").resolve()
+    assert payload["git_commit"]
+    assert payload["route_count"] == len(main.app.routes)
+    assert payload["port"] == 8701
+    assert payload["started_at"]
+    assert payload["required_missing_routes"] == []
+    assert payload["urls"]["submit"] == "http://127.0.0.1:8701/submit"
+    assert payload["urls"]["query"] == "http://127.0.0.1:8701/query"
+    assert payload["urls"]["admin_login"] == "http://127.0.0.1:8701/admin/login"
+    assert payload["urls"]["dashboard"] == "http://127.0.0.1:8701/admin/dashboard"
+    assert payload["urls"]["tickets"] == "http://127.0.0.1:8701/admin"
+    assert payload["urls"]["schedules"] == "http://127.0.0.1:8701/admin/schedules"
+    assert payload["urls"]["employees"] == "http://127.0.0.1:8701/admin/employees"
+    assert payload["urls"]["shift_types"] == "http://127.0.0.1:8701/admin/shift-types"
+    assert payload["urls"]["embedded_pages"] == "http://127.0.0.1:8701/admin/embedded-pages"
+    assert payload["urls"]["route_health"] == "http://127.0.0.1:8701/admin/route-health"
+    assert ".env" not in json.dumps(payload, ensure_ascii=False)
+    assert ADMIN_AUTH[1] not in json.dumps(payload, ensure_ascii=False)
+
+    assert health.status_code == 200
+    health_payload = health.json()
+    assert health_payload["ok"] is True
+    assert health_payload["database"] is True
+    assert health_payload["upload_dir"] is True
+    assert health_payload["embedded_pages_dir"] is True
+    assert health_payload["route_count"] == len(main.app.routes)
+
+
+def test_fixed_access_urls_never_return_404_when_unauthenticated(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch)
+    fixed_paths = [
+        "/",
+        "/submit",
+        "/query",
+        "/admin/login",
+        "/admin/dashboard",
+        "/admin",
+        "/admin/my-work",
+        "/admin/archive",
+        "/admin/trash",
+        "/admin/cleanup",
+        "/admin/employees",
+        "/admin/shift-types",
+        "/admin/schedules",
+        "/admin/settings",
+        "/admin/account",
+        "/admin/system",
+        "/admin/embedded-pages",
+        "/__version",
+        "/healthz",
+    ]
+
+    for path in fixed_paths:
+        response = client.get(path, follow_redirects=False)
+        assert response.status_code in {200, 303}, path
+        assert response.status_code != 404, path
+
+
+def test_legacy_public_and_admin_urls_redirect_with_303(tmp_path, monkeypatch):
+    client, main = build_client(tmp_path, monkeypatch)
+    admin_legacy_paths = {
+        "/admin/personnel": "/admin/employees",
+        "/admin/staff": "/admin/employees",
+        "/admin/employee": "/admin/employees",
+        "/admin/schedule": "/admin/schedules",
+        "/admin/store-schedule": "/admin/schedules",
+        "/admin/shift-type": "/admin/shift-types",
+        "/admin/archive-list": "/admin/archive",
+        "/admin/recycle": "/admin/trash",
+        "/admin/trashes": "/admin/trash",
+        "/admin/home": "/admin/dashboard",
+        "/admin/index": "/admin/dashboard",
+        "/admin/tickets": "/admin",
+        "/admin/orders": "/admin",
+    }
+    public_legacy_paths = {
+        "/ticket": "/query",
+        "/tickets": "/query",
+        "/new": "/submit",
+        "/create": "/submit",
+        "/form": "/submit",
+    }
+
+    for old_path in admin_legacy_paths:
+        unauthenticated = TestClient(main.app).get(old_path, follow_redirects=False)
+        assert unauthenticated.status_code == 303
+        assert unauthenticated.headers["location"].startswith("/admin/login")
+
+    logged_in_client(client)
+    for old_path, new_path in admin_legacy_paths.items():
+        response = client.get(old_path, follow_redirects=False)
+        assert response.status_code == 303, old_path
+        assert response.headers["location"] == new_path
+
+    public_client = TestClient(main.app)
+    for old_path, new_path in public_legacy_paths.items():
+        response = public_client.get(old_path, follow_redirects=False)
+        assert response.status_code == 303, old_path
+        assert response.headers["location"] == new_path
+
+
+def test_not_found_pages_are_html_diagnostics_for_admin_and_public(tmp_path, monkeypatch):
+    client, main = build_client(tmp_path, monkeypatch)
+    unauthenticated = TestClient(main.app).get("/admin/old-missing-link", follow_redirects=False)
+    assert unauthenticated.status_code == 303
+    assert unauthenticated.headers["location"].startswith("/admin/login")
+
+    logged_in_client(client)
+    admin_missing = client.get("/admin/old-missing-link")
+    public_missing = client.get("/old-public-link")
+
+    assert admin_missing.status_code == 404
+    assert "text/html" in admin_missing.headers["content-type"]
+    assert "data-not-found-page" in admin_missing.text
+    assert "data-admin-not-found" in admin_missing.text
+    assert "/admin/old-missing-link" in admin_missing.text
+    assert "页面地址已变更" in admin_missing.text
+    assert "/admin/dashboard" in admin_missing.text
+    assert "/admin" in admin_missing.text
+    assert "/admin/schedules" in admin_missing.text
+    assert "/admin/route-health" in admin_missing.text
+    assert "/__version" in admin_missing.text
+    assert '{"detail":"Not Found"}' not in admin_missing.text
+
+    assert public_missing.status_code == 404
+    assert "text/html" in public_missing.headers["content-type"]
+    assert "data-not-found-page" in public_missing.text
+    assert "返回提交工单" in public_missing.text
+    assert "返回查询工单" in public_missing.text
+    assert '{"detail":"Not Found"}' not in public_missing.text
+
+
+def test_access_url_docs_run_bat_and_asset_versions_are_stable():
+    access_urls = PROJECT_DIR / "ACCESS_URLS.md"
+    assert access_urls.exists()
+    access_content = access_urls.read_text(encoding="utf-8")
+    for text in (
+        "http://127.0.0.1:8701/submit",
+        "http://127.0.0.1:8701/query",
+        "http://127.0.0.1:8701/admin/login",
+        "http://127.0.0.1:8701/admin/dashboard",
+        "http://127.0.0.1:8701/admin",
+        "http://127.0.0.1:8701/admin/schedules",
+        "http://127.0.0.1:8701/admin/route-health",
+        "http://127.0.0.1:8701/__version",
+        "http://127.0.0.1:8701/healthz",
+    ):
+        assert text in access_content
+
+    readme = (PROJECT_DIR / "README.md").read_text(encoding="utf-8")
+    assert "访问地址不变原则" in readme
+    assert "/__version" in readme
+    assert "Ctrl+F5" in readme
+    assert "兼容地址" in readme
+
+    run_bat = (PROJECT_DIR / "run.bat").read_text(encoding="utf-8")
+    assert "止痒 ERP 本地服务启动信息" in run_bat
+    assert "PORT=8701" in run_bat
+    assert "PID" in run_bat
+    assert "WARNING" in run_bat
+    assert "http://127.0.0.1:8701/submit" in run_bat
+    assert "http://127.0.0.1:8701/admin/route-health" in run_bat
+    assert "python -m uvicorn main:app --host 127.0.0.1 --port 8701" in run_bat
+
+    for template_name in ("base_admin.html", "base_public.html", "login.html"):
+        template = (PROJECT_DIR / "templates" / template_name).read_text(encoding="utf-8")
+        assert "/static/style.css?v={{ asset_version }}" in template
+        assert "ui20260704" not in template
+    assert "/static/app.js?v={{ asset_version }}" in (PROJECT_DIR / "templates" / "base_admin.html").read_text(encoding="utf-8")
+    assert "/static/app.js?v={{ asset_version }}" in (PROJECT_DIR / "templates" / "base_public.html").read_text(encoding="utf-8")
+
+
+def test_route_health_reports_required_routes_and_zero_missing(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch)
+    logged_in_client(client)
+
+    page = client.get("/admin/route-health")
+
+    assert page.status_code == 200
+    assert 'data-missing-required-count="0"' in page.text
+    assert "后台路由正常" in page.text
+    assert "必须存在的关键路由" in page.text
+    assert "/admin/dashboard" in page.text
+    assert "/admin/embedded-pages" in page.text
+    assert "当前推荐访问地址" in page.text
+    assert "http://127.0.0.1:8701/admin/route-health" in page.text
 
 
 def test_admin_not_found_uses_diagnostic_html(tmp_path, monkeypatch):
@@ -5130,7 +5328,7 @@ def test_notification_ui_hooks_are_rendered_on_admin_pages(tmp_path, monkeypatch
         assert "data-notification-list" in page.text
         assert "开启桌面提醒" in page.text
         assert "消息" in page.text
-        assert "/static/app.js?v=ui20260704" in page.text
+        assert re.search(r'/static/app\.js\?v=[A-Za-z0-9._-]+', page.text)
 
     script = (PROJECT_DIR / "static" / "app.js").read_text(encoding="utf-8")
     assert "/admin/api/notifications" in script

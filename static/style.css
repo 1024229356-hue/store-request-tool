@@ -664,6 +664,12 @@ a:focus-visible {
   border: 1px solid #a9ddbd;
 }
 
+.alert-warning {
+  background: #fffbeb;
+  color: #92400e;
+  border: 1px solid #f7d48b;
+}
+
 .alert-info {
   background: var(--primary-soft);
   color: var(--primary-dark);

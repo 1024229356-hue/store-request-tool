@@ -53,14 +53,16 @@ SESSION_COOKIE_SECURE=true
 
 - 门店提报页：http://127.0.0.1:8701/submit
 - 门店查询页：http://127.0.0.1:8701/query
+- 门店查看排班：http://127.0.0.1:8701/schedule
+- 后台登录：http://127.0.0.1:8701/admin/login
 - 后台管理页：http://127.0.0.1:8701/admin
 - 业务总览：http://127.0.0.1:8701/admin/dashboard
+- 我的待办：http://127.0.0.1:8701/admin/my-work
 - Excel 导出：http://127.0.0.1:8701/admin/export（需后台登录，推荐从工单管理页右上角点击）
 - 归档工单：http://127.0.0.1:8701/admin/archive
 - 门店排班：http://127.0.0.1:8701/admin/schedules
 - 员工管理：http://127.0.0.1:8701/admin/employees
 - 班次设置：http://127.0.0.1:8701/admin/shift-types
-- 门店查看排班：http://127.0.0.1:8701/schedule
 - 配置管理：http://127.0.0.1:8701/admin/settings
 - 嵌入页面管理：http://127.0.0.1:8701/admin/embedded-pages
 - 回收站：http://127.0.0.1:8701/admin/trash
@@ -69,6 +71,31 @@ SESSION_COOKIE_SECURE=true
 - 系统设置：http://127.0.0.1:8701/admin/system
 - 后台路由体检：http://127.0.0.1:8701/admin/route-health
 - 运行版本诊断：http://127.0.0.1:8701/__version
+- 健康检查：http://127.0.0.1:8701/healthz
+
+完整清单见 `ACCESS_URLS.md`。阿里云部署后路径保持一致，只把 `http://127.0.0.1:8701` 替换为服务器 IP 或域名。
+
+## 访问地址不变原则
+
+系统标准入口不会随功能更新变化。后续如果必须调整某个入口，必须保留旧地址 303 重定向，避免收藏夹、旧文档或历史页面直接 Not Found。
+
+如果访问失败，先打开 `/__version` 检查当前运行版本、端口、固定地址和 `required_missing_routes`。如果 `/__version` 显示缺失路由，说明后端未加载完整或服务没有重启到最新代码。
+
+如果页面按钮异常、样式错位或抽屉/弹窗无反应，优先 Ctrl+F5 强制刷新，确保浏览器加载带最新 `asset_version` 的 CSS/JS。
+
+如果服务启动失败，查看 `run.bat` 黑窗口。启动脚本会打印项目目录、Git commit、Python 路径、`main.py` 路径、端口占用 PID、关键路由缺失情况和常用访问地址。
+
+兼容地址仅用于旧链接过渡，不建议长期收藏：
+
+- `/admin/personnel`、`/admin/staff`、`/admin/employee` -> `/admin/employees`
+- `/admin/schedule`、`/admin/store-schedule` -> `/admin/schedules`
+- `/admin/shift-type` -> `/admin/shift-types`
+- `/admin/archive-list` -> `/admin/archive`
+- `/admin/recycle`、`/admin/trashes` -> `/admin/trash`
+- `/admin/home`、`/admin/index` -> `/admin/dashboard`
+- `/admin/tickets`、`/admin/orders` -> `/admin`
+- `/ticket`、`/tickets` -> `/query`
+- `/new`、`/create`、`/form` -> `/submit`
 
 Logo 文件位置：`static/img/zhiyang-logo.png`。后台侧边栏和公开页面顶部都会引用这个 Logo；如果需要更换 Logo，只替换这个文件即可。不要删除 `static/img/zhiyang-logo.png`，否则页面会回退为文字展示。
 

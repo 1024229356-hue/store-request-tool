@@ -1,28 +1,62 @@
-{% set page_title = '后台路径不存在' %}
-{% set page_subtitle = '当前请求没有匹配到后台路由，请根据下方路径排查旧链接或按钮 action。' %}
-{% set page_eyebrow = '路由诊断' %}
+{% set page_title = '后台路径不存在' if is_admin_path else '页面不存在' %}
+{% set page_subtitle = '当前请求没有匹配到后台路由，请根据下方路径排查旧链接或按钮 action。' if is_admin_path else '当前访问地址没有对应页面，可以从下方固定入口重新进入。' %}
+{% set page_eyebrow = '路由诊断' if is_admin_path else '访问入口' %}
+{% set public_title = '止痒 ERP 页面不存在' %}
+{% set public_section = '访问入口' %}
 {% set current_menu = 'system' %}
-{% extends "base_admin.html" %}
+{% extends "base_admin.html" if is_admin_path else "base_public.html" %}
 
 {% block content %}
-<section class="work-card route-not-found" data-admin-not-found>
+<section class="work-card route-not-found" data-not-found-page {% if is_admin_path %}data-admin-error data-admin-not-found{% endif %}>
   <div class="section-heading admin-section-heading">
-    <h2>你可能访问了旧链接</h2>
-    <p>系统没有找到当前后台路径，但已记录请求信息，方便定位具体点击到了哪个 URL。</p>
+    <h2>{% if is_admin_path %}你可能访问了旧链接{% else %}这个入口暂时不存在{% endif %}</h2>
+    <p>系统没有找到当前路径，但标准入口保持不变。请优先使用下方固定地址进入。</p>
   </div>
   <dl class="detail-grid">
     <div><dt>请求路径</dt><dd><code>{{ request_path }}</code></dd></div>
     <div><dt>请求方法</dt><dd><code>{{ request_method }}</code></dd></div>
   </dl>
-  <div class="form-actions">
-    <a class="primary-button compact" href="/admin/dashboard">返回业务总览</a>
-    <a class="ghost-button compact" href="/admin/route-health">打开路由体检</a>
+  <div class="alert alert-warning">
+    可能原因：页面地址已变更、服务未重启、浏览器缓存旧页面、路由未注册。
   </div>
+  {% if error_detail and error_detail != 'Not Found' %}
+  <div class="alert alert-error">{{ error_detail }}</div>
+  {% endif %}
+  {% if is_admin_path %}
+  <div class="form-actions">
+    <a class="primary-button compact" href="/admin/dashboard">后台首页</a>
+    <a class="ghost-button compact" href="/admin">工单管理</a>
+    <a class="ghost-button compact" href="/admin/schedules">门店排班</a>
+    <a class="ghost-button compact" href="/admin/route-health">路由体检</a>
+    <a class="ghost-button compact" href="/__version">当前版本</a>
+  </div>
+  {% else %}
+  <div class="form-actions">
+    <a class="primary-button compact" href="/submit">返回提交工单</a>
+    <a class="ghost-button compact" href="/query">返回查询工单</a>
+    <a class="ghost-button compact" href="/schedule">查看门店排班</a>
+    <a class="ghost-button compact" href="/__version">当前版本</a>
+  </div>
+  {% endif %}
 </section>
 
 <section class="work-card">
   <div class="section-heading admin-section-heading">
+    <h2>当前推荐访问地址</h2>
+    <p>这些地址是长期固定入口，云端部署时只替换域名或服务器 IP，路径保持一致。</p>
+  </div>
+  <div class="route-health-list">
+    {% for item in recommended_urls %}
+    <a class="ghost-button compact" href="{{ item.url | replace('http://127.0.0.1:8701', '') }}">{{ item.label }}</a>
+    {% endfor %}
+  </div>
+</section>
+
+{% if is_admin_path %}
+<section class="work-card">
+  <div class="section-heading admin-section-heading">
     <h2>当前已注册后台路由</h2>
+    <p>如果某个旧按钮仍指向不存在的地址，可以用这张表定位真实路由。</p>
   </div>
   <div class="table-wrap">
     <table class="ticket-table erp-table route-health-table">
@@ -45,4 +79,5 @@
     </table>
   </div>
 </section>
+{% endif %}
 {% endblock %}
