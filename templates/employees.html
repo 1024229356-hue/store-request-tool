@@ -1,0 +1,130 @@
+{% set page_title = '员工管理' %}
+{% set page_subtitle = '维护门店员工基础信息，离职或停用员工不会进入排班。' %}
+{% set page_eyebrow = '门店排班' %}
+{% set current_menu = 'employees' %}
+{% extends "base_admin.html" %}
+
+{% block topbar_actions %}
+<a class="ghost-button compact" href="/admin/schedules">门店排班</a>
+<a class="ghost-button compact" href="/admin/shift-types">班次设置</a>
+{% endblock %}
+
+{% block content %}
+{% if error %}<div class="alert alert-error">{{ error }}</div>{% endif %}
+
+<section class="filter-card work-card">
+  <div class="section-heading admin-section-heading">
+    <h2>筛选员工</h2>
+    <p>员工只做软停用，不做物理删除。</p>
+  </div>
+  <form class="filter-bar" method="get" action="/admin/employees">
+    <label>
+      <span>门店</span>
+      <select name="store_name">
+        <option value="">全部</option>
+        {% for store in stores %}
+        <option value="{{ store }}" {% if filters.store_name == store %}selected{% endif %}>{{ store }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>
+      <span>状态</span>
+      <select name="status">
+        <option value="">全部</option>
+        {% for item in statuses %}
+        <option value="{{ item }}" {% if filters.status == item %}selected{% endif %}>{{ item }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <div class="filter-actions">
+      <button class="primary-button compact" type="submit">筛选</button>
+      <a class="ghost-button compact" href="/admin/employees">重置</a>
+    </div>
+  </form>
+</section>
+
+<section class="admin-section work-card">
+  <div class="section-heading admin-section-heading">
+    <h2>新增员工</h2>
+  </div>
+  <form class="schedule-form" method="post" action="/admin/employees">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label><span>员工姓名</span><input name="employee_name" required></label>
+    <label>
+      <span>所属门店</span>
+      <select name="store_name" required>
+        {% for store in stores %}<option value="{{ store }}">{{ store }}</option>{% endfor %}
+      </select>
+    </label>
+    <label><span>角色</span><input name="role" placeholder="店长、店员、兼职"></label>
+    <label><span>电话</span><input name="phone" placeholder="手机号"></label>
+    <label>
+      <span>状态</span>
+      <select name="status">
+        {% for item in statuses %}<option value="{{ item }}">{{ item }}</option>{% endfor %}
+      </select>
+    </label>
+    <button class="primary-button compact" type="submit">新增员工</button>
+  </form>
+</section>
+
+<section class="admin-section work-card">
+  <div class="section-heading admin-section-heading">
+    <h2>员工列表</h2>
+    <p>当前 {{ employees | length }} 人。</p>
+  </div>
+  <div class="table-wrap">
+    <table class="ticket-table erp-table">
+      <thead>
+        <tr>
+          <th>姓名</th>
+          <th>门店</th>
+          <th>角色</th>
+          <th>电话</th>
+          <th>状态</th>
+          <th>编辑</th>
+          <th>停用</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for employee in employees %}
+        <tr>
+          <td>{{ employee.employee_name }}</td>
+          <td>{{ employee.store_name }}</td>
+          <td>{{ employee.role or '' }}</td>
+          <td>{{ employee.phone or '' }}</td>
+          <td><span class="badge status-badge">{{ employee.status }}</span></td>
+          <td>
+            <form class="schedule-row-form" method="post" action="/admin/employees/{{ employee.id }}/update">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <input name="employee_name" value="{{ employee.employee_name }}" aria-label="员工姓名">
+              <select name="store_name" aria-label="所属门店">
+                {% for store in stores %}
+                <option value="{{ store }}" {% if employee.store_name == store %}selected{% endif %}>{{ store }}</option>
+                {% endfor %}
+              </select>
+              <input name="role" value="{{ employee.role or '' }}" aria-label="角色">
+              <input name="phone" value="{{ employee.phone or '' }}" aria-label="电话">
+              <select name="status" aria-label="状态">
+                {% for item in statuses %}
+                <option value="{{ item }}" {% if employee.status == item %}selected{% endif %}>{{ item }}</option>
+                {% endfor %}
+              </select>
+              <button class="ghost-button compact" type="submit">保存</button>
+            </form>
+          </td>
+          <td>
+            <form method="post" action="/admin/employees/{{ employee.id }}/disable" onsubmit="return confirm('确认将该员工标记为离职吗？');">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <button class="danger-button compact" type="submit">离职</button>
+            </form>
+          </td>
+        </tr>
+        {% else %}
+        <tr><td class="empty-cell" colspan="7">暂无员工，请先新增员工。</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}

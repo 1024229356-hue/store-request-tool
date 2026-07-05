@@ -33,6 +33,18 @@
         <a class="sidebar-link {% if current_menu == 'archive' %}active{% endif %}" href="/admin/archive">
           <span>归档工单</span>
         </a>
+        <div class="sidebar-nav-group">
+          <span>门店排班</span>
+          <a class="sidebar-link nested-link {% if current_menu == 'schedules' %}active{% endif %}" href="/admin/schedules">
+            <span>门店排班</span>
+          </a>
+          <a class="sidebar-link nested-link {% if current_menu == 'employees' %}active{% endif %}" href="/admin/employees">
+            <span>员工管理</span>
+          </a>
+          <a class="sidebar-link nested-link {% if current_menu == 'shift-types' %}active{% endif %}" href="/admin/shift-types">
+            <span>班次设置</span>
+          </a>
+        </div>
         <a class="sidebar-link" href="/query">
           <span>门店查询</span>
         </a>

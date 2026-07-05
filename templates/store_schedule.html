@@ -1,0 +1,78 @@
+{% set public_title = '门店排班' %}
+{% set public_section = '门店排班' %}
+{% extends "base_public.html" %}
+
+{% block main_class %}mobile-shell store-schedule-shell{% endblock %}
+
+{% block public_actions %}
+<a class="ghost-button compact" href="/submit">提交工单</a>
+<a class="ghost-button compact" href="/query">查询工单</a>
+<a class="ghost-button compact" href="/schedule">查看排班</a>
+<a class="ghost-button compact" href="/admin/dashboard">后台入口</a>
+{% endblock %}
+
+{% block content %}
+{% if error %}<div class="alert alert-error">{{ error }}</div>{% endif %}
+
+<section class="page-header submit-hero store-detail-hero">
+  <p class="eyebrow">门店排班</p>
+  <h1>查看排班</h1>
+  <p class="header-copy">门店可查看本月排班计划，仅支持查看，不支持修改。</p>
+</section>
+
+<section class="form-card">
+  <form class="filter-bar schedule-filter" method="get" action="/schedule">
+    <label>
+      <span>门店</span>
+      <select name="store_name" required>
+        <option value="">请选择门店</option>
+        {% for store in stores %}
+        <option value="{{ store }}" {% if store_name == store %}selected{% endif %}>{{ store }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label><span>月份</span><input name="month" type="month" value="{{ month }}"></label>
+    <div class="filter-actions">
+      <button class="primary-button compact" type="submit">查询排班</button>
+    </div>
+  </form>
+</section>
+
+<section class="form-card">
+  <div class="section-heading">
+    <h2>{{ store_name or '门店' }} {{ month }} 排班</h2>
+  </div>
+  {% if rows %}
+  <div class="table-wrap">
+    <table class="ticket-table erp-table">
+      <thead>
+        <tr>
+          <th>日期</th>
+          <th>星期</th>
+          <th>员工</th>
+          <th>班次</th>
+          <th>时间</th>
+          <th>备注</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in rows %}
+        <tr>
+          <td>{{ row.schedule_date }}</td>
+          <td>{{ row.weekday }}</td>
+          <td>{{ row.employee_name }}</td>
+          <td><span class="shift-badge" style="--shift-color: {{ row.color or '#64748b' }}">{{ row.shift_name }}</span></td>
+          <td>{{ row.start_time or '-' }} - {{ row.end_time or '-' }}</td>
+          <td>{{ row.note or '' }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% elif store_name %}
+  <p class="empty-note">当前门店该月份暂无排班。</p>
+  {% else %}
+  <p class="empty-note">请选择门店和月份后查看排班。</p>
+  {% endif %}
+</section>
+{% endblock %}

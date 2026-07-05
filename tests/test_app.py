@@ -1732,6 +1732,229 @@ def test_bulk_delete_restore_and_hard_delete_preserve_archive_state(tmp_path, mo
     assert not file_path.exists()
 
 
+def test_schedule_admin_pages_auth_defaults_and_navigation(tmp_path, monkeypatch):
+    client, main = build_client(tmp_path, monkeypatch)
+
+    unauth_schedules = TestClient(main.app).get("/admin/schedules", follow_redirects=False)
+    assert unauth_schedules.status_code == 303
+    assert unauth_schedules.headers["location"].startswith("/admin/login")
+    unauth_employees = TestClient(main.app).get("/admin/employees", follow_redirects=False)
+    assert unauth_employees.status_code == 303
+    assert unauth_employees.headers["location"].startswith("/admin/login")
+
+    shift_types = rows_for(tmp_path, "shift_types")
+    assert [row["shift_name"] for row in shift_types] == ["早班", "晚班", "全天", "休息"]
+    assert [row["duration_hours"] for row in shift_types] == [8.0, 8.0, 12.5, 0.0]
+
+    logged_in_client(client)
+    schedules = client.get("/admin/schedules")
+    assert schedules.status_code == 200
+    assert "门店排班" in schedules.text
+    assert 'href="/admin/schedules"' in schedules.text
+    assert 'href="/admin/employees"' in schedules.text
+    assert 'href="/admin/shift-types"' in schedules.text
+    assert client.get("/admin/employees").status_code == 200
+    assert client.get("/admin/shift-types").status_code == 200
+
+    public_query = client.get("/query")
+    assert public_query.status_code == 200
+    assert 'href="/schedule"' in public_query.text
+
+
+def test_employee_and_shift_type_management_lifecycle(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch)
+    logged_in_client(client)
+
+    create_employee = admin_post(
+        client,
+        "/admin/employees",
+        data={
+            "employee_name": "张小排",
+            "store_name": "南京门东店",
+            "role": "店员",
+            "phone": "13800000000",
+            "status": "在职",
+        },
+        follow_redirects=False,
+    )
+    assert create_employee.status_code == 303
+    employees = rows_for(tmp_path, "employees")
+    assert len(employees) == 1
+    assert employees[0]["employee_name"] == "张小排"
+    assert employees[0]["store_name"] == "南京门东店"
+    assert employees[0]["status"] == "在职"
+
+    update_employee = admin_post(
+        client,
+        "/admin/employees/1/update",
+        data={
+            "employee_name": "张小排",
+            "store_name": "南京门东店",
+            "role": "值班员",
+            "phone": "13900000000",
+            "status": "在职",
+        },
+        follow_redirects=False,
+    )
+    assert update_employee.status_code == 303
+    assert rows_for(tmp_path, "employees")[0]["role"] == "值班员"
+
+    disable_employee = admin_post(client, "/admin/employees/1/disable", follow_redirects=False)
+    assert disable_employee.status_code == 303
+    assert rows_for(tmp_path, "employees")[0]["status"] == "离职"
+
+    create_shift = admin_post(
+        client,
+        "/admin/shift-types",
+        data={
+            "shift_name": "中班",
+            "start_time": "12:00",
+            "end_time": "20:00",
+            "duration_hours": "8",
+            "color": "#7c3aed",
+        },
+        follow_redirects=False,
+    )
+    assert create_shift.status_code == 303
+    assert any(row["shift_name"] == "中班" for row in rows_for(tmp_path, "shift_types"))
+
+    update_shift = admin_post(
+        client,
+        "/admin/shift-types/5/update",
+        data={
+            "shift_name": "中班",
+            "start_time": "12:30",
+            "end_time": "20:30",
+            "duration_hours": "8",
+            "color": "#2563eb",
+            "is_active": "1",
+        },
+        follow_redirects=False,
+    )
+    assert update_shift.status_code == 303
+    shift = rows_for(tmp_path, "shift_types")[4]
+    assert shift["start_time"] == "12:30"
+    assert shift["is_active"] == 1
+
+    disable_shift = admin_post(client, "/admin/shift-types/5/disable", follow_redirects=False)
+    assert disable_shift.status_code == 303
+    assert rows_for(tmp_path, "shift_types")[4]["is_active"] == 0
+
+
+def test_schedule_create_update_validation_public_view_export_and_logs(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch)
+    logged_in_client(client)
+    admin_post(
+        client,
+        "/admin/employees",
+        data={"employee_name": "王早班", "store_name": "南京门东店", "role": "店员", "phone": "", "status": "在职"},
+        follow_redirects=False,
+    )
+    admin_post(
+        client,
+        "/admin/employees",
+        data={"employee_name": "李离职", "store_name": "南京门东店", "role": "店员", "phone": "", "status": "离职"},
+        follow_redirects=False,
+    )
+    admin_post(client, "/admin/shift-types/4/disable", follow_redirects=False)
+
+    create_schedule = admin_post(
+        client,
+        "/admin/schedules",
+        data={
+            "store_name": "南京门东店",
+            "employee_id": "1",
+            "schedule_date": "2026-07-06",
+            "shift_type_id": "1",
+            "note": "开店",
+        },
+        follow_redirects=False,
+    )
+    assert create_schedule.status_code == 303
+    schedules = rows_for(tmp_path, "store_schedules")
+    assert len(schedules) == 1
+    assert schedules[0]["employee_id"] == 1
+    assert schedules[0]["shift_type_id"] == 1
+    assert schedules[0]["note"] == "开店"
+
+    update_schedule = admin_post(
+        client,
+        "/admin/schedules",
+        data={
+            "store_name": "南京门东店",
+            "employee_id": "1",
+            "schedule_date": "2026-07-06",
+            "shift_type_id": "2",
+            "note": "改晚班",
+        },
+        follow_redirects=False,
+    )
+    assert update_schedule.status_code == 303
+    schedules = rows_for(tmp_path, "store_schedules")
+    assert len(schedules) == 1
+    assert schedules[0]["shift_type_id"] == 2
+    assert schedules[0]["note"] == "改晚班"
+
+    logs = rows_for(tmp_path, "schedule_logs")
+    assert [row["action"] for row in logs] == ["新增排班", "更新排班"]
+
+    inactive_employee = admin_post(
+        client,
+        "/admin/schedules",
+        data={
+            "store_name": "南京门东店",
+            "employee_id": "2",
+            "schedule_date": "2026-07-07",
+            "shift_type_id": "1",
+            "note": "不允许",
+        },
+    )
+    assert inactive_employee.status_code == 400
+    assert "员工必须是在职状态" in inactive_employee.text
+
+    inactive_shift = admin_post(
+        client,
+        "/admin/schedules",
+        data={
+            "store_name": "南京门东店",
+            "employee_id": "1",
+            "schedule_date": "2026-07-07",
+            "shift_type_id": "4",
+            "note": "停用班次",
+        },
+    )
+    assert inactive_shift.status_code == 400
+    assert "班次必须启用" in inactive_shift.text
+
+    public_page = client.get("/schedule")
+    assert public_page.status_code == 200
+    assert "门店排班" in public_page.text
+    public_store = client.get("/schedule?store_name=南京门东店&month=2026-07")
+    assert public_store.status_code == 200
+    assert "王早班" in public_store.text
+    assert "晚班" in public_store.text
+    assert "改晚班" in public_store.text
+
+    admin_page = client.get("/admin/schedules?store_name=南京门东店&month=2026-07")
+    assert admin_page.status_code == 200
+    assert "当前月份总工时" in admin_page.text
+    assert "每天每个门店排班人数" in admin_page.text
+    assert "王早班" in admin_page.text
+
+    export_response = client.get("/admin/schedules/export?store_name=南京门东店&month=2026-07")
+    assert export_response.status_code == 200
+    assert "%E9%97%A8%E5%BA%97%E6%8E%92%E7%8F%AD_202607.xlsx" in export_response.headers["content-disposition"]
+    workbook = load_workbook(BytesIO(export_response.content))
+    values = list(workbook.active.iter_rows(values_only=True))
+    assert values[0] == ("门店", "日期", "星期", "员工", "角色", "班次", "开始时间", "结束时间", "工时", "备注")
+    assert ("南京门东店", "2026-07-06", "周一", "王早班", "店员", "晚班", "14:00", "22:00", 8, "改晚班") in values
+
+    delete_schedule = admin_post(client, "/admin/schedules/1/delete", follow_redirects=False)
+    assert delete_schedule.status_code == 303
+    assert rows_for(tmp_path, "store_schedules") == []
+    assert rows_for(tmp_path, "schedule_logs")[-1]["action"] == "删除排班"
+
+
 def test_admin_can_soft_delete_collaboration_items_and_supplements(tmp_path, monkeypatch):
     client, _ = build_client(tmp_path, monkeypatch)
     submit_ticket(client)

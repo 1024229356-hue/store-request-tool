@@ -1,0 +1,164 @@
+{% set page_title = '门店排班' %}
+{% set page_subtitle = '第一版只做排班计划，不做考勤打卡和工资核算。' %}
+{% set page_eyebrow = '门店排班' %}
+{% set current_menu = 'schedules' %}
+{% extends "base_admin.html" %}
+
+{% block topbar_actions %}
+<a class="quick-action-button" href="{{ context.export_url }}">导出排班 Excel</a>
+<a class="ghost-button compact" href="/admin/employees">员工管理</a>
+<a class="ghost-button compact" href="/admin/shift-types">班次设置</a>
+<a class="ghost-button compact" href="/schedule">门店查看</a>
+{% endblock %}
+
+{% block content %}
+{% if saved %}<div class="alert alert-success">排班已保存。</div>{% endif %}
+{% if deleted %}<div class="alert alert-success">排班已删除。</div>{% endif %}
+{% if error %}<div class="alert alert-error">{{ error }}</div>{% endif %}
+
+<section class="detail-summary-card work-card">
+  <div><span>当前月份排班天数</span><strong>{{ context.stats.scheduled_day_count }}</strong></div>
+  <div><span>当前门店员工数</span><strong>{{ context.stats.employee_count }}</strong></div>
+  <div><span>当前月份总工时</span><strong>{{ context.stats.total_hours }}</strong></div>
+  <div><span>未排班日期数</span><strong>{{ context.stats.unscheduled_day_count }}</strong></div>
+  <div><span>休息班次数</span><strong>{{ context.stats.rest_shift_count }}</strong></div>
+</section>
+
+<section class="filter-card work-card">
+  <div class="section-heading admin-section-heading">
+    <h2>筛选条件</h2>
+    <p>选择门店和月份后查看排班表。</p>
+  </div>
+  <form class="filter-bar schedule-filter" method="get" action="/admin/schedules">
+    <label>
+      <span>门店</span>
+      <select name="store_name">
+        {% for store in context.stores %}
+        <option value="{{ store }}" {% if context.filters.store_name == store %}selected{% endif %}>{{ store }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label><span>月份</span><input name="month" type="month" value="{{ context.filters.month }}"></label>
+    <label>
+      <span>员工状态</span>
+      <select name="employee_status">
+        <option value="">全部</option>
+        {% for item in employee_statuses %}
+        <option value="{{ item }}" {% if context.filters.employee_status == item %}selected{% endif %}>{{ item }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <div class="filter-actions">
+      <button class="primary-button compact" type="submit">查看排班</button>
+    </div>
+  </form>
+</section>
+
+<section class="admin-section work-card">
+  <div class="section-heading admin-section-heading">
+    <h2>新增 / 修改排班</h2>
+    <p>同一员工同一天只能有一个班次，重复保存会更新原排班。</p>
+  </div>
+  <form class="schedule-form" method="post" action="/admin/schedules">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label>
+      <span>门店</span>
+      <select name="store_name">
+        {% for store in context.stores %}
+        <option value="{{ store }}" {% if context.filters.store_name == store %}selected{% endif %}>{{ store }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>
+      <span>员工</span>
+      <select name="employee_id" required>
+        {% for employee in context.employees if employee.status == '在职' %}
+        <option value="{{ employee.id }}">{{ employee.employee_name }}（{{ employee.store_name }}）</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label><span>日期</span><input name="schedule_date" type="date" value="{{ context.filters.month }}-01" required></label>
+    <label>
+      <span>班次</span>
+      <select name="shift_type_id" required>
+        {% for shift in context.shift_types %}
+        <option value="{{ shift.id }}">{{ shift.shift_name }} {{ shift.start_time or '' }}-{{ shift.end_time or '' }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label><span>备注</span><input name="note" placeholder="可填写交接、特殊安排"></label>
+    <button class="primary-button compact" type="submit">保存排班</button>
+  </form>
+</section>
+
+<section class="admin-section work-card">
+  <div class="section-heading admin-section-heading">
+    <h2>本月排班表</h2>
+    <p>每天每个门店排班人数会显示在表格下方。</p>
+  </div>
+  <div class="schedule-table-wrap">
+    <table class="schedule-table">
+      <thead>
+        <tr>
+          <th class="schedule-employee-col">员工</th>
+          {% for day in context.days %}
+          <th class="{% if day.is_weekend %}schedule-weekend{% endif %} {% if day.is_today %}schedule-today{% endif %}">
+            <span>{{ day.day }}</span>
+            <small>{{ day.weekday }}</small>
+          </th>
+          {% endfor %}
+          <th class="hours-summary">本月工时</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for employee in context.employees %}
+        {% set employee_hours = namespace(total=0) %}
+        <tr>
+          <th class="schedule-employee-col">
+            <strong>{{ employee.employee_name }}</strong>
+            <span>{{ employee.role or '' }} · {{ employee.status }}</span>
+          </th>
+          {% for day in context.days %}
+          {% set day_schedules = context.schedule_map.get(day.date, {}) %}
+          {% set schedule = day_schedules.get(employee.id) %}
+          {% if schedule %}
+          {% set employee_hours.total = employee_hours.total + (schedule.duration_hours or 0) %}
+          {% endif %}
+          <td class="schedule-cell {% if day.is_weekend %}schedule-weekend{% endif %} {% if day.is_today %}schedule-today{% endif %}">
+            {% if schedule %}
+            <span class="shift-badge" style="--shift-color: {{ schedule.color or '#64748b' }}">{{ schedule.shift_name }}</span>
+            {% if schedule.note %}<small>{{ schedule.note }}</small>{% endif %}
+            <form method="post" action="/admin/schedules/{{ schedule.id }}/delete" onsubmit="return confirm('确认删除这条排班吗？');">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <button class="ghost-button compact" type="submit">删除</button>
+            </form>
+            {% else %}
+            <span class="empty-note">-</span>
+            {% endif %}
+          </td>
+          {% endfor %}
+          <td class="hours-summary">{{ employee_hours.total }}</td>
+        </tr>
+        {% else %}
+        <tr><td class="empty-cell" colspan="{{ context.days | length + 2 }}">当前门店暂无员工，请先到员工管理新增员工。</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="admin-section work-card">
+  <div class="section-heading admin-section-heading">
+    <h2>每天每个门店排班人数</h2>
+  </div>
+  <div class="daily-count-grid">
+    {% for day in context.days %}
+    {% set counts = context.daily_store_counts.get(day.date, {}) %}
+    <div>
+      <strong>{{ day.date }} {{ day.weekday }}</strong>
+      <span>{{ context.filters.store_name or '全部门店' }}：{{ counts.get(context.filters.store_name, 0) if context.filters.store_name else counts.values() | sum }} 人</span>
+    </div>
+    {% endfor %}
+  </div>
+</section>
+{% endblock %}

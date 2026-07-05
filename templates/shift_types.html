@@ -1,0 +1,84 @@
+{% set page_title = '班次设置' %}
+{% set page_subtitle = '维护门店可用班次，停用班次不会出现在新增排班中。' %}
+{% set page_eyebrow = '门店排班' %}
+{% set current_menu = 'shift-types' %}
+{% extends "base_admin.html" %}
+
+{% block topbar_actions %}
+<a class="ghost-button compact" href="/admin/schedules">门店排班</a>
+<a class="ghost-button compact" href="/admin/employees">员工管理</a>
+{% endblock %}
+
+{% block content %}
+{% if error %}<div class="alert alert-error">{{ error }}</div>{% endif %}
+
+<section class="admin-section work-card">
+  <div class="section-heading admin-section-heading">
+    <h2>新增班次</h2>
+    <p>默认班次已自动初始化，班次名称不能重复。</p>
+  </div>
+  <form class="schedule-form" method="post" action="/admin/shift-types">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label><span>班次名称</span><input name="shift_name" required></label>
+    <label><span>开始时间</span><input name="start_time" type="time"></label>
+    <label><span>结束时间</span><input name="end_time" type="time"></label>
+    <label><span>工时</span><input name="duration_hours" type="number" min="0" step="0.5" value="0"></label>
+    <label><span>颜色</span><input name="color" type="color" value="#2563eb"></label>
+    <button class="primary-button compact" type="submit">新增班次</button>
+  </form>
+</section>
+
+<section class="admin-section work-card">
+  <div class="section-heading admin-section-heading">
+    <h2>班次列表</h2>
+    <p>共 {{ shift_types | length }} 个班次。</p>
+  </div>
+  <div class="table-wrap">
+    <table class="ticket-table erp-table">
+      <thead>
+        <tr>
+          <th>班次</th>
+          <th>时间</th>
+          <th>工时</th>
+          <th>状态</th>
+          <th>编辑</th>
+          <th>停用</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for shift in shift_types %}
+        <tr>
+          <td><span class="shift-badge" style="--shift-color: {{ shift.color or '#64748b' }}">{{ shift.shift_name }}</span></td>
+          <td>{{ shift.start_time or '-' }} - {{ shift.end_time or '-' }}</td>
+          <td>{{ shift.duration_hours or 0 }}</td>
+          <td>{{ '启用' if shift.is_active else '停用' }}</td>
+          <td>
+            <form class="schedule-row-form" method="post" action="/admin/shift-types/{{ shift.id }}/update">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <input name="shift_name" value="{{ shift.shift_name }}" aria-label="班次名称">
+              <input name="start_time" type="time" value="{{ shift.start_time or '' }}" aria-label="开始时间">
+              <input name="end_time" type="time" value="{{ shift.end_time or '' }}" aria-label="结束时间">
+              <input name="duration_hours" type="number" min="0" step="0.5" value="{{ shift.duration_hours or 0 }}" aria-label="工时">
+              <input name="color" type="color" value="{{ shift.color or '#64748b' }}" aria-label="颜色">
+              <label class="inline-check">
+                <input name="is_active" type="checkbox" value="1" {% if shift.is_active %}checked{% endif %}>
+                <span>启用</span>
+              </label>
+              <button class="ghost-button compact" type="submit">保存</button>
+            </form>
+          </td>
+          <td>
+            <form method="post" action="/admin/shift-types/{{ shift.id }}/disable" onsubmit="return confirm('确认停用该班次吗？');">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <button class="danger-button compact" type="submit">停用</button>
+            </form>
+          </td>
+        </tr>
+        {% else %}
+        <tr><td class="empty-cell" colspan="6">暂无班次。</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}
