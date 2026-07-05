@@ -18,8 +18,74 @@
   <dl class="detail-grid">
     <div><dt>GET /admin 路由</dt><dd>{{ admin_get_routes | length }} 条</dd></div>
     <div><dt>POST /admin 路由</dt><dd>{{ admin_post_routes | length }} 条</dd></div>
+    <div><dt>未匹配导航项</dt><dd>{{ missing_navigation_references | length }} 条</dd></div>
+    <div><dt>未匹配 form action</dt><dd>{{ missing_form_references | length }} 条</dd></div>
     <div><dt>兼容重定向</dt><dd>{{ legacy_redirects | length }} 条</dd></div>
   </dl>
+</section>
+
+<section class="work-card" data-route-health-navigation>
+  <div class="section-heading admin-section-heading">
+    <h2>导航项</h2>
+    <p>所有后台导航必须是 GET 链接，并且只能指向真实后台页面。</p>
+  </div>
+  <div class="table-wrap">
+    <table class="ticket-table erp-table route-health-table">
+      <thead>
+        <tr>
+          <th>模板</th>
+          <th>方法</th>
+          <th>路径</th>
+          <th>状态</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for item in navigation_references %}
+        <tr class="{% if not item.exists %}route-health-missing{% endif %}">
+          <td>{{ item.template }}</td>
+          <td>{{ item.method }}</td>
+          <td><code>{{ item.path }}</code></td>
+          <td>{{ item.status }}</td>
+        </tr>
+        {% else %}
+        <tr><td class="empty-cell" colspan="4">未扫描到后台导航链接。</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="work-card" data-route-health-forms>
+  <div class="section-heading admin-section-heading">
+    <h2>表单 action</h2>
+    <p>所有提交按钮必须落到真实 POST 路由；筛选表单必须落到真实 GET 路由。</p>
+  </div>
+  <div class="table-wrap">
+    <table class="ticket-table erp-table route-health-table">
+      <thead>
+        <tr>
+          <th>模板</th>
+          <th>属性</th>
+          <th>方法</th>
+          <th>路径</th>
+          <th>状态</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for item in form_references %}
+        <tr class="{% if not item.exists %}route-health-missing{% endif %}">
+          <td>{{ item.template }}</td>
+          <td>{{ item.attr }}</td>
+          <td>{{ item.method }}</td>
+          <td><code>{{ item.path }}</code></td>
+          <td>{{ item.status }}</td>
+        </tr>
+        {% else %}
+        <tr><td class="empty-cell" colspan="5">未扫描到后台表单 action。</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
 </section>
 
 <section class="work-card">

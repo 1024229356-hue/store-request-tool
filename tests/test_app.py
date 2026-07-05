@@ -1648,17 +1648,33 @@ def test_bulk_selection_css_keeps_checkboxes_and_toolbar_compact():
 
 def assert_native_bulk_form_wraps_checkbox(page_text, expected_actions):
     form_start = page_text.index('<form id="bulk-ticket-form"')
+    form_tag_end = page_text.index(">", form_start)
     form_end = page_text.index("</form>", form_start)
     checkbox_index = page_text.index('name="ticket_ids"', form_start)
     assert checkbox_index < form_end
+    form_tag = page_text[form_start:form_tag_end]
     fragment = page_text[form_start:form_end]
     assert 'name="csrf_token"' in fragment
     assert 'name="select_scope" value="selected"' in fragment
     assert 'name="source_view"' in fragment
     assert 'data-bulk-form' in fragment
+    assert any(f'action="{action}"' in form_tag for action in expected_actions)
     for action in expected_actions:
-        assert f'formaction="{action}"' in fragment
+        assert f'formaction="{action}"' in fragment or f'action="{action}"' in fragment
     assert fragment.count("data-bulk-submit") == len(expected_actions)
+
+
+def test_admin_javascript_initialization_is_page_isolated():
+    app_js = (PROJECT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+
+    assert "initializeStoreRequestApp" in app_js
+    assert "try {" in app_js
+    assert "catch (error)" in app_js
+    assert "console.error" in app_js
+    assert "safeLocalStorageGet" in app_js
+    assert 'window.localStorage.getItem("storeRequestDesktopNotifications")' not in app_js
+    assert "if (!notificationRoot)" in app_js
+    assert "if (!scheduleBulkForm" in app_js
 
 
 def test_admin_template_links_and_form_actions_have_registered_routes(tmp_path, monkeypatch):
@@ -1714,9 +1730,46 @@ def test_admin_route_health_page_reports_registered_routes_and_template_scan(tmp
     page = client.get("/admin/route-health")
     assert page.status_code == 200
     assert "data-route-health" in page.text
+    assert "data-route-health-navigation" in page.text
+    assert "data-route-health-forms" in page.text
+    assert "未匹配导航项" in page.text
+    assert "未匹配 form action" in page.text
     assert "/admin/my-work" in page.text
     assert "/admin/tickets/bulk-archive" in page.text
     assert "route-health-missing" not in page.text
+
+
+def test_base_admin_navigation_uses_only_canonical_admin_paths():
+    text = (PROJECT_DIR / "templates" / "base_admin.html").read_text(encoding="utf-8")
+    allowed_paths = {
+        "/admin/dashboard",
+        "/admin/my-work",
+        "/admin",
+        "/admin/archive",
+        "/admin/trash",
+        "/admin/cleanup",
+        "/admin/employees",
+        "/admin/shift-types",
+        "/admin/schedules",
+        "/admin/settings",
+        "/admin/account",
+        "/admin/system",
+        "/admin/embedded-pages",
+    }
+    forbidden_paths = {
+        "/admin/personnel",
+        "/admin/staff",
+        "/admin/schedule",
+        "/admin/archive-list",
+        "/admin/recycle",
+    }
+    hrefs = set(re.findall(r'href="(/admin[^"]*)"', text))
+
+    assert not forbidden_paths.intersection(hrefs)
+    for href in hrefs:
+        if "{{" in href:
+            continue
+        assert href in allowed_paths
 
 
 def test_admin_core_pages_return_200_after_login(tmp_path, monkeypatch):
@@ -1782,6 +1835,7 @@ def test_admin_not_found_uses_diagnostic_html(tmp_path, monkeypatch):
 
     assert response.status_code == 404
     assert "text/html" in response.headers["content-type"]
+    assert "data-admin-error" in response.text
     assert "data-admin-not-found" in response.text
     assert "/admin/old-missing-link" in response.text
     assert "GET" in response.text
@@ -2035,7 +2089,7 @@ def test_bulk_delete_restore_and_hard_delete_preserve_archive_state(tmp_path, mo
     assert archived_ticket_no in trash.text
     assert 'name="ticket_ids"' in trash.text
     assert 'action="/admin/tickets/bulk-restore"' in trash.text
-    assert 'action="/admin/tickets/bulk-hard-delete"' in trash.text
+    assert 'formaction="/admin/tickets/bulk-hard-delete"' in trash.text
     assert "建议先执行 backup.sh" in trash.text
     assert "移入回收站" in [row["action"] for row in ticket_action_logs(tmp_path, 1)]
 

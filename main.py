@@ -5071,7 +5071,7 @@ def create_app() -> FastAPI:
         ]
         return templates.TemplateResponse(
             request,
-            "not_found.html",
+            "admin_error.html",
             {
                 "request": request,
                 "admin_user": admin,
@@ -6349,6 +6349,10 @@ def create_app() -> FastAPI:
         admin_post_routes = [path for method, path in route_pairs if method == "POST" and path.startswith("/admin")]
         template_references = scan_template_admin_routes(app)
         missing_references = [item for item in template_references if not item["exists"]]
+        navigation_references = [item for item in template_references if item["attr"] == "href"]
+        form_references = [item for item in template_references if item["attr"] in {"action", "formaction"}]
+        missing_navigation_references = [item for item in navigation_references if not item["exists"]]
+        missing_form_references = [item for item in form_references if not item["exists"]]
         return templates.TemplateResponse(
             request,
             "route_health.html",
@@ -6361,6 +6365,10 @@ def create_app() -> FastAPI:
                 "admin_post_routes": admin_post_routes,
                 "template_references": template_references,
                 "missing_references": missing_references,
+                "navigation_references": navigation_references,
+                "form_references": form_references,
+                "missing_navigation_references": missing_navigation_references,
+                "missing_form_references": missing_form_references,
                 "legacy_redirects": LEGACY_ADMIN_REDIRECTS,
             },
         )

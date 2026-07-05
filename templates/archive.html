@@ -101,7 +101,7 @@
   </form>
 </section>
 
-<form id="bulk-ticket-form" class="bulk-ticket-form" method="post" data-bulk-form data-bulk-root data-filtered-count="{{ pagination.total_count }}">
+<form id="bulk-ticket-form" class="bulk-ticket-form" method="post" action="/admin/tickets/bulk-unarchive" data-bulk-form data-bulk-root data-filtered-count="{{ pagination.total_count }}">
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
   <input name="select_scope" value="selected" type="hidden" data-select-scope>
   <input type="hidden" name="source_view" value="archive">

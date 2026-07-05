@@ -1,0 +1,48 @@
+{% set page_title = '后台路径不存在' %}
+{% set page_subtitle = '当前请求没有匹配到后台路由，请根据下方路径排查旧链接或按钮 action。' %}
+{% set page_eyebrow = '路由诊断' %}
+{% set current_menu = 'system' %}
+{% extends "base_admin.html" %}
+
+{% block content %}
+<section class="work-card route-not-found" data-admin-error data-admin-not-found>
+  <div class="section-heading admin-section-heading">
+    <h2>你可能访问了旧链接</h2>
+    <p>系统没有找到当前后台路径，但已记录请求信息，方便定位具体点击到了哪个 URL。</p>
+  </div>
+  <dl class="detail-grid">
+    <div><dt>请求路径</dt><dd><code>{{ request_path }}</code></dd></div>
+    <div><dt>请求方法</dt><dd><code>{{ request_method }}</code></dd></div>
+  </dl>
+  <div class="form-actions">
+    <a class="primary-button compact" href="/admin/dashboard">返回业务总览</a>
+    <a class="ghost-button compact" href="/admin/route-health">打开路由体检</a>
+  </div>
+</section>
+
+<section class="work-card">
+  <div class="section-heading admin-section-heading">
+    <h2>当前已注册后台路由</h2>
+  </div>
+  <div class="table-wrap">
+    <table class="ticket-table erp-table route-health-table">
+      <thead>
+        <tr>
+          <th>方法</th>
+          <th>路径</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for route in admin_routes %}
+        <tr>
+          <td>{{ route.method }}</td>
+          <td><code>{{ route.path }}</code></td>
+        </tr>
+        {% else %}
+        <tr><td class="empty-cell" colspan="2">当前没有后台路由。</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}

@@ -1,4 +1,20 @@
-document.addEventListener("DOMContentLoaded", () => {
+function safeLocalStorageGet(key) {
+  try {
+    return window.localStorage.getItem(key);
+  } catch (_error) {
+    return "";
+  }
+}
+
+function safeLocalStorageSet(key, value) {
+  try {
+    window.localStorage.setItem(key, value);
+  } catch (_error) {
+    // Browser privacy settings can disable localStorage. The UI remains usable without it.
+  }
+}
+
+function initializeStoreRequestApp() {
   const imageInput = document.querySelector("[data-image-input]");
   const imagePreview = document.querySelector("[data-image-preview]");
   const clearImagesButton = document.querySelector("[data-clear-images]");
@@ -39,7 +55,7 @@ document.addEventListener("DOMContentLoaded", () => {
   let selectedExtraFiles = [];
   let notificationLatestId = 0;
   let notificationInitialLoaded = false;
-  let notificationDesktopEnabled = window.localStorage.getItem("storeRequestDesktopNotifications") === "1";
+  let notificationDesktopEnabled = safeLocalStorageGet("storeRequestDesktopNotifications") === "1";
 
   function formatFileSize(bytes) {
     if (bytes >= 1024 * 1024) {
@@ -826,7 +842,7 @@ document.addEventListener("DOMContentLoaded", () => {
         const permission = await Notification.requestPermission();
         if (permission === "granted") {
           notificationDesktopEnabled = true;
-          window.localStorage.setItem("storeRequestDesktopNotifications", "1");
+          safeLocalStorageSet("storeRequestDesktopNotifications", "1");
           notificationDesktopButton.textContent = "桌面提醒已开启";
           notificationDesktopButton.disabled = true;
         }
@@ -898,4 +914,12 @@ document.addEventListener("DOMContentLoaded", () => {
       }
     });
   });
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+  try {
+    initializeStoreRequestApp();
+  } catch (error) {
+    console.error("Store request UI initialization failed", error);
+  }
 });
