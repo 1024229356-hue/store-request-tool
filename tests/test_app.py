@@ -8,7 +8,7 @@ import zipfile
 from datetime import date, timedelta
 from io import BytesIO
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 from fastapi.testclient import TestClient
 from openpyxl import load_workbook
@@ -1547,6 +1547,92 @@ def test_bulk_selection_css_keeps_checkboxes_and_toolbar_compact():
     assert "min-height: 34px;" in style
 
 
+def assert_native_bulk_form_wraps_checkbox(page_text, expected_actions):
+    form_start = page_text.index('<form id="bulk-ticket-form"')
+    form_end = page_text.index("</form>", form_start)
+    checkbox_index = page_text.index('name="ticket_ids"', form_start)
+    assert checkbox_index < form_end
+    fragment = page_text[form_start:form_end]
+    assert 'name="csrf_token"' in fragment
+    assert 'name="select_scope" value="selected"' in fragment
+    assert 'name="source_view"' in fragment
+    assert 'data-bulk-form' in fragment
+    for action in expected_actions:
+        assert f'formaction="{action}"' in fragment
+
+
+def test_bulk_pages_use_native_form_submission_without_dynamic_ticket_inputs(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch)
+    submit_ticket(client, description="native active ticket")
+    submit_ticket(client, description="native archived ticket")
+    submit_ticket(client, description="native trash ticket")
+    logged_in_client(client)
+
+    admin_post(
+        client,
+        "/admin/tickets/bulk-archive",
+        data={"ticket_ids": ["2"], "select_scope": "selected"},
+        follow_redirects=False,
+    )
+    admin_post(
+        client,
+        "/admin/tickets/bulk-delete",
+        data={"ticket_ids": ["3"], "select_scope": "selected"},
+        follow_redirects=False,
+    )
+
+    assert_native_bulk_form_wraps_checkbox(
+        client.get("/admin").text,
+        ["/admin/tickets/bulk-archive", "/admin/tickets/bulk-delete"],
+    )
+    assert_native_bulk_form_wraps_checkbox(
+        client.get("/admin/archive").text,
+        ["/admin/tickets/bulk-unarchive", "/admin/tickets/bulk-delete"],
+    )
+    assert_native_bulk_form_wraps_checkbox(
+        client.get("/admin/trash").text,
+        ["/admin/tickets/bulk-restore", "/admin/tickets/bulk-hard-delete"],
+    )
+    assert 'formaction="/admin/tickets/bulk-restore" formnovalidate' in client.get("/admin/trash").text
+
+    app_js = (PROJECT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+    assert "appendSelectedTicketInputs" not in app_js
+    assert "data-generated-ticket-id" not in app_js
+
+
+def test_bulk_empty_selection_redirects_back_with_friendly_error(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch)
+    submit_ticket(client, description="empty bulk active")
+    submit_ticket(client, description="empty bulk archived")
+    submit_ticket(client, description="empty bulk trash")
+    logged_in_client(client)
+    admin_post(client, "/admin/tickets/bulk-archive", data={"ticket_ids": ["2"]}, follow_redirects=False)
+    admin_post(client, "/admin/tickets/bulk-delete", data={"ticket_ids": ["3"]}, follow_redirects=False)
+
+    cases = [
+        ("/admin/tickets/bulk-archive", {"source_view": "active"}, "/admin", "请选择要归档的工单"),
+        ("/admin/tickets/bulk-delete", {"source_view": "active"}, "/admin", "请选择要移入回收站的工单"),
+        ("/admin/tickets/bulk-unarchive", {"source_view": "archive"}, "/admin/archive", "请选择要取消归档的工单"),
+        ("/admin/tickets/bulk-restore", {"source_view": "trash"}, "/admin/trash", "请选择要恢复的工单"),
+        (
+            "/admin/tickets/bulk-hard-delete",
+            {"source_view": "trash", "confirm_delete": "1"},
+            "/admin/trash",
+            "请选择要永久删除的回收站工单",
+        ),
+    ]
+
+    for path, data, expected_prefix, message in cases:
+        response = admin_post(client, path, data=data, follow_redirects=False)
+        assert response.status_code == 303
+        location = unquote(response.headers["location"])
+        assert location.startswith(f"{expected_prefix}?")
+        assert f"error={message}" in location
+        page = client.get(response.headers["location"])
+        assert page.status_code == 200
+        assert message in page.text
+
+
 def test_bulk_archive_selected_ticket_moves_to_archive_and_can_unarchive(tmp_path, monkeypatch):
     client, _ = build_client(tmp_path, monkeypatch)
     submit_ticket(client, description="archive selected ticket")
@@ -1841,6 +1927,60 @@ def test_employee_and_shift_type_management_lifecycle(tmp_path, monkeypatch):
     assert rows_for(tmp_path, "shift_types")[4]["is_active"] == 0
 
 
+def test_schedule_module_form_errors_redirect_with_page_alerts(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch)
+    logged_in_client(client)
+
+    employee_error = admin_post(client, "/admin/employees", data={"employee_name": ""}, follow_redirects=False)
+    assert employee_error.status_code == 303
+    assert unquote(employee_error.headers["location"]).startswith("/admin/employees?error=请填写员工姓名")
+    employee_page = client.get(employee_error.headers["location"])
+    assert employee_page.status_code == 200
+    assert "请填写员工姓名" in employee_page.text
+    assert "alert-error" in employee_page.text
+
+    shift_error = admin_post(client, "/admin/shift-types", data={"shift_name": ""}, follow_redirects=False)
+    assert shift_error.status_code == 303
+    assert unquote(shift_error.headers["location"]).startswith("/admin/shift-types?error=请填写班次名称")
+    shift_page = client.get(shift_error.headers["location"])
+    assert shift_page.status_code == 200
+    assert "请填写班次名称" in shift_page.text
+    assert "alert-error" in shift_page.text
+
+    schedule_error = admin_post(client, "/admin/schedules", data={}, follow_redirects=False)
+    assert schedule_error.status_code == 303
+    schedule_location = unquote(schedule_error.headers["location"])
+    assert schedule_location.startswith("/admin/schedules?")
+    assert "error=" in schedule_location
+    schedule_page = client.get(schedule_error.headers["location"])
+    assert schedule_page.status_code == 200
+    assert "alert-error" in schedule_page.text
+
+    update_missing_employee = admin_post(
+        client,
+        "/admin/employees/404/update",
+        data={"employee_name": "ghost", "store_name": "南京门东店", "status": "在职"},
+        follow_redirects=False,
+    )
+    assert update_missing_employee.status_code == 303
+    assert "/admin/employees?error=" in update_missing_employee.headers["location"]
+
+    update_missing_shift = admin_post(
+        client,
+        "/admin/shift-types/404/update",
+        data={"shift_name": "ghost", "duration_hours": "8", "is_active": "1"},
+        follow_redirects=False,
+    )
+    assert update_missing_shift.status_code == 303
+    assert "/admin/shift-types?error=" in update_missing_shift.headers["location"]
+
+    delete_missing_schedule = admin_post(client, "/admin/schedules/404/delete", follow_redirects=False)
+    assert delete_missing_schedule.status_code == 303
+    delete_location = unquote(delete_missing_schedule.headers["location"])
+    assert delete_location.startswith("/admin/schedules?")
+    assert "error=" in delete_location
+
+
 def test_schedule_create_update_validation_public_view_export_and_logs(tmp_path, monkeypatch):
     client, _ = build_client(tmp_path, monkeypatch)
     logged_in_client(client)
@@ -1908,9 +2048,11 @@ def test_schedule_create_update_validation_public_view_export_and_logs(tmp_path,
             "shift_type_id": "1",
             "note": "不允许",
         },
+        follow_redirects=False,
     )
-    assert inactive_employee.status_code == 400
-    assert "员工必须是在职状态" in inactive_employee.text
+    assert inactive_employee.status_code == 303
+    inactive_employee_page = client.get(inactive_employee.headers["location"])
+    assert "员工必须是在职状态" in inactive_employee_page.text
 
     inactive_shift = admin_post(
         client,
@@ -1922,9 +2064,11 @@ def test_schedule_create_update_validation_public_view_export_and_logs(tmp_path,
             "shift_type_id": "4",
             "note": "停用班次",
         },
+        follow_redirects=False,
     )
-    assert inactive_shift.status_code == 400
-    assert "班次必须启用" in inactive_shift.text
+    assert inactive_shift.status_code == 303
+    inactive_shift_page = client.get(inactive_shift.headers["location"])
+    assert "班次必须启用" in inactive_shift_page.text
 
     public_page = client.get("/schedule")
     assert public_page.status_code == 200

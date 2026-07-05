@@ -2529,12 +2529,18 @@ def disable_shift_type(shift_type_id: int) -> None:
         connection.execute("UPDATE shift_types SET is_active = 0, updated_at = ? WHERE id = ?", (now_text(), shift_type_id))
 
 
-def schedule_redirect_url(store_name: str, month: str, saved: int = 0, deleted: int = 0) -> str:
-    params = {"store_name": store_name.strip(), "month": normalize_month(month)}
+def schedule_redirect_url(store_name: str, month: str, saved: int = 0, deleted: int = 0, error: str = "") -> str:
+    try:
+        normalized_month = normalize_month(month)
+    except ValueError:
+        normalized_month = datetime.now().strftime("%Y-%m")
+    params = {"store_name": store_name.strip(), "month": normalized_month}
     if saved:
         params["saved"] = str(saved)
     if deleted:
         params["deleted"] = str(deleted)
+    if error:
+        params["error"] = error
     return "/admin/schedules?" + urlencode({key: value for key, value in params.items() if value})
 
 
@@ -3309,6 +3315,26 @@ def ticket_scope_for_source_view(source_view: str) -> str:
     if source_view == "store":
         return "store"
     return "active"
+
+
+def admin_path_for_source_view(source_view: str) -> str:
+    if source_view == "archive":
+        return "/admin/archive"
+    if source_view == "trash":
+        return "/admin/trash"
+    return "/admin"
+
+
+def admin_redirect_url(source_view: str, **params: object) -> str:
+    path = admin_path_for_source_view(source_view)
+    query = urlencode({key: str(value) for key, value in params.items() if value not in (None, "")})
+    return path + (f"?{query}" if query else "")
+
+
+def form_error_message(exc: Exception) -> str:
+    if isinstance(exc, HTTPException):
+        return str(exc.detail)
+    return str(exc)
 
 
 def admin_ticket_filters_from_form(
@@ -4759,6 +4785,7 @@ def create_app() -> FastAPI:
         page: int = 1,
         unarchived_count: int = 0,
         deleted_count: int = 0,
+        error: str = "",
     ) -> HTMLResponse:
         config = load_app_config()
         active_filters = dict(filters or {})
@@ -4790,6 +4817,7 @@ def create_app() -> FastAPI:
                 "next_page_url": "/admin/archive" + (f"?{next_query}" if next_query else ""),
                 "unarchived_count": unarchived_count,
                 "deleted_count": deleted_count,
+                "error": error,
                 "admin_user": admin,
                 "csrf_token": current_csrf_token(request),
             },
@@ -4803,6 +4831,7 @@ def create_app() -> FastAPI:
         page: int = 1,
         restored_count: int = 0,
         hard_deleted_count: int = 0,
+        error: str = "",
     ) -> HTMLResponse:
         config = load_app_config()
         active_filters = dict(filters or {})
@@ -4830,6 +4859,7 @@ def create_app() -> FastAPI:
                 "next_page_url": "/admin/trash" + (f"?{next_query}" if next_query else ""),
                 "restored_count": restored_count,
                 "hard_deleted_count": hard_deleted_count,
+                "error": error,
                 "admin_user": admin,
                 "csrf_token": current_csrf_token(request),
             },
@@ -4841,6 +4871,7 @@ def create_app() -> FastAPI:
         store_name: str = "",
         status: str = "",
         error: str = "",
+        success: str = "",
         status_code: int = 200,
     ) -> HTMLResponse:
         config = load_app_config()
@@ -4854,6 +4885,7 @@ def create_app() -> FastAPI:
                 "statuses": EMPLOYEE_STATUSES,
                 "filters": {"store_name": store_name.strip(), "status": status.strip()},
                 "error": error,
+                "success": success,
                 "admin_user": admin,
                 "csrf_token": current_csrf_token(request),
             },
@@ -4864,6 +4896,7 @@ def create_app() -> FastAPI:
         request: Request,
         admin: str,
         error: str = "",
+        success: str = "",
         status_code: int = 200,
     ) -> HTMLResponse:
         return templates.TemplateResponse(
@@ -4873,6 +4906,7 @@ def create_app() -> FastAPI:
                 "request": request,
                 "shift_types": fetch_shift_types(),
                 "error": error,
+                "success": success,
                 "admin_user": admin,
                 "csrf_token": current_csrf_token(request),
             },
@@ -5467,6 +5501,7 @@ def create_app() -> FastAPI:
         page: int = Query(1),
         archived_count: int = Query(0),
         deleted_count: int = Query(0),
+        error: str = Query(""),
     ) -> HTMLResponse:
         filters = {
             "store_name": store_name,
@@ -5510,6 +5545,7 @@ def create_app() -> FastAPI:
                 "next_page_url": "/admin" + (f"?{next_query}" if next_query else ""),
                 "archived_count": max(archived_count, 0),
                 "deleted_count": max(deleted_count, 0),
+                "error": error,
                 "admin_user": admin,
                 "csrf_token": current_csrf_token(request),
             },
@@ -5536,8 +5572,10 @@ def create_app() -> FastAPI:
         admin: str = Depends(require_admin),
         store_name: str = Query(""),
         status: str = Query(""),
+        error: str = Query(""),
+        success: str = Query(""),
     ) -> HTMLResponse:
-        return render_employees_page(request, admin, store_name, status)
+        return render_employees_page(request, admin, store_name, status, error=error, success=success)
 
     @app.post("/admin/employees")
     def create_employee_route(
@@ -5553,9 +5591,9 @@ def create_app() -> FastAPI:
         require_admin_csrf(request, csrf_token)
         try:
             create_employee(employee_name, store_name, role, phone, status, load_app_config())
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return RedirectResponse(url="/admin/employees?created=1", status_code=303)
+        except (ValueError, HTTPException) as exc:
+            return RedirectResponse(url="/admin/employees?" + urlencode({"error": form_error_message(exc)}), status_code=303)
+        return RedirectResponse(url="/admin/employees?" + urlencode({"success": "已新增员工。"}), status_code=303)
 
     @app.post("/admin/employees/{employee_id}/update")
     def update_employee_route(
@@ -5572,9 +5610,9 @@ def create_app() -> FastAPI:
         require_admin_csrf(request, csrf_token)
         try:
             update_employee(employee_id, employee_name, store_name, role, phone, status, load_app_config())
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return RedirectResponse(url="/admin/employees?updated=1", status_code=303)
+        except (ValueError, HTTPException) as exc:
+            return RedirectResponse(url="/admin/employees?" + urlencode({"error": form_error_message(exc)}), status_code=303)
+        return RedirectResponse(url="/admin/employees?" + urlencode({"success": "员工信息已保存。"}), status_code=303)
 
     @app.post("/admin/employees/{employee_id}/disable")
     def disable_employee_route(
@@ -5584,12 +5622,20 @@ def create_app() -> FastAPI:
         csrf_token: str = Form(""),
     ) -> RedirectResponse:
         require_admin_csrf(request, csrf_token)
-        disable_employee(employee_id)
-        return RedirectResponse(url="/admin/employees?disabled=1", status_code=303)
+        try:
+            disable_employee(employee_id)
+        except HTTPException as exc:
+            return RedirectResponse(url="/admin/employees?" + urlencode({"error": form_error_message(exc)}), status_code=303)
+        return RedirectResponse(url="/admin/employees?" + urlencode({"success": "员工已标记为离职。"}), status_code=303)
 
     @app.get("/admin/shift-types", response_class=HTMLResponse)
-    def admin_shift_types(request: Request, admin: str = Depends(require_admin)) -> HTMLResponse:
-        return render_shift_types_page(request, admin)
+    def admin_shift_types(
+        request: Request,
+        admin: str = Depends(require_admin),
+        error: str = Query(""),
+        success: str = Query(""),
+    ) -> HTMLResponse:
+        return render_shift_types_page(request, admin, error=error, success=success)
 
     @app.post("/admin/shift-types")
     def create_shift_type_route(
@@ -5605,9 +5651,9 @@ def create_app() -> FastAPI:
         require_admin_csrf(request, csrf_token)
         try:
             create_shift_type(shift_name, start_time, end_time, duration_hours, color)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return RedirectResponse(url="/admin/shift-types?created=1", status_code=303)
+        except (ValueError, HTTPException) as exc:
+            return RedirectResponse(url="/admin/shift-types?" + urlencode({"error": form_error_message(exc)}), status_code=303)
+        return RedirectResponse(url="/admin/shift-types?" + urlencode({"success": "已新增班次。"}), status_code=303)
 
     @app.post("/admin/shift-types/{shift_type_id}/update")
     def update_shift_type_route(
@@ -5633,9 +5679,9 @@ def create_app() -> FastAPI:
                 color,
                 is_active in {"1", "true", "on", "yes"},
             )
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return RedirectResponse(url="/admin/shift-types?updated=1", status_code=303)
+        except (ValueError, HTTPException) as exc:
+            return RedirectResponse(url="/admin/shift-types?" + urlencode({"error": form_error_message(exc)}), status_code=303)
+        return RedirectResponse(url="/admin/shift-types?" + urlencode({"success": "班次已保存。"}), status_code=303)
 
     @app.post("/admin/shift-types/{shift_type_id}/disable")
     def disable_shift_type_route(
@@ -5645,8 +5691,11 @@ def create_app() -> FastAPI:
         csrf_token: str = Form(""),
     ) -> RedirectResponse:
         require_admin_csrf(request, csrf_token)
-        disable_shift_type(shift_type_id)
-        return RedirectResponse(url="/admin/shift-types?disabled=1", status_code=303)
+        try:
+            disable_shift_type(shift_type_id)
+        except HTTPException as exc:
+            return RedirectResponse(url="/admin/shift-types?" + urlencode({"error": form_error_message(exc)}), status_code=303)
+        return RedirectResponse(url="/admin/shift-types?" + urlencode({"success": "班次已停用。"}), status_code=303)
 
     @app.get("/admin/schedules", response_class=HTMLResponse)
     def admin_schedules(
@@ -5657,25 +5706,29 @@ def create_app() -> FastAPI:
         employee_status: str = Query(""),
         saved: int = Query(0),
         deleted: int = Query(0),
+        error: str = Query(""),
     ) -> HTMLResponse:
-        return render_schedules_page(request, admin, store_name, month, employee_status, saved, deleted)
+        return render_schedules_page(request, admin, store_name, month, employee_status, saved, deleted, error=error)
 
     @app.post("/admin/schedules")
     def create_schedule_route(
         request: Request,
         admin: str = Depends(require_admin),
         store_name: str = Form(""),
-        employee_id: int = Form(0),
+        employee_id: str = Form(""),
         schedule_date: str = Form(""),
-        shift_type_id: int = Form(0),
+        shift_type_id: str = Form(""),
         note: str = Form(""),
         csrf_token: str = Form(""),
     ) -> RedirectResponse:
         require_admin_csrf(request, csrf_token)
         try:
-            upsert_schedule(store_name, employee_id, schedule_date, shift_type_id, note, admin)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+            clean_employee_id = int(employee_id or 0)
+            clean_shift_type_id = int(shift_type_id or 0)
+            upsert_schedule(store_name, clean_employee_id, schedule_date, clean_shift_type_id, note, admin)
+        except (ValueError, HTTPException) as exc:
+            month_for_return = schedule_date[:7] if len(schedule_date) >= 7 else datetime.now().strftime("%Y-%m")
+            return RedirectResponse(url=schedule_redirect_url(store_name, month_for_return, error=form_error_message(exc)), status_code=303)
         month = schedule_date[:7] if len(schedule_date) >= 7 else datetime.now().strftime("%Y-%m")
         return RedirectResponse(url=schedule_redirect_url(store_name, month, saved=1), status_code=303)
 
@@ -5687,7 +5740,10 @@ def create_app() -> FastAPI:
         csrf_token: str = Form(""),
     ) -> RedirectResponse:
         require_admin_csrf(request, csrf_token)
-        old_schedule = delete_schedule(schedule_id, admin)
+        try:
+            old_schedule = delete_schedule(schedule_id, admin)
+        except HTTPException as exc:
+            return RedirectResponse(url=schedule_redirect_url("", datetime.now().strftime("%Y-%m"), error=form_error_message(exc)), status_code=303)
         return RedirectResponse(
             url=schedule_redirect_url(str(old_schedule.get("store_name") or ""), str(old_schedule.get("schedule_date") or "")[:7], deleted=1),
             status_code=303,
@@ -5799,6 +5855,7 @@ def create_app() -> FastAPI:
         page: int = Query(1),
         unarchived_count: int = Query(0),
         deleted_count: int = Query(0),
+        error: str = Query(""),
     ) -> HTMLResponse:
         filters = ticket_filters_from_params(
             store_name,
@@ -5820,6 +5877,7 @@ def create_app() -> FastAPI:
             page=page,
             unarchived_count=max(unarchived_count, 0),
             deleted_count=max(deleted_count, 0),
+            error=error,
         )
 
     @app.get("/admin/trash", response_class=HTMLResponse)
@@ -5839,6 +5897,7 @@ def create_app() -> FastAPI:
         page: int = Query(1),
         restored_count: int = Query(0),
         hard_deleted_count: int = Query(0),
+        error: str = Query(""),
     ) -> HTMLResponse:
         filters = ticket_filters_from_params(
             store_name,
@@ -5860,6 +5919,7 @@ def create_app() -> FastAPI:
             page=page,
             restored_count=max(restored_count, 0),
             hard_deleted_count=max(hard_deleted_count, 0),
+            error=error,
         )
 
     @app.get("/admin/cleanup", response_class=HTMLResponse)
@@ -6164,6 +6224,7 @@ def create_app() -> FastAPI:
         filters: Dict[str, str] = Depends(admin_ticket_filters_from_form),
         ticket_ids: Optional[List[int]] = Form(None),
         select_scope: str = Form("selected"),
+        source_view: str = Form("active"),
         sort: str = Form("newest"),
         archive_reason: str = Form("批量归档"),
         csrf_token: str = Form(""),
@@ -6172,9 +6233,9 @@ def create_app() -> FastAPI:
         filters["__ticket_scope"] = "active"
         ids = bulk_ticket_ids_from_scope(ticket_ids or [], select_scope, filters, sort, load_app_config())
         if not ids:
-            raise HTTPException(status_code=400, detail="请选择要归档的工单。")
+            return RedirectResponse(url=admin_redirect_url(source_view, error="请选择要归档的工单"), status_code=303)
         archived_count = bulk_archive_tickets(ids, admin, archive_reason)
-        return RedirectResponse(url=f"/admin?archived_count={archived_count}", status_code=303)
+        return RedirectResponse(url=admin_redirect_url(source_view, archived_count=archived_count), status_code=303)
 
     @app.post("/admin/tickets/bulk-delete")
     def bulk_delete_tickets_route(
@@ -6183,6 +6244,7 @@ def create_app() -> FastAPI:
         filters: Dict[str, str] = Depends(admin_ticket_filters_from_form),
         ticket_ids: Optional[List[int]] = Form(None),
         select_scope: str = Form("selected"),
+        source_view: str = Form("active"),
         sort: str = Form("newest"),
         delete_reason: str = Form("批量移入回收站"),
         csrf_token: str = Form(""),
@@ -6190,10 +6252,9 @@ def create_app() -> FastAPI:
         require_admin_csrf(request, csrf_token)
         ids = bulk_ticket_ids_from_scope(ticket_ids or [], select_scope, filters, sort, load_app_config())
         if not ids:
-            raise HTTPException(status_code=400, detail="请选择要移入回收站的工单。")
+            return RedirectResponse(url=admin_redirect_url(source_view, error="请选择要移入回收站的工单"), status_code=303)
         deleted_count = bulk_soft_delete_tickets(ids, admin, delete_reason)
-        return_path = "/admin/archive" if filters.get("__ticket_scope") == "archive" else "/admin"
-        return RedirectResponse(url=f"{return_path}?deleted_count={deleted_count}", status_code=303)
+        return RedirectResponse(url=admin_redirect_url(source_view, deleted_count=deleted_count), status_code=303)
 
     @app.post("/admin/tickets/bulk-unarchive")
     def bulk_unarchive_tickets_route(
@@ -6202,6 +6263,7 @@ def create_app() -> FastAPI:
         filters: Dict[str, str] = Depends(admin_ticket_filters_from_form),
         ticket_ids: Optional[List[int]] = Form(None),
         select_scope: str = Form("selected"),
+        source_view: str = Form("archive"),
         sort: str = Form("newest"),
         csrf_token: str = Form(""),
     ) -> RedirectResponse:
@@ -6209,9 +6271,9 @@ def create_app() -> FastAPI:
         filters["__ticket_scope"] = "archive"
         ids = bulk_ticket_ids_from_scope(ticket_ids or [], select_scope, filters, sort, load_app_config())
         if not ids:
-            raise HTTPException(status_code=400, detail="请选择要取消归档的工单。")
+            return RedirectResponse(url=admin_redirect_url(source_view, error="请选择要取消归档的工单"), status_code=303)
         unarchived_count = bulk_unarchive_tickets(ids, admin)
-        return RedirectResponse(url=f"/admin/archive?unarchived_count={unarchived_count}", status_code=303)
+        return RedirectResponse(url=admin_redirect_url(source_view, unarchived_count=unarchived_count), status_code=303)
 
     @app.post("/admin/tickets/bulk-restore")
     def bulk_restore_tickets_route(
@@ -6220,6 +6282,7 @@ def create_app() -> FastAPI:
         filters: Dict[str, str] = Depends(admin_ticket_filters_from_form),
         ticket_ids: Optional[List[int]] = Form(None),
         select_scope: str = Form("selected"),
+        source_view: str = Form("trash"),
         sort: str = Form("newest"),
         csrf_token: str = Form(""),
     ) -> RedirectResponse:
@@ -6227,9 +6290,9 @@ def create_app() -> FastAPI:
         filters["__ticket_scope"] = "deleted"
         ids = bulk_ticket_ids_from_scope(ticket_ids or [], select_scope, filters, sort, load_app_config())
         if not ids:
-            raise HTTPException(status_code=400, detail="请选择要恢复的工单。")
+            return RedirectResponse(url=admin_redirect_url(source_view, error="请选择要恢复的工单"), status_code=303)
         restored_count = bulk_restore_tickets(ids, admin)
-        return RedirectResponse(url=f"/admin/trash?restored_count={restored_count}", status_code=303)
+        return RedirectResponse(url=admin_redirect_url(source_view, restored_count=restored_count), status_code=303)
 
     @app.post("/admin/tickets/bulk-hard-delete")
     def bulk_hard_delete_tickets_route(
@@ -6238,19 +6301,20 @@ def create_app() -> FastAPI:
         filters: Dict[str, str] = Depends(admin_ticket_filters_from_form),
         ticket_ids: Optional[List[int]] = Form(None),
         select_scope: str = Form("selected"),
+        source_view: str = Form("trash"),
         sort: str = Form("newest"),
         confirm_delete: str = Form(""),
         csrf_token: str = Form(""),
     ) -> RedirectResponse:
         require_admin_csrf(request, csrf_token)
         if confirm_delete not in {"1", "true", "on", "yes"}:
-            raise HTTPException(status_code=400, detail="请二次确认永久删除。")
+            return RedirectResponse(url=admin_redirect_url(source_view, error="请二次确认永久删除"), status_code=303)
         filters["__ticket_scope"] = "deleted"
         ids = bulk_ticket_ids_from_scope(ticket_ids or [], select_scope, filters, sort, load_app_config())
         if not ids:
-            raise HTTPException(status_code=400, detail="请选择要永久删除的回收站工单。")
+            return RedirectResponse(url=admin_redirect_url(source_view, error="请选择要永久删除的回收站工单"), status_code=303)
         hard_deleted_count = bulk_hard_delete_tickets(ids, admin)
-        return RedirectResponse(url=f"/admin/trash?hard_deleted_count={hard_deleted_count}", status_code=303)
+        return RedirectResponse(url=admin_redirect_url(source_view, hard_deleted_count=hard_deleted_count), status_code=303)
 
     @app.post("/admin/ticket/{ticket_id}/archive")
     def archive_ticket_route(

@@ -431,21 +431,6 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   }
 
-  function clearGeneratedTicketInputs(form) {
-    form.querySelectorAll("[data-generated-ticket-id]").forEach((input) => input.remove());
-  }
-
-  function appendSelectedTicketInputs(form, ids) {
-    ids.forEach((ticketId) => {
-      const input = document.createElement("input");
-      input.type = "hidden";
-      input.name = "ticket_ids";
-      input.value = ticketId;
-      input.dataset.generatedTicketId = "1";
-      form.appendChild(input);
-    });
-  }
-
   if (bulkRoot && ticketCheckboxes.length > 0) {
     const filteredCount = Number(bulkRoot.dataset.filteredCount || "0");
     ticketCheckboxes.forEach((checkbox) => {
@@ -506,7 +491,6 @@ document.addEventListener("DOMContentLoaded", () => {
 
     bulkForms.forEach((form) => {
       form.addEventListener("submit", (event) => {
-        clearGeneratedTicketInputs(form);
         const scope = filteredSelectionActive ? "filtered" : "selected";
         setBulkScope(scope);
         const ids = selectedTicketIds();
@@ -516,13 +500,14 @@ document.addEventListener("DOMContentLoaded", () => {
             window.alert("请先选择工单。");
             return;
           }
-          appendSelectedTicketInputs(form, ids);
         } else if (filteredCount <= 0) {
           event.preventDefault();
           window.alert("当前筛选条件下没有可操作工单。");
           return;
         }
-        const message = scope === "filtered" ? form.dataset.confirmFiltered : form.dataset.confirmSelected;
+        const submitter = event.submitter || document.activeElement;
+        const message =
+          scope === "filtered" ? submitter?.dataset?.confirmFiltered : submitter?.dataset?.confirmSelected;
         if (message && !window.confirm(message)) {
           event.preventDefault();
         }

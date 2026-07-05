@@ -17,6 +17,9 @@
 {% if deleted_count %}
 <div class="alert alert-success">已移入回收站 {{ deleted_count }} 条工单。</div>
 {% endif %}
+{% if error %}
+<div class="alert alert-error">{{ error }}</div>
+{% endif %}
 
 <section class="stats-section work-card" aria-label="统计概览">
   <div class="section-heading admin-section-heading">
@@ -146,7 +149,18 @@
   </form>
 </section>
 
-<section class="bulk-action-bar work-card" data-bulk-toolbar data-bulk-root data-filtered-count="{{ pagination.total_count }}">
+<form id="bulk-ticket-form" class="bulk-ticket-form" method="post" data-bulk-form data-bulk-root data-filtered-count="{{ pagination.total_count }}">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <input name="select_scope" value="selected" type="hidden" data-select-scope>
+  <input type="hidden" name="source_view" value="active">
+  <input type="hidden" name="sort" value="{{ sort }}">
+  <input type="hidden" name="archive_reason" value="批量归档">
+  <input type="hidden" name="delete_reason" value="批量移入回收站">
+  {% for key in ['store_name', 'request_type', 'urgency', 'status', 'assigned_to', 'date_start', 'date_end', 'keyword', 'due_status'] %}
+  <input type="hidden" name="{{ key }}" value="{{ filters.get(key, '') }}">
+  {% endfor %}
+
+<section class="bulk-action-bar work-card" data-bulk-toolbar>
   <div class="bulk-selected-count">
     当前页已选 <strong data-selected-count>0</strong> 条
     <span data-filtered-notice hidden>已选择当前筛选条件下全部 {{ pagination.total_count }} 条工单。</span>
@@ -155,28 +169,8 @@
     <button class="ghost-button compact" type="button" data-select-current-page-button>全选当前页</button>
     <button class="ghost-button compact" type="button" data-clear-selection>清空选择</button>
     <button class="ghost-button compact" type="button" data-select-filtered>按当前筛选条件选择全部结果</button>
-    <form class="inline-action-form" method="post" action="/admin/tickets/bulk-archive" data-bulk-form data-confirm-selected="确认将选中工单归档吗？" data-confirm-filtered="确认对当前筛选条件下全部 {{ pagination.total_count }} 条工单执行归档吗？">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <input name="select_scope" value="selected" type="hidden" data-select-scope>
-      <input type="hidden" name="source_view" value="active">
-      <input type="hidden" name="sort" value="{{ sort }}">
-      <input type="hidden" name="archive_reason" value="批量归档">
-      {% for key in ['store_name', 'request_type', 'urgency', 'status', 'assigned_to', 'date_start', 'date_end', 'keyword', 'due_status'] %}
-      <input type="hidden" name="{{ key }}" value="{{ filters.get(key, '') }}">
-      {% endfor %}
-      <button class="secondary-button compact" type="submit">批量归档</button>
-    </form>
-    <form class="inline-action-form" method="post" action="/admin/tickets/bulk-delete" data-bulk-form data-confirm-selected="确认将选中工单移入回收站吗？" data-confirm-filtered="确认对当前筛选条件下全部 {{ pagination.total_count }} 条工单执行移入回收站吗？">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <input name="select_scope" value="selected" type="hidden" data-select-scope>
-      <input type="hidden" name="source_view" value="active">
-      <input type="hidden" name="sort" value="{{ sort }}">
-      <input type="hidden" name="delete_reason" value="批量移入回收站">
-      {% for key in ['store_name', 'request_type', 'urgency', 'status', 'assigned_to', 'date_start', 'date_end', 'keyword', 'due_status'] %}
-      <input type="hidden" name="{{ key }}" value="{{ filters.get(key, '') }}">
-      {% endfor %}
-      <button class="danger-button compact" type="submit">批量移入回收站</button>
-    </form>
+    <button class="secondary-button compact" type="submit" formaction="/admin/tickets/bulk-archive" data-confirm-selected="确认将选中工单归档吗？" data-confirm-filtered="确认对当前筛选条件下全部 {{ pagination.total_count }} 条工单执行归档吗？">批量归档</button>
+    <button class="danger-button compact" type="submit" formaction="/admin/tickets/bulk-delete" data-confirm-selected="确认将选中工单移入回收站吗？" data-confirm-filtered="确认对当前筛选条件下全部 {{ pagination.total_count }} 条工单执行移入回收站吗？">批量移入回收站</button>
   </div>
 </section>
 
@@ -244,6 +238,7 @@
     </tbody>
   </table>
 </section>
+</form>
 
 <nav class="pagination-bar" aria-label="后台分页">
   <div>当前第 {{ pagination.current_page }} 页 / 共 {{ pagination.total_pages }} 页 / 共 {{ pagination.total_count }} 条工单</div>
