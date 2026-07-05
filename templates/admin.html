@@ -41,32 +41,38 @@
     <p>统计基于当前筛选条件，不受分页影响。</p>
   </div>
   <div class="stats-grid">
-    <article class="stat-card metric-card" data-summary-total="{{ summary.total_count }}">
+    <article class="stat-card metric-card neumorphic-stat-card" data-summary-total="{{ summary.total_count }}">
+      <span class="metric-icon">T</span>
       <span>当前筛选结果</span>
       <strong>{{ summary.total_count }}</strong>
       <small>共 {{ pagination.total_pages }} 页</small>
     </article>
-    <article class="stat-card metric-card">
+    <article class="stat-card metric-card neumorphic-stat-card">
+      <span class="metric-icon">P</span>
       <span>当前页工单</span>
       <strong>{{ tickets|length }}</strong>
       <small>每页 {{ pagination.page_size }} 条</small>
     </article>
-    <article class="stat-card metric-card" data-summary-pending="{{ summary.pending_count }}">
+    <article class="stat-card metric-card neumorphic-stat-card" data-summary-pending="{{ summary.pending_count }}">
+      <span class="metric-icon">N</span>
       <span>待处理</span>
       <strong>{{ summary.pending_count }}</strong>
       <small>需要分配或跟进</small>
     </article>
-    <article class="stat-card metric-card" data-summary-processing="{{ summary.processing_count }}">
+    <article class="stat-card metric-card neumorphic-stat-card" data-summary-processing="{{ summary.processing_count }}">
+      <span class="metric-icon">W</span>
       <span>处理中</span>
       <strong>{{ summary.processing_count }}</strong>
       <small>总部已接手</small>
     </article>
-    <article class="stat-card metric-card stat-alert" data-summary-today-urgent="{{ summary.today_urgent_count }}">
+    <article class="stat-card metric-card neumorphic-stat-card stat-alert" data-summary-today-urgent="{{ summary.today_urgent_count }}">
+      <span class="metric-icon">!</span>
       <span>当天必须处理</span>
       <strong>{{ summary.today_urgent_count }}</strong>
       <small>优先查看</small>
     </article>
-    <article class="stat-card metric-card" data-summary-completed="{{ summary.completed_count }}">
+    <article class="stat-card metric-card neumorphic-stat-card" data-summary-completed="{{ summary.completed_count }}">
+      <span class="metric-icon">OK</span>
       <span>已完成</span>
       <strong>{{ summary.completed_count }}</strong>
       <small>已闭环</small>

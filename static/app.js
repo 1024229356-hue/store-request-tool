@@ -206,12 +206,12 @@ function initializeStoreRequestApp() {
     let toastArea = document.querySelector("[data-app-toast-area]");
     if (!toastArea) {
       toastArea = document.createElement("div");
-      toastArea.className = "app-toast-area";
+      toastArea.className = "app-toast-area toast-container";
       toastArea.dataset.appToastArea = "1";
       document.body.appendChild(toastArea);
     }
     const toast = document.createElement("div");
-    toast.className = `app-toast ${tone}`;
+    toast.className = `app-toast toast-card ${tone}`;
     toast.textContent = message;
     toastArea.appendChild(toast);
     window.setTimeout(() => toast.remove(), 1800);

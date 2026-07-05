@@ -52,10 +52,9 @@ DEFAULT_HANDLERS: List[str] = []
 TASK_STATUSES = ["待处理", "处理中", "已完成"]
 EMPLOYEE_STATUSES = ["在职", "离职", "停用"]
 EMPLOYEE_ROLE_GROUPS = [
-    ("management", "店长 / 经理"),
+    ("management", "管理岗：店长 / 经理 / 区域经理"),
     ("staff", "店员"),
     ("part_time", "兼职"),
-    ("regional", "区域经理"),
     ("unset", "未设置角色"),
     ("other", "其他角色"),
 ]
@@ -3596,7 +3595,7 @@ def employee_role_group_key(role: object) -> str:
     if not role_text:
         return "unset"
     if "区域" in role_text and ("经理" in role_text or "督导" in role_text):
-        return "regional"
+        return "management"
     if "兼职" in role_text:
         return "part_time"
     if "店员" in role_text:
@@ -6739,6 +6738,21 @@ def fetch_dashboard_stats(filters: Dict[str, str]) -> Dict[str, object]:
                 ticket_ids,
             ).fetchone()
         supplement_count = int(row["total"] or 0)
+    month_start = datetime.now().strftime("%Y-%m-01")
+    month_end = (datetime.now().replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+    with get_connection() as connection:
+        schedule_rows = connection.execute(
+            """
+            SELECT schedules.employee_id,
+                   COALESCE(schedules.custom_duration_hours, shift_types.duration_hours, 0) AS duration_hours
+            FROM store_schedules AS schedules
+            LEFT JOIN shift_types ON shift_types.id = schedules.shift_type_id
+            WHERE schedules.schedule_date >= ? AND schedules.schedule_date <= ?
+            """,
+            (month_start, month_end.strftime("%Y-%m-%d")),
+        ).fetchall()
+    schedule_employee_count = len({int(row["employee_id"]) for row in schedule_rows})
+    schedule_total_hours = round(sum(float(row["duration_hours"] or 0) for row in schedule_rows), 2)
     cards = [
         {"label": "总工单数", "count": total, "percent": 100 if total else 0},
         {"label": "待处理数", "count": status_counter.get("待处理", 0), "percent": percent_value(status_counter.get("待处理", 0), total)},
@@ -6766,9 +6780,12 @@ def fetch_dashboard_stats(filters: Dict[str, str]) -> Dict[str, object]:
         "need_supplement_count": status_counter.get("待门店补充", 0),
         "completed_count": status_counter.get("已完成", 0),
         "overdue_count": overdue_count,
+        "due_today_count": due_today_count,
         "today_urgent_count": urgency_counter.get("当天必须处理", 0),
         "attachment_ticket_count": attachment_ticket_count,
         "store_supplement_count": supplement_count,
+        "schedule_employee_count": schedule_employee_count,
+        "schedule_total_hours": schedule_total_hours,
         "recent_tickets": tickets[:5],
         "cards": cards,
         "by_request_type": type_structure,

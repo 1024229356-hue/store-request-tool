@@ -1648,6 +1648,118 @@ def test_bulk_selection_css_keeps_checkboxes_and_toolbar_compact():
     assert "min-height: 34px;" in style
 
 
+def test_soft_neumorphic_design_tokens_and_component_contract():
+    style = (PROJECT_DIR / "static" / "style.css").read_text(encoding="utf-8")
+
+    for token in (
+        "--app-bg: #eef3f9;",
+        "--app-bg-2: #f6f9fd;",
+        "--panel: #f8fbff;",
+        "--panel-glass: rgba(255, 255, 255, 0.72);",
+        "--primary-gradient: linear-gradient(135deg, #5b6cff 0%, #22d3ee 100%);",
+        "--shadow-neu:",
+        "--shadow-inset:",
+        "--radius-xl: 28px;",
+        "--control-h: 42px;",
+    ):
+        assert token in style
+
+    for selector in (
+        ".neu-card",
+        ".primary-button",
+        ".ghost-button",
+        ".secondary-button",
+        ".danger-button",
+        ".modal-backdrop",
+        ".modal-card",
+        ".drawer-overlay",
+        ".drawer-panel",
+        ".toast-container",
+        ".toast-card",
+    ):
+        assert selector in style
+
+    assert re.search(r'input\[type="checkbox"\][^{]*{[^}]*width:\s*18px;[^}]*height:\s*18px;', style, re.DOTALL)
+    assert ".primary-button:hover" in style
+    assert ":focus-visible" in style
+
+
+def test_soft_neumorphic_templates_expose_workbench_sections(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch)
+    submit_ticket(client, description="soft neumorphic ui contract")
+    logged_in_client(client)
+
+    dashboard = client.get("/admin/dashboard")
+    assert dashboard.status_code == 200
+    for fragment in (
+        "dashboard-workbench-hero",
+        "dashboard-metric-grid",
+        "metric-icon",
+        "dashboard-activity-grid",
+    ):
+        assert fragment in dashboard.text
+
+    admin_page = client.get("/admin")
+    assert admin_page.status_code == 200
+    assert "neumorphic-stat-card" in admin_page.text
+    assert "bulk-action-bar" in admin_page.text
+    assert "ticket-no-link" in admin_page.text
+
+    schedule_page = client.get("/admin/schedules?store_name=å—äº¬é—¨ä¸œåº—&month=2026-07")
+    assert schedule_page.status_code == 200
+    for fragment in (
+        "schedule-hero-card",
+        "schedule-filter-card",
+        "schedule-bulk-card",
+        "schedule-view-card",
+        "schedule-view-tabs",
+    ):
+        assert fragment in schedule_page.text
+
+    create_schedule_employee(client, "NeoCardEmp", role="Crew")
+    employees_page = client.get("/admin/employees")
+    assert employees_page.status_code == 200
+    assert "employee-role-group" in employees_page.text
+    assert "employee-card" in employees_page.text
+    assert "drawer-panel" in employees_page.text
+
+    shifts_page = client.get("/admin/shift-types")
+    assert shifts_page.status_code == 200
+    assert "shift-type-card" in shifts_page.text
+    assert "shift-time-axis" in shifts_page.text
+
+
+def test_static_assets_are_versioned_and_core_pages_do_not_404(tmp_path, monkeypatch):
+    client, main = build_client(tmp_path, monkeypatch)
+    submit_ticket(client, description="core page smoke")
+
+    for public_path in ("/submit", "/query", "/schedule", "/__version", "/healthz"):
+        response = client.get(public_path, follow_redirects=False)
+        assert response.status_code == 200
+
+    unauthenticated = TestClient(main.app).get("/admin/dashboard", follow_redirects=False)
+    assert unauthenticated.status_code == 303
+    assert unauthenticated.headers["location"].startswith("/admin/login")
+
+    logged_in_client(client)
+    for admin_path in (
+        "/admin/dashboard",
+        "/admin",
+        "/admin/ticket/1",
+        "/admin/archive",
+        "/admin/trash",
+        "/admin/employees",
+        "/admin/shift-types",
+        "/admin/schedules",
+        "/admin/embedded-pages",
+    ):
+        response = client.get(admin_path, follow_redirects=False)
+        assert response.status_code == 200
+        if response.headers.get("content-type", "").startswith("text/html"):
+            assert re.search(r'/static/style\.css\?v=[A-Za-z0-9._-]+', response.text)
+            assert re.search(r'/static/app\.js\?v=[A-Za-z0-9._-]+', response.text)
+
+
 def assert_native_bulk_form_wraps_checkbox(page_text, expected_actions):
     form_start = page_text.index('<form id="bulk-ticket-form"')
     form_tag_end = page_text.index(">", form_start)

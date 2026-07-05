@@ -7,17 +7,19 @@
 {% block topbar_actions %}
 <a class="quick-action-button" href="/admin">查看工单</a>
 <a class="ghost-button compact" href="/submit">提交工单</a>
+<a class="ghost-button compact" href="/admin/schedules">门店排班</a>
 {% endblock %}
 
 {% block content %}
-<section class="dashboard-hero">
+<section class="dashboard-hero dashboard-workbench-hero">
   <div>
     <p class="eyebrow">SaaS Dashboard</p>
     <h2>止痒运营协同总览</h2>
-    <p>今日新增 {{ stats.today_new_count }} 条工单，当前待处理 {{ stats.pending_count }} 条，当天必须处理 {{ stats.today_urgent_count }} 条。</p>
+    <p>门店需求、排班、人效与协作状态总览。今日新增 {{ stats.today_new_count }} 条工单，当前待处理 {{ stats.pending_count }} 条，当天必须处理 {{ stats.today_urgent_count }} 条。</p>
     <div class="hero-actions">
       <a class="primary-button" href="/admin">查看工单</a>
-      <a class="ghost-button" href="/submit">提交工单</a>
+      <a class="ghost-button" href="/submit">新建工单</a>
+      <a class="ghost-button" href="/admin/schedules">门店排班</a>
     </div>
   </div>
   <div class="hero-date">
@@ -31,46 +33,54 @@
     <h2>核心指标</h2>
     <p>一眼查看总部需要优先处理的工单状态。统计默认不含归档和回收站工单。</p>
   </div>
-  <div class="stats-grid dashboard-card-grid">
-    <article class="stat-card metric-card">
+  <div class="stats-grid dashboard-card-grid dashboard-metric-grid">
+    <article class="stat-card metric-card neumorphic-stat-card">
+      <span class="metric-icon">01</span>
       <span>今日新增工单</span>
       <strong>{{ stats.today_new_count }}</strong>
       <small>今天提交</small>
     </article>
-    <article class="stat-card metric-card">
+    <article class="stat-card metric-card neumorphic-stat-card">
+      <span class="metric-icon">02</span>
       <span>当前待处理</span>
       <strong>{{ stats.pending_count }}</strong>
       <small>需要分派</small>
     </article>
-    <article class="stat-card metric-card">
+    <article class="stat-card metric-card neumorphic-stat-card">
+      <span class="metric-icon">03</span>
       <span>处理中</span>
       <strong>{{ stats.processing_count }}</strong>
       <small>总部接手</small>
     </article>
-    <article class="stat-card metric-card">
-      <span>待门店补充</span>
-      <strong>{{ stats.need_supplement_count }}</strong>
-      <small>等待门店</small>
-    </article>
-    <article class="stat-card metric-card">
-      <span>已完成</span>
-      <strong>{{ stats.completed_count }}</strong>
-      <small>完成闭环</small>
-    </article>
-    <article class="stat-card metric-card stat-alert">
+    <article class="stat-card metric-card neumorphic-stat-card stat-alert">
+      <span class="metric-icon">04</span>
       <span>已超时</span>
       <strong>{{ stats.overdue_count }}</strong>
       <small>优先处理</small>
     </article>
-    <article class="stat-card metric-card">
-      <span>附件工单数</span>
-      <strong>{{ stats.attachment_ticket_count }}</strong>
-      <small>含图片或文件</small>
+    <article class="stat-card metric-card neumorphic-stat-card">
+      <span class="metric-icon">05</span>
+      <span>今日到期</span>
+      <strong>{{ stats.due_today_count }}</strong>
+      <small>请关注截止时间</small>
     </article>
-    <article class="stat-card metric-card">
+    <article class="stat-card metric-card neumorphic-stat-card">
+      <span class="metric-icon">06</span>
       <span>门店补充数</span>
       <strong>{{ stats.store_supplement_count }}</strong>
       <small>补充资料记录</small>
+    </article>
+    <article class="stat-card metric-card neumorphic-stat-card">
+      <span class="metric-icon">07</span>
+      <span>本月排班人数</span>
+      <strong>{{ stats.schedule_employee_count }}</strong>
+      <small>本月已出现的排班员工</small>
+    </article>
+    <article class="stat-card metric-card neumorphic-stat-card">
+      <span class="metric-icon">08</span>
+      <span>本月排班工时</span>
+      <strong>{{ stats.schedule_total_hours }}</strong>
+      <small>计划工时合计</small>
     </article>
   </div>
 </section>
@@ -134,7 +144,7 @@
   </form>
 </section>
 
-<section class="dashboard-grid dashboard-main-grid">
+<section class="dashboard-grid dashboard-main-grid dashboard-activity-grid">
   <article class="dashboard-panel work-card">
     <h2>最近工单动态</h2>
     <div class="recent-ticket-list">
