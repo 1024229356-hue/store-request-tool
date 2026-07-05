@@ -103,12 +103,12 @@
     <button class="ghost-button compact" type="button" data-select-current-page-button>全选当前页</button>
     <button class="ghost-button compact" type="button" data-clear-selection>清空选择</button>
     <button class="ghost-button compact" type="button" data-select-filtered>按当前筛选条件选择全部结果</button>
-    <button class="secondary-button compact" type="submit" formaction="/admin/tickets/bulk-restore" formnovalidate data-confirm-selected="确认恢复选中工单吗？" data-confirm-filtered="确认对当前筛选条件下全部 {{ pagination.total_count }} 条回收站工单执行恢复吗？">批量恢复</button>
+    <button class="secondary-button compact" type="submit" formaction="/admin/tickets/bulk-restore" formnovalidate data-bulk-submit data-confirm-selected="确认恢复选中工单吗？" data-confirm-filtered="确认对当前筛选条件下全部 {{ pagination.total_count }} 条回收站工单执行恢复吗？">批量恢复</button>
     <label class="inline-check">
       <input name="confirm_delete" type="checkbox" value="1" required>
       <span>二次确认永久删除</span>
     </label>
-    <button class="danger-button compact" type="submit" formaction="/admin/tickets/bulk-hard-delete" data-confirm-selected="确认永久删除选中工单及其附件吗？此操作不可恢复。建议先执行 backup.sh。" data-confirm-filtered="确认对当前筛选条件下全部 {{ pagination.total_count }} 条回收站工单执行永久删除吗？此操作不可恢复。建议先执行 backup.sh。">批量永久删除</button>
+    <button class="danger-button compact" type="submit" formaction="/admin/tickets/bulk-hard-delete" data-bulk-submit data-confirm-selected="确认永久删除选中工单及其附件吗？此操作不可恢复。建议先执行 backup.sh。" data-confirm-filtered="确认对当前筛选条件下全部 {{ pagination.total_count }} 条回收站工单执行永久删除吗？此操作不可恢复。建议先执行 backup.sh。">批量永久删除</button>
   </div>
 </section>
 

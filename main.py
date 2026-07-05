@@ -2,6 +2,7 @@ import base64
 import calendar
 import hashlib
 import hmac
+import html
 import json
 import mimetypes
 import os
@@ -50,6 +51,21 @@ DEFAULT_HANDLERS = ["总部商品", "总部运营", "采购", "财务"]
 TASK_STATUSES = ["待处理", "处理中", "已完成"]
 EMPLOYEE_STATUSES = ["在职", "离职", "停用"]
 DUE_STATUS_OPTIONS = ["已超时", "今日到期", "未到期", "未设置", "超时完成", "按时完成"]
+LEGACY_ADMIN_REDIRECTS = {
+    "/admin/personnel": "/admin/employees",
+    "/admin/staff": "/admin/employees",
+    "/admin/employee": "/admin/employees",
+    "/admin/schedule": "/admin/schedules",
+    "/admin/store-schedule": "/admin/schedules",
+    "/admin/shift-type": "/admin/shift-types",
+    "/admin/archive-list": "/admin/archive",
+    "/admin/recycle": "/admin/trash",
+    "/admin/trashes": "/admin/trash",
+}
+BULK_SELECTION_REQUIRED_MESSAGE = "请选择要操作的工单"
+ROUTE_HEALTH_ATTRIBUTE_RE = re.compile(r'\b(href|action|formaction)\s*=\s*(["\'])(.*?)\2', re.IGNORECASE | re.DOTALL)
+ROUTE_HEALTH_FORM_METHOD_RE = re.compile(r'\bmethod\s*=\s*(["\']?)(get|post)\1', re.IGNORECASE)
+ROUTE_HEALTH_JINJA_EXPRESSION_RE = re.compile(r"{{.*?}}", re.DOTALL)
 DEFAULT_SYSTEM = {
     "app_name": "门店需求工单系统",
     "port": 8701,
@@ -447,6 +463,7 @@ def should_redirect_to_login(request: Request) -> bool:
         or path == "/admin/settings"
         or path == "/admin/account"
         or path == "/admin/system"
+        or path == "/admin/route-health"
         or path == "/admin/my-work"
         or path == "/admin/schedules"
         or path == "/admin/employees"
@@ -461,6 +478,7 @@ def should_redirect_to_login(request: Request) -> bool:
         or path.startswith("/admin/tickets")
         or path.startswith("/admin/embedded-pages")
         or path.startswith("/admin/embed")
+        or path in LEGACY_ADMIN_REDIRECTS
     )
 
 
@@ -474,6 +492,77 @@ def require_admin(request: Request) -> str:
         status_code=http_status.HTTP_401_UNAUTHORIZED,
         detail="Login required.",
     )
+
+
+def route_pattern(path: str) -> re.Pattern[str]:
+    escaped = re.escape(path)
+    escaped = re.sub(r"\\\{[^{}:]+:path\\\}", ".+", escaped)
+    escaped = re.sub(r"\\\{[^{}]+\\\}", "[^/]+", escaped)
+    return re.compile(f"^{escaped}$")
+
+
+def route_exists(route_pairs: Iterable[Tuple[str, str]], method: str, path: str) -> bool:
+    for route_method, route_path in route_pairs:
+        if route_method == method and route_pattern(route_path).match(path):
+            return True
+    return False
+
+
+def normalize_admin_route_path(raw_value: str) -> Optional[str]:
+    value = html.unescape(raw_value.strip())
+    if not value.startswith("/admin"):
+        return None
+    value = ROUTE_HEALTH_JINJA_EXPRESSION_RE.sub("1", value)
+    return urlsplit(value).path
+
+
+def infer_template_route_method(template_text: str, attr: str, attr_start: int) -> str:
+    if attr == "href":
+        return "GET"
+    if attr == "formaction":
+        return "POST"
+    form_start = template_text.rfind("<form", 0, attr_start)
+    form_tag_end = template_text.find(">", form_start)
+    form_tag = template_text[form_start:form_tag_end] if form_start >= 0 and form_tag_end >= form_start else ""
+    method_match = ROUTE_HEALTH_FORM_METHOD_RE.search(form_tag)
+    return method_match.group(2).upper() if method_match else "GET"
+
+
+def registered_route_pairs(app: FastAPI) -> List[Tuple[str, str]]:
+    pairs: List[Tuple[str, str]] = []
+    for route in app.routes:
+        path = getattr(route, "path", "")
+        methods = getattr(route, "methods", None) or []
+        for method in sorted(methods):
+            if method != "HEAD":
+                pairs.append((method, path))
+    return sorted(set(pairs), key=lambda item: (item[1], item[0]))
+
+
+def scan_template_admin_routes(app: FastAPI) -> List[Dict[str, object]]:
+    route_pairs = registered_route_pairs(app)
+    results: List[Dict[str, object]] = []
+    for template_path in sorted(TEMPLATES_DIR.glob("*.html")):
+        template_text = template_path.read_text(encoding="utf-8")
+        for match in ROUTE_HEALTH_ATTRIBUTE_RE.finditer(template_text):
+            attr = match.group(1).lower()
+            path = normalize_admin_route_path(match.group(3))
+            if not path:
+                continue
+            method = infer_template_route_method(template_text, attr, match.start())
+            exists = route_exists(route_pairs, method, path)
+            results.append(
+                {
+                    "template": template_path.name,
+                    "attr": attr,
+                    "raw_path": match.group(3),
+                    "path": path,
+                    "method": method,
+                    "exists": exists,
+                    "status": "OK" if exists else "MISSING",
+                }
+            )
+    return results
 
 
 def get_db_path() -> Path:
@@ -4645,6 +4734,21 @@ def create_app() -> FastAPI:
     templates.env.globals["embedded_nav_pages"] = fetch_enabled_embedded_pages
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
+    def make_legacy_admin_redirect(target_path: str):
+        def legacy_admin_redirect(_admin: str = Depends(require_admin)) -> RedirectResponse:
+            return RedirectResponse(url=target_path, status_code=303)
+
+        return legacy_admin_redirect
+
+    for legacy_path, target_path in LEGACY_ADMIN_REDIRECTS.items():
+        app.add_api_route(
+            legacy_path,
+            make_legacy_admin_redirect(target_path),
+            methods=["GET"],
+            name=f"legacy_admin_redirect_{legacy_path.strip('/').replace('/', '_').replace('-', '_')}",
+            include_in_schema=False,
+        )
+
     def render_submit_form(
         request: Request,
         status_code: int = 200,
@@ -5838,6 +5942,29 @@ def create_app() -> FastAPI:
             },
         )
 
+    @app.get("/admin/route-health", response_class=HTMLResponse)
+    def admin_route_health(request: Request, admin: str = Depends(require_admin)) -> HTMLResponse:
+        route_pairs = registered_route_pairs(app)
+        admin_get_routes = [path for method, path in route_pairs if method == "GET" and path.startswith("/admin")]
+        admin_post_routes = [path for method, path in route_pairs if method == "POST" and path.startswith("/admin")]
+        template_references = scan_template_admin_routes(app)
+        missing_references = [item for item in template_references if not item["exists"]]
+        return templates.TemplateResponse(
+            request,
+            "route_health.html",
+            {
+                "request": request,
+                "admin_user": admin,
+                "csrf_token": current_csrf_token(request),
+                "route_count": len(route_pairs),
+                "admin_get_routes": admin_get_routes,
+                "admin_post_routes": admin_post_routes,
+                "template_references": template_references,
+                "missing_references": missing_references,
+                "legacy_redirects": LEGACY_ADMIN_REDIRECTS,
+            },
+        )
+
     @app.get("/admin/archive", response_class=HTMLResponse)
     def admin_archive(
         request: Request,
@@ -6233,7 +6360,7 @@ def create_app() -> FastAPI:
         filters["__ticket_scope"] = "active"
         ids = bulk_ticket_ids_from_scope(ticket_ids or [], select_scope, filters, sort, load_app_config())
         if not ids:
-            return RedirectResponse(url=admin_redirect_url(source_view, error="请选择要归档的工单"), status_code=303)
+            return RedirectResponse(url=admin_redirect_url(source_view, error=BULK_SELECTION_REQUIRED_MESSAGE), status_code=303)
         archived_count = bulk_archive_tickets(ids, admin, archive_reason)
         return RedirectResponse(url=admin_redirect_url(source_view, archived_count=archived_count), status_code=303)
 
@@ -6252,7 +6379,7 @@ def create_app() -> FastAPI:
         require_admin_csrf(request, csrf_token)
         ids = bulk_ticket_ids_from_scope(ticket_ids or [], select_scope, filters, sort, load_app_config())
         if not ids:
-            return RedirectResponse(url=admin_redirect_url(source_view, error="请选择要移入回收站的工单"), status_code=303)
+            return RedirectResponse(url=admin_redirect_url(source_view, error=BULK_SELECTION_REQUIRED_MESSAGE), status_code=303)
         deleted_count = bulk_soft_delete_tickets(ids, admin, delete_reason)
         return RedirectResponse(url=admin_redirect_url(source_view, deleted_count=deleted_count), status_code=303)
 
@@ -6271,7 +6398,7 @@ def create_app() -> FastAPI:
         filters["__ticket_scope"] = "archive"
         ids = bulk_ticket_ids_from_scope(ticket_ids or [], select_scope, filters, sort, load_app_config())
         if not ids:
-            return RedirectResponse(url=admin_redirect_url(source_view, error="请选择要取消归档的工单"), status_code=303)
+            return RedirectResponse(url=admin_redirect_url(source_view, error=BULK_SELECTION_REQUIRED_MESSAGE), status_code=303)
         unarchived_count = bulk_unarchive_tickets(ids, admin)
         return RedirectResponse(url=admin_redirect_url(source_view, unarchived_count=unarchived_count), status_code=303)
 
@@ -6290,7 +6417,7 @@ def create_app() -> FastAPI:
         filters["__ticket_scope"] = "deleted"
         ids = bulk_ticket_ids_from_scope(ticket_ids or [], select_scope, filters, sort, load_app_config())
         if not ids:
-            return RedirectResponse(url=admin_redirect_url(source_view, error="请选择要恢复的工单"), status_code=303)
+            return RedirectResponse(url=admin_redirect_url(source_view, error=BULK_SELECTION_REQUIRED_MESSAGE), status_code=303)
         restored_count = bulk_restore_tickets(ids, admin)
         return RedirectResponse(url=admin_redirect_url(source_view, restored_count=restored_count), status_code=303)
 
@@ -6312,7 +6439,7 @@ def create_app() -> FastAPI:
         filters["__ticket_scope"] = "deleted"
         ids = bulk_ticket_ids_from_scope(ticket_ids or [], select_scope, filters, sort, load_app_config())
         if not ids:
-            return RedirectResponse(url=admin_redirect_url(source_view, error="请选择要永久删除的回收站工单"), status_code=303)
+            return RedirectResponse(url=admin_redirect_url(source_view, error=BULK_SELECTION_REQUIRED_MESSAGE), status_code=303)
         hard_deleted_count = bulk_hard_delete_tickets(ids, admin)
         return RedirectResponse(url=admin_redirect_url(source_view, hard_deleted_count=hard_deleted_count), status_code=303)
 

@@ -67,6 +67,7 @@ SESSION_COOKIE_SECURE=true
 - 测试数据清理：http://127.0.0.1:8701/admin/cleanup
 - 账号设置：http://127.0.0.1:8701/admin/account
 - 系统设置：http://127.0.0.1:8701/admin/system
+- 后台路由体检：http://127.0.0.1:8701/admin/route-health
 
 Logo 文件位置：`static/img/zhiyang-logo.png`。后台侧边栏和公开页面顶部都会引用这个 Logo；如果需要更换 Logo，只替换这个文件即可。不要删除 `static/img/zhiyang-logo.png`，否则页面会回退为文字展示。
 

@@ -22,6 +22,8 @@ document.addEventListener("DOMContentLoaded", () => {
   const notificationReadAll = document.querySelector("[data-notification-read-all]");
   const notificationDesktopButton = document.querySelector("[data-notification-enable-desktop]");
   const notificationToasts = document.querySelector("[data-notification-toasts]");
+  const modalOpenButtons = Array.from(document.querySelectorAll("[data-modal-open]"));
+  const modalCloseButtons = Array.from(document.querySelectorAll("[data-modal-close]"));
 
   let selectedImages = [];
   let selectedFiles = [];
@@ -87,6 +89,33 @@ document.addEventListener("DOMContentLoaded", () => {
     window.setTimeout(() => {
       button.textContent = originalText;
     }, 1600);
+  }
+
+  function findModalTarget(targetName) {
+    if (!targetName) {
+      return null;
+    }
+    const byId = document.getElementById(targetName);
+    if (byId) {
+      return byId;
+    }
+    return Array.from(document.querySelectorAll("[data-modal]")).find((modal) => modal.dataset.modal === targetName) || null;
+  }
+
+  function openModal(modal) {
+    if (!modal) {
+      return;
+    }
+    modal.hidden = false;
+    modal.classList.add("is-open");
+  }
+
+  function closeModal(modal) {
+    if (!modal) {
+      return;
+    }
+    modal.classList.remove("is-open");
+    modal.hidden = true;
   }
 
   function updateRequestTypeHint() {
@@ -691,6 +720,22 @@ document.addEventListener("DOMContentLoaded", () => {
     requestTypeSelect.addEventListener("change", updateRequestTypeHint);
     updateRequestTypeHint();
   }
+
+  modalOpenButtons.forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      openModal(findModalTarget(button.dataset.modalOpen || ""));
+    });
+  });
+
+  modalCloseButtons.forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      closeModal(button.closest("[data-modal]"));
+    });
+  });
 
   if (notificationRoot) {
     if (notificationDesktopButton && "Notification" in window) {

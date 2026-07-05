@@ -1,0 +1,102 @@
+{% set page_title = '后台路由体检' %}
+{% set page_subtitle = '核对后台导航、按钮、表单 action 与 FastAPI 路由注册是否一致。' %}
+{% set page_eyebrow = '运行维护' %}
+{% set current_menu = 'system' %}
+{% extends "base_admin.html" %}
+
+{% block content %}
+<section class="work-card route-health-summary" data-route-health>
+  <div class="section-heading admin-section-heading">
+    <h2>路由体检结果</h2>
+    <p>已注册路由 {{ route_count }} 条；模板后台引用 {{ template_references | length }} 条；不匹配 {{ missing_references | length }} 条。</p>
+  </div>
+  {% if missing_references %}
+  <div class="alert alert-error">发现模板链接或表单 action 没有对应后端路由，请优先处理下方红色记录。</div>
+  {% else %}
+  <div class="alert alert-success">当前扫描到的后台链接和表单 action 均能匹配后端路由。</div>
+  {% endif %}
+  <dl class="detail-grid">
+    <div><dt>GET /admin 路由</dt><dd>{{ admin_get_routes | length }} 条</dd></div>
+    <div><dt>POST /admin 路由</dt><dd>{{ admin_post_routes | length }} 条</dd></div>
+    <div><dt>兼容重定向</dt><dd>{{ legacy_redirects | length }} 条</dd></div>
+  </dl>
+</section>
+
+<section class="work-card">
+  <div class="section-heading admin-section-heading">
+    <h2>模板链接与表单</h2>
+  </div>
+  <div class="table-wrap">
+    <table class="ticket-table erp-table route-health-table">
+      <thead>
+        <tr>
+          <th>模板</th>
+          <th>属性</th>
+          <th>方法</th>
+          <th>路径</th>
+          <th>状态</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for item in template_references %}
+        <tr class="{% if not item.exists %}route-health-missing{% endif %}">
+          <td>{{ item.template }}</td>
+          <td>{{ item.attr }}</td>
+          <td>{{ item.method }}</td>
+          <td><code>{{ item.path }}</code></td>
+          <td>{{ item.status }}</td>
+        </tr>
+        {% else %}
+        <tr><td class="empty-cell" colspan="5">未扫描到后台模板链接。</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="work-card">
+  <div class="section-heading admin-section-heading">
+    <h2>GET /admin 路由</h2>
+  </div>
+  <div class="route-health-list">
+    {% for path in admin_get_routes %}
+    <code>{{ path }}</code>
+    {% endfor %}
+  </div>
+</section>
+
+<section class="work-card">
+  <div class="section-heading admin-section-heading">
+    <h2>POST /admin 路由</h2>
+  </div>
+  <div class="route-health-list">
+    {% for path in admin_post_routes %}
+    <code>{{ path }}</code>
+    {% endfor %}
+  </div>
+</section>
+
+<section class="work-card">
+  <div class="section-heading admin-section-heading">
+    <h2>历史路径兼容重定向</h2>
+  </div>
+  <div class="table-wrap">
+    <table class="ticket-table erp-table route-health-table">
+      <thead>
+        <tr>
+          <th>旧路径</th>
+          <th>新路径</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for old_path, new_path in legacy_redirects.items() %}
+        <tr>
+          <td><code>{{ old_path }}</code></td>
+          <td><code>{{ new_path }}</code></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}

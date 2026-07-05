@@ -1,4 +1,5 @@
 import base64
+import html
 import importlib
 import json
 import re
@@ -8,7 +9,7 @@ import zipfile
 from datetime import date, timedelta
 from io import BytesIO
 from pathlib import Path
-from urllib.parse import quote, unquote
+from urllib.parse import quote, unquote, urlsplit
 
 from fastapi.testclient import TestClient
 from openpyxl import load_workbook
@@ -72,6 +73,54 @@ EXPECTED_EXPORT_HEADERS = [
     "是否超时",
     "时效状态",
 ]
+
+ROUTE_ATTRIBUTE_RE = re.compile(r'\b(href|action|formaction)\s*=\s*(["\'])(.*?)\2', re.IGNORECASE | re.DOTALL)
+FORM_METHOD_RE = re.compile(r'\bmethod\s*=\s*(["\']?)(get|post)\1', re.IGNORECASE)
+JINJA_EXPRESSION_RE = re.compile(r"{{.*?}}", re.DOTALL)
+
+
+def route_pattern(path):
+    escaped = re.escape(path)
+    escaped = re.sub(r"\\\{[^{}:]+:path\\\}", ".+", escaped)
+    escaped = re.sub(r"\\\{[^{}]+\\\}", "[^/]+", escaped)
+    return re.compile(f"^{escaped}$")
+
+
+def route_exists(routes, method, path):
+    for route_method, route_path in routes:
+        if route_method == method and route_pattern(route_path).match(path):
+            return True
+    return False
+
+
+def normalized_admin_path(raw_value):
+    value = html.unescape(raw_value.strip())
+    if not value.startswith("/admin"):
+        return None
+    value = JINJA_EXPRESSION_RE.sub("1", value)
+    return urlsplit(value).path
+
+
+def template_admin_route_references():
+    references = []
+    for template_path in sorted((PROJECT_DIR / "templates").glob("*.html")):
+        text = template_path.read_text(encoding="utf-8")
+        for match in ROUTE_ATTRIBUTE_RE.finditer(text):
+            attr = match.group(1).lower()
+            path = normalized_admin_path(match.group(3))
+            if not path:
+                continue
+            method = "GET"
+            if attr == "formaction":
+                method = "POST"
+            elif attr == "action":
+                form_start = text.rfind("<form", 0, match.start())
+                form_tag_end = text.find(">", form_start)
+                form_tag = text[form_start:form_tag_end] if form_start >= 0 and form_tag_end >= form_start else ""
+                method_match = FORM_METHOD_RE.search(form_tag)
+                method = method_match.group(2).upper() if method_match else "GET"
+            references.append((template_path.name, attr, path, method))
+    return references
 
 
 def write_config(config_dir, overrides=None):
@@ -1559,6 +1608,104 @@ def assert_native_bulk_form_wraps_checkbox(page_text, expected_actions):
     assert 'data-bulk-form' in fragment
     for action in expected_actions:
         assert f'formaction="{action}"' in fragment
+    assert fragment.count("data-bulk-submit") == len(expected_actions)
+
+
+def test_admin_template_links_and_form_actions_have_registered_routes(tmp_path, monkeypatch):
+    _, main = build_client(tmp_path, monkeypatch)
+    routes = {
+        (method, route.path)
+        for route in main.app.routes
+        for method in (getattr(route, "methods", None) or [])
+        if hasattr(route, "path")
+    }
+
+    missing = [
+        f"{template_name} {attr} {method} {path}"
+        for template_name, attr, path, method in template_admin_route_references()
+        if not route_exists(routes, method, path)
+    ]
+
+    assert missing == []
+
+
+def test_legacy_admin_paths_redirect_safely_after_login(tmp_path, monkeypatch):
+    client, main = build_client(tmp_path, monkeypatch)
+    legacy_paths = {
+        "/admin/personnel": "/admin/employees",
+        "/admin/staff": "/admin/employees",
+        "/admin/employee": "/admin/employees",
+        "/admin/schedule": "/admin/schedules",
+        "/admin/store-schedule": "/admin/schedules",
+        "/admin/shift-type": "/admin/shift-types",
+        "/admin/archive-list": "/admin/archive",
+        "/admin/recycle": "/admin/trash",
+        "/admin/trashes": "/admin/trash",
+    }
+
+    unauthenticated = TestClient(main.app).get("/admin/personnel", follow_redirects=False)
+    assert unauthenticated.status_code == 303
+    assert unauthenticated.headers["location"].startswith("/admin/login")
+
+    logged_in_client(client)
+    for old_path, new_path in legacy_paths.items():
+        response = client.get(old_path, follow_redirects=False)
+        assert response.status_code == 303
+        assert response.headers["location"] == new_path
+
+
+def test_admin_route_health_page_reports_registered_routes_and_template_scan(tmp_path, monkeypatch):
+    client, main = build_client(tmp_path, monkeypatch)
+    unauthenticated = TestClient(main.app).get("/admin/route-health", follow_redirects=False)
+    assert unauthenticated.status_code == 303
+    assert unauthenticated.headers["location"].startswith("/admin/login")
+
+    logged_in_client(client)
+    page = client.get("/admin/route-health")
+    assert page.status_code == 200
+    assert "data-route-health" in page.text
+    assert "/admin/my-work" in page.text
+    assert "/admin/tickets/bulk-archive" in page.text
+    assert "route-health-missing" not in page.text
+
+
+def test_admin_core_pages_return_200_after_login(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch)
+    logged_in_client(client)
+
+    for path in (
+        "/admin/dashboard",
+        "/admin/my-work",
+        "/admin",
+        "/admin/archive",
+        "/admin/trash",
+        "/admin/cleanup",
+        "/admin/employees",
+        "/admin/shift-types",
+        "/admin/schedules",
+        "/admin/settings",
+        "/admin/account",
+        "/admin/system",
+        "/admin/embedded-pages",
+        "/admin/route-health",
+    ):
+        response = client.get(path)
+        assert response.status_code == 200, path
+        assert '{"detail":"Not Found"}' not in response.text
+
+
+def test_modal_open_and_close_controls_do_not_submit_or_navigate():
+    for template_name in ("employees.html", "schedules.html", "shift_types.html"):
+        text = (PROJECT_DIR / "templates" / template_name).read_text(encoding="utf-8")
+        for match in re.finditer(r"<(?P<tag>\w+)\b[^>]*\bdata-modal-open\b[^>]*>", text, re.IGNORECASE):
+            tag = match.group(0)
+            assert match.group("tag").lower() == "button", f"{template_name}: {tag}"
+            assert re.search(r'\btype\s*=\s*(["\'])button\1', tag, re.IGNORECASE), f"{template_name}: {tag}"
+        for match in re.finditer(r"<(?P<tag>\w+)\b[^>]*\bdata-modal-close\b[^>]*>", text, re.IGNORECASE):
+            tag = match.group(0)
+            assert match.group("tag").lower() == "button", f"{template_name}: {tag}"
+            assert re.search(r'\btype\s*=\s*(["\'])button\1', tag, re.IGNORECASE), f"{template_name}: {tag}"
+        assert not re.search(r"<a\b[^>]*\bdata-modal-open\b", text, re.IGNORECASE), template_name
 
 
 def test_bulk_pages_use_native_form_submission_without_dynamic_ticket_inputs(tmp_path, monkeypatch):
@@ -1610,15 +1757,15 @@ def test_bulk_empty_selection_redirects_back_with_friendly_error(tmp_path, monke
     admin_post(client, "/admin/tickets/bulk-delete", data={"ticket_ids": ["3"]}, follow_redirects=False)
 
     cases = [
-        ("/admin/tickets/bulk-archive", {"source_view": "active"}, "/admin", "请选择要归档的工单"),
-        ("/admin/tickets/bulk-delete", {"source_view": "active"}, "/admin", "请选择要移入回收站的工单"),
-        ("/admin/tickets/bulk-unarchive", {"source_view": "archive"}, "/admin/archive", "请选择要取消归档的工单"),
-        ("/admin/tickets/bulk-restore", {"source_view": "trash"}, "/admin/trash", "请选择要恢复的工单"),
+        ("/admin/tickets/bulk-archive", {"source_view": "active"}, "/admin", "请选择要操作的工单"),
+        ("/admin/tickets/bulk-delete", {"source_view": "active"}, "/admin", "请选择要操作的工单"),
+        ("/admin/tickets/bulk-unarchive", {"source_view": "archive"}, "/admin/archive", "请选择要操作的工单"),
+        ("/admin/tickets/bulk-restore", {"source_view": "trash"}, "/admin/trash", "请选择要操作的工单"),
         (
             "/admin/tickets/bulk-hard-delete",
             {"source_view": "trash", "confirm_delete": "1"},
             "/admin/trash",
-            "请选择要永久删除的回收站工单",
+            "请选择要操作的工单",
         ),
     ]
 

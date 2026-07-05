@@ -619,6 +619,38 @@ a:focus-visible {
   border: 1px solid #a9ddbd;
 }
 
+.route-health-summary .detail-grid {
+  margin-top: 12px;
+}
+
+.route-health-table code,
+.route-health-list code {
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 12px;
+}
+
+.route-health-missing td {
+  background: var(--danger-bg);
+  color: var(--danger);
+  font-weight: 700;
+}
+
+.route-health-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.route-health-list code {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--muted-bg);
+  color: var(--text);
+}
+
 .upload-card {
   display: grid;
   gap: 10px;
