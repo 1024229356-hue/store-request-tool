@@ -19,7 +19,7 @@
 {% if error %}<div class="alert alert-error">{{ error }}</div>{% endif %}
 
 <section class="schedule-workbench" data-schedule-view="{{ context.view }}">
-  <div class="schedule-hero-card schedule-action-layer schedule-workspace-card ops-card">
+  <div class="schedule-hero-card schedule-overview-layer schedule-action-layer schedule-workspace-card ops-card">
     <div>
       <p class="eyebrow">运营排班工作台</p>
       <h2>{{ context.filters.month }} · {{ context.filters.store_names_text }}</h2>
@@ -78,8 +78,8 @@
 
   <details class="schedule-filter-card schedule-filter-layer schedule-workspace-card ops-card" id="schedule-filters" open>
     <summary>
-      <span>筛选条件</span>
-      <small>按门店、月份、员工状态和视图模式查看排班。</small>
+      <span>筛选排班</span>
+      <small>已选 {{ context.selected_store_count }} 个门店 / 已选 {{ context.selected_employee_ids|length }} 名员工 / 已选 {{ context.filters.shift_type_ids|length + (1 if context.filters.include_custom_shift else 0) }} 个班次</small>
     </summary>
     <form class="schedule-filter-grid schedule-filter" method="get" action="/admin/schedules#schedule-view" data-feedback-form data-preserve-scroll data-clean-empty-query data-loading-label="筛选中...">
       <div class="schedule-filter-employees full-span">
@@ -163,7 +163,7 @@
     </form>
   </details>
 
-  <details class="schedule-bulk-card schedule-workspace-card admin-section ops-card schedule-operation-panel" id="bulk-schedule">
+  <details class="schedule-bulk-card schedule-operation-layer schedule-workspace-card admin-section ops-card schedule-operation-panel" id="bulk-schedule">
     <summary class="section-heading admin-section-heading">
       <span>
         <h2>批量排班</h2>
@@ -171,7 +171,7 @@
       </span>
     </summary>
     {% if not context.form_store %}
-    <div class="alert alert-error">{% if context.is_multi_store %}当前为多门店查看模式，请选择单个门店后进行排班。{% else %}请选择具体门店后进行排班操作。{% endif %}</div>
+    <div class="alert alert-error">{% if context.is_multi_store %}当前为多门店查看模式，请选择单个门店后进行排班操作。{% else %}请选择具体门店后进行排班操作。{% endif %}</div>
     {% else %}
     <form class="schedule-form schedule-bulk-form" method="post" action="/admin/schedules" data-schedule-bulk-form data-feedback-form data-preserve-scroll data-loading-label="保存中..." data-max-bulk-schedule-count="{{ context.max_bulk_schedule_count }}">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -265,9 +265,9 @@
     {% endif %}
   </details>
 
-  <section class="schedule-view-card schedule-workspace-card schedule-data-layer ops-card" id="schedule-view">
+  <section class="schedule-view-card schedule-view-layer schedule-workspace-card schedule-data-layer ops-card" id="schedule-view">
     <div class="section-heading admin-section-heading">
-      <h2>本月排班</h2>
+      <h2>排班查看</h2>
       <p>在表格、日历和员工视图之间切换，数据范围随上方筛选变化。</p>
     </div>
     <nav class="schedule-view-tabs schedule-view-switch" aria-label="排班视图切换">

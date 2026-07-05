@@ -44,6 +44,8 @@ function initializeStoreRequestApp() {
   const drawerOpenButtons = Array.from(document.querySelectorAll("[data-drawer-open]"));
   const drawerCloseButtons = Array.from(document.querySelectorAll("[data-drawer-close]"));
   const drawerOverlays = Array.from(document.querySelectorAll("[data-drawer]"));
+  const employeeStoreForms = Array.from(document.querySelectorAll("[data-employee-store-form]"));
+  const shiftScopeForms = Array.from(document.querySelectorAll("[data-shift-scope-form]"));
   const feedbackForms = Array.from(document.querySelectorAll("[data-feedback-form]"));
   const preserveScrollForms = Array.from(document.querySelectorAll("form[data-preserve-scroll]"));
   const cleanEmptyQueryForms = Array.from(document.querySelectorAll("form[data-clean-empty-query]"));
@@ -278,6 +280,50 @@ function initializeStoreRequestApp() {
     }
     errorBox.textContent = message || "";
     errorBox.hidden = !message;
+  }
+
+  function syncEmployeePrimaryStoreChoices(form) {
+    const primarySelect = form.querySelector("[data-primary-store-select]");
+    if (!primarySelect) {
+      return;
+    }
+    const primaryStore = primarySelect.value || "";
+    Array.from(form.querySelectorAll("[data-store-checkbox]")).forEach((checkbox) => {
+      const chip = checkbox.closest("[data-store-choice]");
+      const note = chip ? chip.querySelector("[data-primary-store-note]") : null;
+      const isPrimaryStore = Boolean(primaryStore && checkbox.value === primaryStore);
+      if (isPrimaryStore) {
+        checkbox.checked = true;
+        checkbox.disabled = true;
+        checkbox.dataset.primaryAutoChecked = "1";
+      } else {
+        checkbox.disabled = false;
+        if (checkbox.dataset.primaryAutoChecked === "1") {
+          checkbox.checked = false;
+          delete checkbox.dataset.primaryAutoChecked;
+        }
+      }
+      if (chip) {
+        chip.classList.toggle("is-primary-store-choice", isPrimaryStore);
+      }
+      if (note) {
+        note.hidden = !isPrimaryStore;
+      }
+    });
+  }
+
+  function updateShiftScopeForm(form) {
+    const checkedScope = form.querySelector('input[name="shift_scope"]:checked');
+    const storeSelect = form.querySelector("[data-shift-store-select]");
+    const isGlobalScope = checkedScope ? checkedScope.value === "global" : false;
+    if (storeSelect) {
+      storeSelect.disabled = isGlobalScope;
+      storeSelect.required = !isGlobalScope;
+      if (isGlobalScope) {
+        storeSelect.value = "";
+      }
+    }
+    form.classList.toggle("is-global-shift-scope", isGlobalScope);
   }
 
   function scheduleEmployeeInputs() {
@@ -1050,6 +1096,21 @@ function initializeStoreRequestApp() {
         closeDrawer(drawer);
       }
     });
+  });
+
+  employeeStoreForms.forEach((form) => {
+    const primarySelect = form.querySelector("[data-primary-store-select]");
+    if (primarySelect) {
+      primarySelect.addEventListener("change", () => syncEmployeePrimaryStoreChoices(form));
+    }
+    syncEmployeePrimaryStoreChoices(form);
+  });
+
+  shiftScopeForms.forEach((form) => {
+    Array.from(form.querySelectorAll('input[name="shift_scope"]')).forEach((input) => {
+      input.addEventListener("change", () => updateShiftScopeForm(form));
+    });
+    updateShiftScopeForm(form);
   });
 
   filterToggleButtons.forEach((button) => {

@@ -51,6 +51,22 @@ DEFAULT_BRANDS: List[str] = []
 DEFAULT_HANDLERS: List[str] = []
 TASK_STATUSES = ["待处理", "处理中", "已完成"]
 EMPLOYEE_STATUSES = ["在职", "离职", "停用"]
+EMPLOYEE_ROLE_GROUPS = [
+    ("management", "店长 / 经理"),
+    ("staff", "店员"),
+    ("part_time", "兼职"),
+    ("regional", "区域经理"),
+    ("unset", "未设置角色"),
+    ("other", "其他角色"),
+]
+SHIFT_DATA_SCOPES = {
+    "current": "启用 + 停用",
+    "active": "启用班次",
+    "inactive": "停用班次",
+    "archive": "归档班次",
+    "trash": "回收站班次",
+    "all": "全部",
+}
 DUE_STATUS_OPTIONS = ["已超时", "今日到期", "未到期", "未设置", "超时完成", "按时完成"]
 LEGACY_ADMIN_REDIRECTS = {
     "/admin/personnel": "/admin/employees",
@@ -432,6 +448,33 @@ def safe_query_return_url(value: str) -> str:
 
 def request_path_with_query(request: Request) -> str:
     return request.url.path + (f"?{request.url.query}" if request.url.query else "")
+
+
+def shift_types_redirect_url(
+    request: Request,
+    store_names: Optional[List[str]] = None,
+    status_filter: str = "",
+    global_scope: str = "",
+    data_scope: str = "",
+    **flags: str,
+) -> str:
+    if store_names is not None or status_filter or global_scope or data_scope:
+        query_items: List[Tuple[str, str]] = []
+        query_items.extend(("store_names", store) for store in unique_clean_values(store_names or []))
+        if status_filter and status_filter != "all":
+            query_items.append(("status", status_filter))
+        if global_scope and global_scope != "all":
+            query_items.append(("global_scope", global_scope))
+        if data_scope and data_scope != "current":
+            query_items.append(("data_scope", data_scope))
+    else:
+        query_items = [
+            (key, value)
+            for key, value in request.query_params.multi_items()
+            if key not in {"error", "success", "updated"} and value
+        ]
+    query_items.extend((key, value) for key, value in flags.items() if value)
+    return "/admin/shift-types" + (f"?{urlencode(query_items)}" if query_items else "")
 
 
 def build_ticket_detail_url(ticket_id: int, return_url: str = "", **flags: str) -> str:
@@ -1002,6 +1045,12 @@ def recreate_shift_types_without_unique_name(connection: sqlite3.Connection) -> 
             duration_hours REAL DEFAULT 0,
             color TEXT,
             is_active INTEGER NOT NULL DEFAULT 1,
+            archived_at TEXT,
+            archived_by TEXT,
+            archive_reason TEXT,
+            deleted_at TEXT,
+            deleted_by TEXT,
+            delete_reason TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         )
@@ -1011,7 +1060,9 @@ def recreate_shift_types_without_unique_name(connection: sqlite3.Connection) -> 
         f"""
         INSERT INTO shift_types (
             id, shift_name, store_name, is_global, business_start_time, business_end_time,
-            start_time, end_time, duration_hours, color, is_active, created_at, updated_at
+            start_time, end_time, duration_hours, color, is_active,
+            archived_at, archived_by, archive_reason, deleted_at, deleted_by, delete_reason,
+            created_at, updated_at
         )
         SELECT
             {source_expr('id', 'NULL')},
@@ -1025,6 +1076,12 @@ def recreate_shift_types_without_unique_name(connection: sqlite3.Connection) -> 
             {source_expr('duration_hours', '0')},
             {source_expr('color', "''")},
             {source_expr('is_active', '1')},
+            {source_expr('archived_at', 'NULL')},
+            {source_expr('archived_by', 'NULL')},
+            {source_expr('archive_reason', 'NULL')},
+            {source_expr('deleted_at', 'NULL')},
+            {source_expr('deleted_by', 'NULL')},
+            {source_expr('delete_reason', 'NULL')},
             {source_expr('created_at', "datetime('now')")},
             {source_expr('updated_at', "datetime('now')")}
         FROM {backup_table}
@@ -1040,6 +1097,8 @@ def ensure_schedule_schema_migrations(connection: sqlite3.Connection) -> None:
     add_column_if_missing(connection, "shift_types", "business_start_time", "TEXT")
     add_column_if_missing(connection, "shift_types", "business_end_time", "TEXT")
     recreate_shift_types_without_unique_name(connection)
+    add_archive_columns(connection, "shift_types")
+    add_soft_delete_columns(connection, "shift_types")
     connection.execute(
         """
         UPDATE shift_types
@@ -1327,6 +1386,12 @@ def init_db() -> None:
                 duration_hours REAL DEFAULT 0,
                 color TEXT,
                 is_active INTEGER NOT NULL DEFAULT 1,
+                archived_at TEXT,
+                archived_by TEXT,
+                archive_reason TEXT,
+                deleted_at TEXT,
+                deleted_by TEXT,
+                delete_reason TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )
@@ -1404,6 +1469,8 @@ def init_db() -> None:
         ensure_schedule_schema_migrations(connection)
         connection.execute("CREATE INDEX IF NOT EXISTS idx_shift_types_store_name ON shift_types(store_name)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_shift_types_is_global ON shift_types(is_global)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_shift_types_archived_at ON shift_types(archived_at)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_shift_types_deleted_at ON shift_types(deleted_at)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_store_business_hours_store_name ON store_business_hours(store_name)")
         add_column_if_missing(connection, "embedded_pages", "storage_type", "TEXT NOT NULL DEFAULT 'html'")
         add_column_if_missing(connection, "embedded_pages", "entry_file", "TEXT NOT NULL DEFAULT 'index.html'")
@@ -3160,6 +3227,54 @@ def employee_store_map_for_ids(connection: sqlite3.Connection, employee_ids: Ite
     return store_map
 
 
+def build_employee_schedule_url(employee: Dict[str, object]) -> str:
+    employee_id = str(employee.get("id") or "").strip()
+    primary_store = str(employee.get("primary_store_name") or employee.get("store_name") or "").strip()
+    store_names = list(employee.get("store_names") or [])
+    target_store = primary_store or (str(store_names[0]).strip() if store_names else "")
+    query_items: List[Tuple[str, str]] = []
+    if target_store:
+        query_items.append(("store_names", target_store))
+    if employee_id:
+        query_items.append(("employee_ids", employee_id))
+    query_items.append(("view_mode", "employee"))
+    return "/admin/schedules?" + urlencode(query_items) + "#employee-schedule-view"
+
+
+def employee_role_group_key(role: object) -> str:
+    role_text = str(role or "").strip()
+    if not role_text:
+        return "unset"
+    if "区域" in role_text and ("经理" in role_text or "督导" in role_text):
+        return "regional"
+    if "兼职" in role_text:
+        return "part_time"
+    if "店员" in role_text:
+        return "staff"
+    if "店长" in role_text or "经理" in role_text:
+        return "management"
+    return "other"
+
+
+def employee_sort_key(employee: Dict[str, object]) -> Tuple[int, str, str]:
+    status_rank = 0 if str(employee.get("status") or "") == "在职" else 1
+    primary_store = str(employee.get("primary_store_name") or employee.get("store_name") or "")
+    employee_name = str(employee.get("employee_name") or "")
+    return (status_rank, primary_store, employee_name)
+
+
+def group_employees_by_role(employees: Iterable[Dict[str, object]]) -> List[Dict[str, object]]:
+    grouped: Dict[str, List[Dict[str, object]]] = {key: [] for key, _label in EMPLOYEE_ROLE_GROUPS}
+    for employee in employees:
+        grouped.setdefault(employee_role_group_key(employee.get("role")), []).append(employee)
+    result: List[Dict[str, object]] = []
+    for key, label in EMPLOYEE_ROLE_GROUPS:
+        group_employees = sorted(grouped.get(key, []), key=employee_sort_key)
+        if group_employees:
+            result.append({"key": key, "label": label, "count": len(group_employees), "employees": group_employees})
+    return result
+
+
 def attach_employee_store_bindings(
     connection: sqlite3.Connection,
     rows: Iterable[sqlite3.Row],
@@ -3170,10 +3285,14 @@ def attach_employee_store_bindings(
         employee_id = int(employee["id"])
         store_names = store_map.get(employee_id, []) or split_multi_value_text(employee.get("store_name"))
         primary_store = str(employee.get("primary_store_name") or employee.get("store_name") or (store_names[0] if store_names else "")).strip()
+        effective_store_names = unique_clean_values([primary_store, *store_names])
         employee["primary_store_name"] = primary_store
         employee["store_name"] = primary_store
-        employee["store_names"] = store_names
-        employee["store_names_text"] = join_display_values(store_names)
+        employee["store_names"] = effective_store_names
+        employee["store_names_text"] = join_display_values(effective_store_names)
+        employee["secondary_store_names"] = [store_name for store_name in effective_store_names if store_name != primary_store]
+        employee["secondary_store_names_text"] = join_display_values(employee["secondary_store_names"])
+        employee["schedule_url"] = build_employee_schedule_url(employee)
     return employees
 
 
@@ -3206,6 +3325,22 @@ def employee_record_scope_clause(scope: str) -> str:
     if normalized_scope == "trash":
         return "employees.deleted_at IS NOT NULL"
     return "employees.deleted_at IS NULL AND employees.archived_at IS NULL"
+
+
+def normalize_shift_data_scope(data_scope: str) -> str:
+    clean_scope = str(data_scope or "").strip()
+    return clean_scope if clean_scope in SHIFT_DATA_SCOPES else "current"
+
+
+def shift_type_scope_clause(data_scope: str) -> str:
+    normalized_scope = normalize_shift_data_scope(data_scope)
+    if normalized_scope == "archive":
+        return "deleted_at IS NULL AND archived_at IS NOT NULL"
+    if normalized_scope == "trash":
+        return "deleted_at IS NOT NULL"
+    if normalized_scope == "all":
+        return "1 = 1"
+    return "deleted_at IS NULL AND archived_at IS NULL"
 
 
 def fetch_employees(store_name: str = "", status: str = "", scope: str = "active") -> List[Dict[str, object]]:
@@ -3446,10 +3581,17 @@ def fetch_shift_types(
     active_only: bool = False,
     store_names: Optional[List[str]] = None,
     global_scope: str = "all",
+    data_scope: str = "current",
 ) -> List[Dict[str, object]]:
     clauses: List[str] = []
     params: List[object] = []
     normalized_global_scope = global_scope if global_scope in {"all", "global", "store"} else "all"
+    normalized_data_scope = normalize_shift_data_scope(data_scope)
+    clauses.append(shift_type_scope_clause(normalized_data_scope))
+    if normalized_data_scope == "active":
+        clauses.append("is_active = 1")
+    elif normalized_data_scope == "inactive":
+        clauses.append("is_active = 0")
     if active_only or not include_inactive:
         clauses.append("is_active = 1")
     clean_store_names = unique_clean_values(store_names or [])
@@ -3473,10 +3615,14 @@ def fetch_shift_types(
             f"""
             SELECT
                 id, shift_name, store_name, is_global, business_start_time, business_end_time,
-                start_time, end_time, duration_hours, color, is_active, created_at, updated_at
+                start_time, end_time, duration_hours, color, is_active,
+                archived_at, archived_by, archive_reason, deleted_at, deleted_by, delete_reason,
+                created_at, updated_at
             FROM shift_types
             {where_sql}
-            ORDER BY is_active DESC, COALESCE(is_global, 0) DESC, COALESCE(store_name, ''), id
+            ORDER BY
+                CASE WHEN deleted_at IS NOT NULL THEN 2 WHEN archived_at IS NOT NULL THEN 1 ELSE 0 END,
+                is_active DESC, COALESCE(is_global, 0) DESC, COALESCE(store_name, ''), id
             """,
             params,
         ).fetchall()
@@ -3501,6 +3647,15 @@ def validate_shift_scope(store_name: str, is_global: bool, config: AppConfig) ->
     if clean_store not in config.stores:
         raise ValueError("请选择有效门店。")
     return clean_store, 0
+
+
+def is_global_from_shift_scope(shift_scope: str, legacy_is_global: str = "") -> bool:
+    normalized_scope = shift_scope.strip()
+    if normalized_scope == "global":
+        return True
+    if normalized_scope == "store":
+        return False
+    return legacy_is_global in {"1", "true", "on", "yes"}
 
 
 def shift_scope_duplicate_exists(
@@ -3586,7 +3741,7 @@ def update_shift_type(
         raise ValueError("请填写班次名称。")
     clean_store, normalized_global = validate_shift_scope(
         store_name or str(existing_shift.get("store_name") or ""),
-        is_global or int(existing_shift.get("is_global") or 0) == 1,
+        is_global,
         config or load_app_config(),
     )
     with get_connection() as connection:
@@ -3620,6 +3775,67 @@ def disable_shift_type(shift_type_id: int) -> None:
         raise HTTPException(status_code=404, detail="班次不存在")
     with get_connection() as connection:
         connection.execute("UPDATE shift_types SET is_active = 0, updated_at = ? WHERE id = ?", (now_text(), shift_type_id))
+
+
+def archive_shift_type(shift_type_id: int, operator: str, archive_reason: str = "") -> None:
+    if not fetch_shift_type(shift_type_id):
+        raise HTTPException(status_code=404, detail="班次不存在")
+    timestamp = now_text()
+    with get_connection() as connection:
+        connection.execute(
+            """
+            UPDATE shift_types
+            SET archived_at = ?, archived_by = ?, archive_reason = ?,
+                deleted_at = NULL, deleted_by = NULL, delete_reason = NULL,
+                updated_at = ?
+            WHERE id = ? AND deleted_at IS NULL
+            """,
+            (timestamp, operator, archive_reason.strip() or "后台归档班次", timestamp, shift_type_id),
+        )
+
+
+def soft_delete_shift_type(shift_type_id: int, operator: str, delete_reason: str = "") -> None:
+    if not fetch_shift_type(shift_type_id):
+        raise HTTPException(status_code=404, detail="班次不存在")
+    timestamp = now_text()
+    with get_connection() as connection:
+        connection.execute(
+            """
+            UPDATE shift_types
+            SET deleted_at = ?, deleted_by = ?, delete_reason = ?, updated_at = ?
+            WHERE id = ? AND deleted_at IS NULL
+            """,
+            (timestamp, operator, delete_reason.strip() or "后台移入班次回收站", timestamp, shift_type_id),
+        )
+
+
+def restore_shift_type(shift_type_id: int) -> None:
+    if not fetch_shift_type(shift_type_id):
+        raise HTTPException(status_code=404, detail="班次不存在")
+    with get_connection() as connection:
+        connection.execute(
+            """
+            UPDATE shift_types
+            SET archived_at = NULL, archived_by = NULL, archive_reason = NULL,
+                deleted_at = NULL, deleted_by = NULL, delete_reason = NULL,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (now_text(), shift_type_id),
+        )
+
+
+def hard_delete_shift_type(shift_type_id: int) -> None:
+    if not fetch_shift_type(shift_type_id):
+        raise HTTPException(status_code=404, detail="班次不存在")
+    with get_connection() as connection:
+        schedule_count = connection.execute(
+            "SELECT COUNT(*) AS total FROM store_schedules WHERE shift_type_id = ?",
+            (shift_type_id,),
+        ).fetchone()["total"]
+        if int(schedule_count or 0) > 0:
+            raise ValueError("该班次已有排班记录，建议停用或归档，不允许永久删除。")
+        connection.execute("DELETE FROM shift_types WHERE id = ?", (shift_type_id,))
 
 
 def fetch_store_business_hours() -> Dict[str, Dict[str, object]]:
@@ -6557,12 +6773,19 @@ def create_app() -> FastAPI:
         config = load_app_config()
         selected_scope = normalize_employee_record_scope(scope)
         all_employees = fetch_employees(store_name, status, selected_scope)
+        grouped_all_employees = group_employees_by_role(all_employees)
+        sorted_all_employees = [
+            employee
+            for group in grouped_all_employees
+            for employee in list(group.get("employees") or [])
+        ]
         page_size = 24
-        total_count = len(all_employees)
+        total_count = len(sorted_all_employees)
         total_pages = max(1, (total_count + page_size - 1) // page_size)
         current_page = min(max(page, 1), total_pages)
         start_index = (current_page - 1) * page_size
-        employees = all_employees[start_index : start_index + page_size]
+        employees = sorted_all_employees[start_index : start_index + page_size]
+        employee_role_groups = group_employees_by_role(employees)
         filters = {"store_name": store_name.strip(), "status": status.strip(), "scope": selected_scope}
         base_params = {key: value for key, value in filters.items() if value}
         return templates.TemplateResponse(
@@ -6571,6 +6794,7 @@ def create_app() -> FastAPI:
             {
                 "request": request,
                 "employees": employees,
+                "employee_role_groups": employee_role_groups,
                 "stores": config.stores,
                 "statuses": EMPLOYEE_STATUSES,
                 "filters": filters,
@@ -6600,6 +6824,7 @@ def create_app() -> FastAPI:
         store_names: Optional[List[str]] = None,
         status_filter: str = "all",
         global_scope: str = "all",
+        data_scope: str = "current",
         status_code: int = 200,
     ) -> HTMLResponse:
         config = load_app_config()
@@ -6611,16 +6836,26 @@ def create_app() -> FastAPI:
         )
         normalized_status = status_filter if status_filter in {"all", "active", "inactive"} else "all"
         normalized_global_scope = global_scope if global_scope in {"all", "global", "store"} else "all"
+        normalized_data_scope = normalize_shift_data_scope(data_scope)
         hours_map = fetch_store_business_hours()
-        active_only = normalized_status == "active"
+        active_only = normalized_status == "active" or normalized_data_scope == "active"
         shift_types = fetch_shift_types(
             include_inactive=normalized_status != "active",
             active_only=active_only,
             store_names=selected_stores or None,
             global_scope=normalized_global_scope,
+            data_scope=normalized_data_scope,
         )
-        if normalized_status == "inactive":
+        if normalized_status == "inactive" or normalized_data_scope == "inactive":
             shift_types = [shift for shift in shift_types if int(shift.get("is_active") or 0) == 0]
+        form_query_items: List[Tuple[str, str]] = []
+        form_query_items.extend(("store_names", store) for store in selected_stores)
+        if normalized_status != "all":
+            form_query_items.append(("status", normalized_status))
+        if normalized_global_scope != "all":
+            form_query_items.append(("global_scope", normalized_global_scope))
+        if normalized_data_scope != "current":
+            form_query_items.append(("data_scope", normalized_data_scope))
         combined_error = combine_error_messages(error, "门店筛选参数无效，已忽略。" if invalid_store else "")
         return templates.TemplateResponse(
             request,
@@ -6633,9 +6868,12 @@ def create_app() -> FastAPI:
                 "selected_store_count": len(selected_stores) if selected_stores else len(config.stores),
                 "status_filter": normalized_status,
                 "global_scope": normalized_global_scope,
+                "data_scope": normalized_data_scope,
+                "shift_data_scopes": SHIFT_DATA_SCOPES,
                 "business_hours": hours_map,
                 "selected_business_store": selected_stores[0] if len(selected_stores) == 1 else "",
                 "selected_business_hours": hours_map.get(selected_stores[0], {}) if len(selected_stores) == 1 else {},
+                "shift_types_form_query": urlencode(form_query_items),
                 "error": combined_error,
                 "success": success,
                 "admin_user": admin,
@@ -7585,6 +7823,7 @@ def create_app() -> FastAPI:
         store_names: Optional[List[str]] = Query(None),
         status_filter: str = Query("all", alias="status"),
         global_scope: str = Query("all"),
+        data_scope: str = Query("current"),
         error: str = Query(""),
         success: str = Query(""),
     ) -> HTMLResponse:
@@ -7596,12 +7835,14 @@ def create_app() -> FastAPI:
             store_names=store_names,
             status_filter=status_filter,
             global_scope=global_scope,
+            data_scope=data_scope,
         )
 
     @app.post("/admin/shift-types")
     def create_shift_type_route(
         request: Request,
         admin: str = Depends(require_admin),
+        shift_scope: str = Form(""),
         store_name: str = Form(""),
         is_global: str = Form(""),
         shift_name: str = Form(""),
@@ -7610,6 +7851,10 @@ def create_app() -> FastAPI:
         duration_hours: str = Form("0"),
         color: str = Form(""),
         csrf_token: str = Form(""),
+        return_store_names: Optional[List[str]] = Form(None),
+        return_status: str = Form(""),
+        return_global_scope: str = Form(""),
+        return_data_scope: str = Form(""),
     ) -> RedirectResponse:
         require_admin_csrf(request, csrf_token)
         try:
@@ -7620,18 +7865,25 @@ def create_app() -> FastAPI:
                 duration_hours,
                 color,
                 store_name=store_name,
-                is_global=is_global in {"1", "true", "on", "yes"},
+                is_global=is_global_from_shift_scope(shift_scope, is_global),
                 config=load_app_config(),
             )
         except (ValueError, HTTPException) as exc:
-            return RedirectResponse(url="/admin/shift-types?" + urlencode({"error": form_error_message(exc)}), status_code=303)
-        return RedirectResponse(url="/admin/shift-types?" + urlencode({"success": "已新增班次。"}), status_code=303)
+            return RedirectResponse(
+                url=shift_types_redirect_url(request, return_store_names, return_status, return_global_scope, return_data_scope, error=form_error_message(exc)),
+                status_code=303,
+            )
+        return RedirectResponse(
+            url=shift_types_redirect_url(request, return_store_names, return_status, return_global_scope, return_data_scope, success="已新增班次。"),
+            status_code=303,
+        )
 
     @app.post("/admin/shift-types/{shift_type_id}/update")
     def update_shift_type_route(
         request: Request,
         shift_type_id: int,
         admin: str = Depends(require_admin),
+        shift_scope: str = Form(""),
         store_name: str = Form(""),
         is_global: str = Form(""),
         shift_name: str = Form(""),
@@ -7641,6 +7893,10 @@ def create_app() -> FastAPI:
         color: str = Form(""),
         is_active: str = Form("0"),
         csrf_token: str = Form(""),
+        return_store_names: Optional[List[str]] = Form(None),
+        return_status: str = Form(""),
+        return_global_scope: str = Form(""),
+        return_data_scope: str = Form(""),
     ) -> RedirectResponse:
         require_admin_csrf(request, csrf_token)
         try:
@@ -7653,12 +7909,18 @@ def create_app() -> FastAPI:
                 color,
                 is_active in {"1", "true", "on", "yes"},
                 store_name=store_name,
-                is_global=is_global in {"1", "true", "on", "yes"},
+                is_global=is_global_from_shift_scope(shift_scope, is_global),
                 config=load_app_config(),
             )
         except (ValueError, HTTPException) as exc:
-            return RedirectResponse(url="/admin/shift-types?" + urlencode({"error": form_error_message(exc)}), status_code=303)
-        return RedirectResponse(url="/admin/shift-types?" + urlencode({"success": "班次已保存。"}), status_code=303)
+            return RedirectResponse(
+                url=shift_types_redirect_url(request, return_store_names, return_status, return_global_scope, return_data_scope, error=form_error_message(exc)),
+                status_code=303,
+            )
+        return RedirectResponse(
+            url=shift_types_redirect_url(request, return_store_names, return_status, return_global_scope, return_data_scope, success="班次已保存。"),
+            status_code=303,
+        )
 
     @app.post("/admin/shift-types/business-hours")
     def update_store_business_hours_route(
@@ -7668,14 +7930,28 @@ def create_app() -> FastAPI:
         business_start_time: str = Form(""),
         business_end_time: str = Form(""),
         csrf_token: str = Form(""),
+        return_store_names: Optional[List[str]] = Form(None),
+        return_status: str = Form(""),
+        return_global_scope: str = Form(""),
+        return_data_scope: str = Form(""),
     ) -> RedirectResponse:
         require_admin_csrf(request, csrf_token)
         try:
             upsert_store_business_hours(store_name, business_start_time, business_end_time, load_app_config())
         except (ValueError, HTTPException) as exc:
-            return RedirectResponse(url="/admin/shift-types?" + urlencode({"error": form_error_message(exc)}), status_code=303)
+            return RedirectResponse(
+                url=shift_types_redirect_url(request, return_store_names, return_status, return_global_scope, return_data_scope, error=form_error_message(exc)),
+                status_code=303,
+            )
         return RedirectResponse(
-            url="/admin/shift-types?" + urlencode({"store_names": store_name, "success": "门店营业时间已保存。"}),
+            url=shift_types_redirect_url(
+                request,
+                return_store_names or [store_name],
+                return_status,
+                return_global_scope,
+                return_data_scope,
+                success="门店营业时间已保存。",
+            ),
             status_code=303,
         )
 
@@ -7685,13 +7961,127 @@ def create_app() -> FastAPI:
         shift_type_id: int,
         _admin: str = Depends(require_admin),
         csrf_token: str = Form(""),
+        return_store_names: Optional[List[str]] = Form(None),
+        return_status: str = Form(""),
+        return_global_scope: str = Form(""),
+        return_data_scope: str = Form(""),
     ) -> RedirectResponse:
         require_admin_csrf(request, csrf_token)
         try:
             disable_shift_type(shift_type_id)
         except HTTPException as exc:
-            return RedirectResponse(url="/admin/shift-types?" + urlencode({"error": form_error_message(exc)}), status_code=303)
-        return RedirectResponse(url="/admin/shift-types?" + urlencode({"success": "班次已停用。"}), status_code=303)
+            return RedirectResponse(
+                url=shift_types_redirect_url(request, return_store_names, return_status, return_global_scope, return_data_scope, error=form_error_message(exc)),
+                status_code=303,
+            )
+        return RedirectResponse(
+            url=shift_types_redirect_url(request, return_store_names, return_status, return_global_scope, return_data_scope, success="班次已停用。"),
+            status_code=303,
+        )
+
+    @app.post("/admin/shift-types/{shift_type_id}/archive")
+    def archive_shift_type_route(
+        request: Request,
+        shift_type_id: int,
+        admin: str = Depends(require_admin),
+        archive_reason: str = Form(""),
+        csrf_token: str = Form(""),
+        return_store_names: Optional[List[str]] = Form(None),
+        return_status: str = Form(""),
+        return_global_scope: str = Form(""),
+        return_data_scope: str = Form(""),
+    ) -> RedirectResponse:
+        require_admin_csrf(request, csrf_token)
+        try:
+            archive_shift_type(shift_type_id, admin, archive_reason)
+        except (ValueError, HTTPException) as exc:
+            return RedirectResponse(
+                url=shift_types_redirect_url(request, return_store_names, return_status, return_global_scope, return_data_scope, error=form_error_message(exc)),
+                status_code=303,
+            )
+        return RedirectResponse(
+            url=shift_types_redirect_url(request, return_store_names, return_status, return_global_scope, return_data_scope, success="班次已归档。"),
+            status_code=303,
+        )
+
+    @app.post("/admin/shift-types/{shift_type_id}/delete")
+    def delete_shift_type_route(
+        request: Request,
+        shift_type_id: int,
+        admin: str = Depends(require_admin),
+        delete_reason: str = Form(""),
+        csrf_token: str = Form(""),
+        return_store_names: Optional[List[str]] = Form(None),
+        return_status: str = Form(""),
+        return_global_scope: str = Form(""),
+        return_data_scope: str = Form(""),
+    ) -> RedirectResponse:
+        require_admin_csrf(request, csrf_token)
+        try:
+            soft_delete_shift_type(shift_type_id, admin, delete_reason)
+        except (ValueError, HTTPException) as exc:
+            return RedirectResponse(
+                url=shift_types_redirect_url(request, return_store_names, return_status, return_global_scope, return_data_scope, error=form_error_message(exc)),
+                status_code=303,
+            )
+        return RedirectResponse(
+            url=shift_types_redirect_url(request, return_store_names, return_status, return_global_scope, return_data_scope, success="班次已移入回收站。"),
+            status_code=303,
+        )
+
+    @app.post("/admin/shift-types/{shift_type_id}/restore")
+    def restore_shift_type_route(
+        request: Request,
+        shift_type_id: int,
+        _admin: str = Depends(require_admin),
+        csrf_token: str = Form(""),
+        return_store_names: Optional[List[str]] = Form(None),
+        return_status: str = Form(""),
+        return_global_scope: str = Form(""),
+        return_data_scope: str = Form("current"),
+    ) -> RedirectResponse:
+        require_admin_csrf(request, csrf_token)
+        try:
+            restore_shift_type(shift_type_id)
+        except (ValueError, HTTPException) as exc:
+            return RedirectResponse(
+                url=shift_types_redirect_url(request, return_store_names, return_status, return_global_scope, return_data_scope, error=form_error_message(exc)),
+                status_code=303,
+            )
+        return RedirectResponse(
+            url=shift_types_redirect_url(request, return_store_names, return_status, return_global_scope, "current", success="班次已恢复。"),
+            status_code=303,
+        )
+
+    @app.post("/admin/shift-types/{shift_type_id}/hard-delete")
+    def hard_delete_shift_type_route(
+        request: Request,
+        shift_type_id: int,
+        _admin: str = Depends(require_admin),
+        confirm_delete: str = Form(""),
+        csrf_token: str = Form(""),
+        return_store_names: Optional[List[str]] = Form(None),
+        return_status: str = Form(""),
+        return_global_scope: str = Form(""),
+        return_data_scope: str = Form("trash"),
+    ) -> RedirectResponse:
+        require_admin_csrf(request, csrf_token)
+        if confirm_delete != "1":
+            return RedirectResponse(
+                url=shift_types_redirect_url(request, return_store_names, return_status, return_global_scope, return_data_scope, error="请二次确认后再永久删除班次。"),
+                status_code=303,
+            )
+        try:
+            hard_delete_shift_type(shift_type_id)
+        except (ValueError, HTTPException) as exc:
+            return RedirectResponse(
+                url=shift_types_redirect_url(request, return_store_names, return_status, return_global_scope, return_data_scope, error=form_error_message(exc)),
+                status_code=303,
+            )
+        return RedirectResponse(
+            url=shift_types_redirect_url(request, return_store_names, return_status, return_global_scope, return_data_scope, success="班次已永久删除。"),
+            status_code=303,
+        )
 
     @app.get("/admin/schedules", response_class=HTMLResponse)
     def admin_schedules(

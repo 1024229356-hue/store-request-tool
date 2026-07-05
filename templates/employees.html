@@ -65,65 +65,79 @@
     </form>
   </details>
 
-  <section class="employee-card-grid">
-    {% for employee in employees %}
-    <article class="employee-card ops-card">
-      <header>
+  <section class="employee-role-groups">
+    {% for group in employee_role_groups %}
+    <section class="employee-role-group" data-role-group="{{ group.key }}">
+      <header class="employee-role-group-header">
         <div>
-          <h3>{{ employee.employee_name }}</h3>
-          <p>{{ employee.role or '未设置角色' }}</p>
+          <h2>{{ group.label }}</h2>
+          <p class="subtle">按在职状态、主门店和姓名排序。</p>
         </div>
-        <span class="employee-status-pill">{{ employee.status }}</span>
+        <span class="employee-role-count">{{ group.count }} 人</span>
       </header>
-      <div class="employee-store-tags">
-        <span class="store-tag-primary">主门店：{{ employee.primary_store_name or employee.store_name }}</span>
-        {% for store in employee.store_names %}
-        <span class="store-tag-available">{{ store }}</span>
+      <div class="employee-card-grid">
+        {% for employee in group.employees %}
+        <article class="employee-card ops-card">
+          <header>
+            <div>
+              <h3>{{ employee.employee_name }}</h3>
+              <p>{{ employee.role or '未设置角色' }}</p>
+            </div>
+            <span class="employee-status-pill">{{ employee.status }}</span>
+          </header>
+          <div class="employee-store-tags">
+            <span class="store-tag-primary">主门店：{{ employee.primary_store_name or employee.store_name }}</span>
+            <span class="store-tag-label">可排门店：{{ employee.secondary_store_names_text or '暂无跨店绑定' }}</span>
+            {% for store in employee.secondary_store_names %}
+            <span class="store-tag-available">{{ store }}</span>
+            {% endfor %}
+          </div>
+          <dl class="employee-card-meta">
+            <div><dt>电话</dt><dd>{{ employee.phone or '-' }}</dd></div>
+            <div><dt>最近排班</dt><dd><a class="ghost-button compact" href="{{ employee.schedule_url }}">查看排班</a></dd></div>
+          </dl>
+          <div class="employee-card-actions">
+            {% if filters.scope == 'active' %}
+            <button class="ghost-button compact" type="button" data-drawer-open="employee-drawer-{{ employee.id }}">编辑</button>
+            <form method="post" action="/admin/employees/{{ employee.id }}/disable" onsubmit="return confirm('确认将该员工标记为离职吗？');" data-feedback-form data-loading-label="停用中...">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <button class="danger-button compact" type="submit">离职</button>
+            </form>
+            <form method="post" action="/admin/employees/{{ employee.id }}/archive" onsubmit="return confirm('确认归档该员工吗？');" data-feedback-form data-loading-label="归档中...">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <input type="hidden" name="archive_reason" value="员工管理归档">
+              <button class="ghost-button compact" type="submit">归档</button>
+            </form>
+            <form method="post" action="/admin/employees/{{ employee.id }}/delete" onsubmit="return confirm('确认将该员工移入回收站吗？');" data-feedback-form data-loading-label="移入中...">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <input type="hidden" name="delete_reason" value="员工管理移入回收站">
+              <button class="danger-button compact" type="submit">移入回收站</button>
+            </form>
+            {% elif filters.scope == 'archive' %}
+            <form method="post" action="/admin/employees/{{ employee.id }}/unarchive" data-feedback-form data-loading-label="恢复中...">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <button class="primary-button compact" type="submit">取消归档</button>
+            </form>
+            <form method="post" action="/admin/employees/{{ employee.id }}/delete" onsubmit="return confirm('确认将该员工移入回收站吗？');" data-feedback-form data-loading-label="移入中...">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <button class="danger-button compact" type="submit">移入回收站</button>
+            </form>
+            {% else %}
+            <form method="post" action="/admin/employees/{{ employee.id }}/restore" data-feedback-form data-loading-label="恢复中...">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <button class="primary-button compact" type="submit">恢复</button>
+            </form>
+            <form method="post" action="/admin/employees/{{ employee.id }}/hard-delete" onsubmit="return confirm('永久删除不可恢复，确认继续吗？');" data-feedback-form data-loading-label="删除中...">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <input type="hidden" name="confirm_delete" value="1">
+              <button class="danger-button compact" type="submit">永久删除</button>
+            </form>
+            {% endif %}
+          </div>
+        </article>
         {% endfor %}
       </div>
-      <dl class="employee-card-meta">
-        <div><dt>电话</dt><dd>{{ employee.phone or '-' }}</dd></div>
-        <div><dt>最近排班</dt><dd>查看排班页</dd></div>
-      </dl>
-      <div class="employee-card-actions">
-        {% if filters.scope == 'active' %}
-        <button class="ghost-button compact" type="button" data-drawer-open="employee-drawer-{{ employee.id }}">编辑</button>
-        <form method="post" action="/admin/employees/{{ employee.id }}/disable" onsubmit="return confirm('确认将该员工标记为离职吗？');" data-feedback-form data-loading-label="停用中...">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <button class="danger-button compact" type="submit">离职</button>
-        </form>
-        <form method="post" action="/admin/employees/{{ employee.id }}/archive" onsubmit="return confirm('确认归档该员工吗？');" data-feedback-form data-loading-label="归档中...">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <input type="hidden" name="archive_reason" value="员工管理归档">
-          <button class="ghost-button compact" type="submit">归档</button>
-        </form>
-        <form method="post" action="/admin/employees/{{ employee.id }}/delete" onsubmit="return confirm('确认将该员工移入回收站吗？');" data-feedback-form data-loading-label="移入中...">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <input type="hidden" name="delete_reason" value="员工管理移入回收站">
-          <button class="danger-button compact" type="submit">移入回收站</button>
-        </form>
-        {% elif filters.scope == 'archive' %}
-        <form method="post" action="/admin/employees/{{ employee.id }}/unarchive" data-feedback-form data-loading-label="恢复中...">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <button class="primary-button compact" type="submit">取消归档</button>
-        </form>
-        <form method="post" action="/admin/employees/{{ employee.id }}/delete" onsubmit="return confirm('确认将该员工移入回收站吗？');" data-feedback-form data-loading-label="移入中...">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <button class="danger-button compact" type="submit">移入回收站</button>
-        </form>
-        {% else %}
-        <form method="post" action="/admin/employees/{{ employee.id }}/restore" data-feedback-form data-loading-label="恢复中...">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <button class="primary-button compact" type="submit">恢复</button>
-        </form>
-        <form method="post" action="/admin/employees/{{ employee.id }}/hard-delete" onsubmit="return confirm('永久删除不可恢复，确认继续吗？');" data-feedback-form data-loading-label="删除中...">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <input type="hidden" name="confirm_delete" value="1">
-          <button class="danger-button compact" type="submit">永久删除</button>
-        </form>
-        {% endif %}
-      </div>
-    </article>
+    </section>
     {% else %}
     <div class="ops-card empty-cell">暂无员工，请先新增员工。</div>
     {% endfor %}
@@ -147,12 +161,12 @@
       </div>
       <button class="ghost-button compact" type="button" data-drawer-close>关闭</button>
     </header>
-    <form class="schedule-form drawer-form" method="post" action="/admin/employees" data-feedback-form data-loading-label="保存中...">
+    <form class="schedule-form drawer-form" method="post" action="/admin/employees" data-employee-store-form data-feedback-form data-loading-label="保存中...">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <label><span>员工姓名</span><input name="employee_name" required></label>
       <label>
         <span>主门店</span>
-        <select name="primary_store_name" required>
+        <select name="primary_store_name" required data-primary-store-select>
           <option value="">请选择主门店</option>
           {% for store in stores %}<option value="{{ store }}">{{ store }}</option>{% endfor %}
         </select>
@@ -162,9 +176,10 @@
         <span>绑定门店</span>
         <div class="store-checkbox-grid">
           {% for store in stores %}
-          <label class="choice-chip store-choice-chip">
-            <input type="checkbox" name="store_names" value="{{ store }}">
+          <label class="choice-chip store-choice-chip" data-store-choice="{{ store }}">
+            <input type="checkbox" name="store_names" value="{{ store }}" data-store-checkbox>
             <span>{{ store }}</span>
+            <small class="field-hint primary-store-note" data-primary-store-note hidden>主门店已包含</small>
           </label>
           {% endfor %}
         </div>
@@ -193,12 +208,12 @@
       </div>
       <button class="ghost-button compact" type="button" data-drawer-close>关闭</button>
     </header>
-    <form class="schedule-form drawer-form" method="post" action="/admin/employees/{{ employee.id }}/update" data-feedback-form data-loading-label="保存中...">
+    <form class="schedule-form drawer-form" method="post" action="/admin/employees/{{ employee.id }}/update" data-employee-store-form data-feedback-form data-loading-label="保存中...">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <label><span>员工姓名</span><input name="employee_name" value="{{ employee.employee_name }}" required></label>
       <label>
         <span>主门店</span>
-        <select name="primary_store_name" required>
+        <select name="primary_store_name" required data-primary-store-select>
           <option value="">请选择主门店</option>
           {% for store in stores %}
           <option value="{{ store }}" {% if (employee.primary_store_name or employee.store_name) == store %}selected{% endif %}>{{ store }}</option>
@@ -210,9 +225,10 @@
         <span>绑定门店</span>
         <div class="store-checkbox-grid">
           {% for store in stores %}
-          <label class="choice-chip store-choice-chip">
-            <input type="checkbox" name="store_names" value="{{ store }}" {% if store in employee.store_names %}checked{% endif %}>
+          <label class="choice-chip store-choice-chip" data-store-choice="{{ store }}">
+            <input type="checkbox" name="store_names" value="{{ store }}" data-store-checkbox {% if store in employee.store_names %}checked{% endif %}>
             <span>{{ store }}</span>
+            <small class="field-hint primary-store-note" data-primary-store-note hidden>主门店已包含</small>
           </label>
           {% endfor %}
         </div>

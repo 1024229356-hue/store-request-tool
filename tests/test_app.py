@@ -2686,6 +2686,10 @@ def test_schedule_layout_hash_and_preserve_scroll_contract(tmp_path, monkeypatch
 
     assert page.status_code == 200
     for expected in (
+        "schedule-overview-layer",
+        "schedule-filter-layer",
+        "schedule-operation-layer",
+        "schedule-view-layer",
         "schedule-hero-card",
         "schedule-filter-card",
         "schedule-bulk-card",
@@ -2699,6 +2703,13 @@ def test_schedule_layout_hash_and_preserve_scroll_contract(tmp_path, monkeypatch
         "data-preserve-scroll",
     ):
         assert expected in page.text
+    assert "运营排班工作台" in page.text
+    assert "筛选排班" in page.text
+    assert "批量排班" in page.text
+    assert "排班查看" in page.text
+    assert "已选 1 个门店" in page.text
+    assert "已选 0 名员工" in page.text
+    assert "已选 0 个班次" in page.text
 
     filter_form_start = page.text.index('<form class="schedule-filter-grid')
     filter_form_end = page.text.index("</form>", filter_form_start)
@@ -2716,6 +2727,20 @@ def test_schedule_layout_hash_and_preserve_scroll_contract(tmp_path, monkeypatch
     assert table_page.status_code == 200
     assert "精细查看可横向滚动，推荐日常使用日历视图或员工视图。" in table_page.text
     assert "schedule-table-scroll" in table_page.text
+
+    employee_page = client.get("/admin/schedules?store_name=南京门东店&month=2026-07&view_mode=employee")
+    assert employee_page.status_code == 200
+    assert "员工筛选" in employee_page.text
+    assert 'name="employee_ids"' in employee_page.text
+    assert 'id="employee-schedule-view"' in employee_page.text
+
+    multi_store_page = client.get(
+        "/admin/schedules",
+        params=[("store_names", "南京门东店"), ("store_names", "南昌万寿宫店"), ("month", "2026-07")],
+    )
+    assert multi_store_page.status_code == 200
+    assert "当前为多门店查看模式，请选择单个门店后进行排班操作。" in multi_store_page.text
+    assert "schedule-bulk-form" not in multi_store_page.text
 
     app_js = (PROJECT_DIR / "static" / "app.js").read_text(encoding="utf-8")
     assert "data-preserve-scroll" in app_js
@@ -2982,12 +3007,15 @@ def test_employee_and_shift_type_management_lifecycle(tmp_path, monkeypatch):
     assert employee_page.status_code == 200
     assert 'name="store_names"' in employee_page.text
     assert "绑定门店" in employee_page.text
+    assert "主门店：南京门东店" in employee_page.text
+    assert "暂无跨店绑定" in employee_page.text
 
     update_employee = admin_post(
         client,
         "/admin/employees/1/update",
         data={
             "employee_name": "张小排",
+            "primary_store_name": "南京门东店",
             "store_names": ["南京门东店", "南昌万寿宫店"],
             "role": "值班员",
             "phone": "13900000000",
@@ -3001,6 +3029,35 @@ def test_employee_and_shift_type_management_lifecycle(tmp_path, monkeypatch):
         (1, "南京门东店"),
         (1, "南昌万寿宫店"),
     ]
+    updated_employee_page = client.get("/admin/employees")
+    assert updated_employee_page.text.count("主门店：南京门东店") == 1
+    assert updated_employee_page.text.count("store-tag-available\">南京门东店") == 0
+    assert updated_employee_page.text.count("store-tag-available\">南昌万寿宫店") == 1
+
+    switch_primary = admin_post(
+        client,
+        "/admin/employees/1/update",
+        data={
+            "employee_name": "张小排",
+            "primary_store_name": "山城巷店",
+            "store_names": ["南昌万寿宫店"],
+            "role": "值班员",
+            "phone": "13900000000",
+            "status": "在职",
+        },
+        follow_redirects=False,
+    )
+    assert switch_primary.status_code == 303
+    assert {
+        (row["employee_id"], row["store_name"]) for row in rows_for(tmp_path, "employee_store_map")
+    } == {
+        (1, "南昌万寿宫店"),
+        (1, "山城巷店"),
+    }
+    switched_employee_page = client.get("/admin/employees")
+    assert "主门店：山城巷店" in switched_employee_page.text
+    assert "store-tag-available\">山城巷店" not in switched_employee_page.text
+    assert "store-tag-available\">南昌万寿宫店" in switched_employee_page.text
 
     disable_employee = admin_post(client, "/admin/employees/1/disable", follow_redirects=False)
     assert disable_employee.status_code == 303
@@ -3010,6 +3067,7 @@ def test_employee_and_shift_type_management_lifecycle(tmp_path, monkeypatch):
         client,
         "/admin/shift-types",
         data={
+            "shift_scope": "global",
             "shift_name": "中班",
             "start_time": "12:00",
             "end_time": "20:00",
@@ -3071,6 +3129,49 @@ def test_employee_management_uses_cards_drawer_and_store_tags(tmp_path, monkeypa
     assert re.search(r"<button\b[^>]*\btype=(['\"])button\1[^>]*\bdata-drawer-open\b", page.text)
     assert "CardEmp" in page.text
     assert "Lead" in page.text
+    assert "data-employee-store-form" in page.text
+    assert "data-primary-store-select" in page.text
+    assert "data-primary-store-note" in page.text
+
+
+def test_employee_cards_show_saved_secondary_stores_role_groups_and_schedule_links(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch)
+    logged_in_client(client)
+
+    create_schedule_employee(
+        client,
+        "南京店长",
+        role="店长",
+        store_name="南京门东店",
+        store_names=["南京门东店", "南昌万寿宫店"],
+    )
+    create_schedule_employee(client, "山城店员", role="店员", store_name="山城巷店")
+    create_schedule_employee(client, "周末兼职", role="兼职", store_name="南昌万寿宫店")
+    create_schedule_employee(client, "区域经理A", role="区域经理", store_name="南京门东店")
+    create_schedule_employee(client, "未设角色", role="", store_name="南京门东店")
+    create_schedule_employee(client, "训练师", role="训练师", store_name="山城巷店")
+
+    page = client.get("/admin/employees")
+
+    assert page.status_code == 200
+    assert "employee-role-group" in page.text
+    assert "店长 / 经理" in page.text
+    assert "店员" in page.text
+    assert "兼职" in page.text
+    assert "区域经理" in page.text
+    assert "未设置角色" in page.text
+    assert "其他角色" in page.text
+    assert page.text.index("南京店长") < page.text.index("山城店员")
+    assert "可排门店：南昌万寿宫店" in page.text
+    assert "store-tag-available\">南京门东店" not in page.text
+    assert 'class="ghost-button compact" href="/admin/schedules?store_names=%E5%8D%97%E4%BA%AC%E9%97%A8%E4%B8%9C%E5%BA%97&amp;employee_ids=1&amp;view_mode=employee#employee-schedule-view"' in page.text
+    assert ">查看排班</a>" in page.text
+
+    filtered = client.get("/admin/employees?store_name=南昌万寿宫店")
+    assert filtered.status_code == 200
+    assert "南京店长" in filtered.text
+    assert "可排门店：南昌万寿宫店" in filtered.text
+    assert "employee-role-group" in filtered.text
 
 
 def test_shift_type_page_uses_card_timeline_structure(tmp_path, monkeypatch):
@@ -3087,6 +3188,102 @@ def test_shift_type_page_uses_card_timeline_structure(tmp_path, monkeypatch):
     assert "data-draggable-shift" in page.text
     assert "data-feedback-form" in page.text
     assert "shift-status-pill" in page.text
+    assert 'name="shift_scope" value="store"' in page.text
+    assert 'name="shift_scope" value="global"' in page.text
+    assert "门店班次" in page.text
+    assert "通用班次" in page.text
+
+
+def test_shift_type_archive_delete_restore_and_hard_delete_rules(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch)
+    logged_in_client(client)
+
+    create_response = admin_post(
+        client,
+        "/admin/shift-types",
+        data={
+            "shift_scope": "store",
+            "store_name": "南京门东店",
+            "shift_name": "测试可删除班次",
+            "start_time": "11:00",
+            "end_time": "15:00",
+            "duration_hours": "4",
+            "color": "#2563eb",
+        },
+        follow_redirects=False,
+    )
+    assert create_response.status_code == 303
+    shift_id = rows_for(tmp_path, "shift_types")[-1]["id"]
+
+    page = client.get("/admin/shift-types")
+    assert page.status_code == 200
+    for action in ("archive", "delete"):
+        assert f'action="/admin/shift-types/{shift_id}/{action}"' in page.text
+    assert "数据范围" in page.text
+    assert "归档班次" in page.text
+    assert "回收站班次" in page.text
+
+    archive_response = admin_post(
+        client,
+        f"/admin/shift-types/{shift_id}/archive",
+        data={"archive_reason": "测试归档"},
+        follow_redirects=False,
+    )
+    assert archive_response.status_code == 303
+    archived_shift = [row for row in rows_for(tmp_path, "shift_types") if row["id"] == shift_id][0]
+    assert archived_shift["archived_at"]
+    assert archived_shift["archived_by"] == ADMIN_AUTH[0]
+    assert "测试可删除班次" not in client.get("/admin/shift-types").text
+    assert "测试可删除班次" in client.get("/admin/shift-types?data_scope=archive").text
+
+    restore_archived = admin_post(client, f"/admin/shift-types/{shift_id}/restore", follow_redirects=False)
+    assert restore_archived.status_code == 303
+    assert [row for row in rows_for(tmp_path, "shift_types") if row["id"] == shift_id][0]["archived_at"] is None
+
+    delete_response = admin_post(
+        client,
+        f"/admin/shift-types/{shift_id}/delete",
+        data={"delete_reason": "测试删除"},
+        follow_redirects=False,
+    )
+    assert delete_response.status_code == 303
+    deleted_shift = [row for row in rows_for(tmp_path, "shift_types") if row["id"] == shift_id][0]
+    assert deleted_shift["deleted_at"]
+    assert deleted_shift["deleted_by"] == ADMIN_AUTH[0]
+    assert "测试可删除班次" not in client.get("/admin/shift-types").text
+    trash_page = client.get("/admin/shift-types?data_scope=trash")
+    assert "测试可删除班次" in trash_page.text
+    assert f'action="/admin/shift-types/{shift_id}/restore"' in trash_page.text
+    assert f'action="/admin/shift-types/{shift_id}/hard-delete"' in trash_page.text
+
+    restore_deleted = admin_post(client, f"/admin/shift-types/{shift_id}/restore", follow_redirects=False)
+    assert restore_deleted.status_code == 303
+    assert [row for row in rows_for(tmp_path, "shift_types") if row["id"] == shift_id][0]["deleted_at"] is None
+
+    create_schedule_employee(client, "历史排班员工", store_name="南京门东店")
+    admin_post(
+        client,
+        "/admin/schedules",
+        data={
+            "store_name": "南京门东店",
+            "employee_ids": ["1"],
+            "schedule_dates": ["2026-07-06"],
+            "shift_type_id": str(shift_id),
+            "overwrite_existing": "1",
+        },
+        follow_redirects=False,
+    )
+    admin_post(client, f"/admin/shift-types/{shift_id}/delete", follow_redirects=False)
+    hard_delete_blocked = admin_post(
+        client,
+        f"/admin/shift-types/{shift_id}/hard-delete",
+        data={"confirm_delete": "1"},
+        follow_redirects=False,
+    )
+    assert hard_delete_blocked.status_code == 303
+    blocked_page = client.get(hard_delete_blocked.headers["location"])
+    assert "该班次已有排班记录，建议停用或归档，不允许永久删除。" in blocked_page.text
+    assert [row for row in rows_for(tmp_path, "shift_types") if row["id"] == shift_id]
 
 
 def test_store_specific_shift_types_business_hours_and_schedule_visibility(tmp_path, monkeypatch):
@@ -3115,6 +3312,7 @@ def test_store_specific_shift_types_business_hours_and_schedule_visibility(tmp_p
         client,
         "/admin/shift-types",
         data={
+            "shift_scope": "store",
             "store_name": "南京门东店",
             "shift_name": "早班",
             "start_time": "09:30",
@@ -3128,6 +3326,7 @@ def test_store_specific_shift_types_business_hours_and_schedule_visibility(tmp_p
         client,
         "/admin/shift-types",
         data={
+            "shift_scope": "store",
             "store_name": "南昌万寿宫店",
             "shift_name": "早班",
             "start_time": "10:00",
@@ -3150,6 +3349,68 @@ def test_store_specific_shift_types_business_hours_and_schedule_visibility(tmp_p
     assert "store-business-hours-card" in shift_page.text
     assert "09:30" in shift_page.text
     assert "当前门店未配置营业时间，请先在班次设置中维护。" not in shift_page.text
+    assert "全部门店可用" not in shift_page.text
+
+    store_shift_id = store_named_morning[0]["id"]
+    update_store_shift = admin_post(
+        client,
+        f"/admin/shift-types/{store_shift_id}/update?store_names=南京门东店&status=active",
+        data={
+            "shift_scope": "store",
+            "store_name": "南京门东店",
+            "shift_name": "早班",
+            "start_time": "09:45",
+            "end_time": "17:45",
+            "duration_hours": "8",
+            "color": "#2563eb",
+            "is_active": "1",
+        },
+        follow_redirects=False,
+    )
+    assert update_store_shift.status_code == 303
+    assert unquote(update_store_shift.headers["location"]).startswith("/admin/shift-types?store_names=南京门东店&status=active")
+    saved_store_shift = [row for row in rows_for(tmp_path, "shift_types") if row["id"] == store_shift_id][0]
+    assert saved_store_shift["is_global"] == 0
+    assert saved_store_shift["store_name"] == "南京门东店"
+    assert saved_store_shift["start_time"] == "09:45"
+
+    global_shift = admin_post(
+        client,
+        "/admin/shift-types?store_names=南京门东店",
+        data={
+            "shift_scope": "global",
+            "store_name": "南京门东店",
+            "shift_name": "门店共享午休",
+            "start_time": "13:00",
+            "end_time": "14:00",
+            "duration_hours": "1",
+            "color": "#64748b",
+        },
+        follow_redirects=False,
+    )
+    assert global_shift.status_code == 303
+    saved_global_shift = rows_for(tmp_path, "shift_types")[-1]
+    assert saved_global_shift["is_global"] == 1
+    assert saved_global_shift["store_name"] in ("", None)
+
+    missing_store = admin_post(
+        client,
+        "/admin/shift-types",
+        data={
+            "shift_scope": "store",
+            "shift_name": "缺门店班次",
+            "start_time": "09:00",
+            "end_time": "10:00",
+            "duration_hours": "1",
+            "color": "#2563eb",
+        },
+        follow_redirects=False,
+    )
+    assert missing_store.status_code == 303
+    missing_store_page = client.get(missing_store.headers["location"])
+    assert "请选择班次所属门店" in missing_store_page.text
+    assert "alert-error" in missing_store_page.text
+    assert '{"detail":' not in missing_store_page.text
 
     create_schedule_employee(client, "南京排班员工", store_name="南京门东店")
     create_schedule_employee(client, "南昌排班员工", store_name="南昌万寿宫店")
@@ -3158,9 +3419,10 @@ def test_store_specific_shift_types_business_hours_and_schedule_visibility(tmp_p
     nanchang_page = client.get("/admin/schedules?store_names=南昌万寿宫店&month=2026-07")
     assert nanjing_page.status_code == 200
     assert nanchang_page.status_code == 200
-    assert "09:30-17:30" in nanjing_page.text
+    assert "09:45-17:45" in nanjing_page.text
     assert "10:00-18:00" not in nanjing_page.text
     assert "10:00-18:00" in nanchang_page.text
+    assert "09:45-17:45" not in nanchang_page.text
     assert "09:30-17:30" in nanchang_page.text  # 通用旧班次仍兼容显示
 
 
@@ -3308,7 +3570,7 @@ def test_schedule_multi_select_filters_dashboard_and_exports(tmp_path, monkeypat
     assert 'name="employee_statuses"' in page.text
     assert 'name="shift_type_ids"' in page.text
     assert "已选 2 个门店" in page.text
-    assert "当前为多门店查看模式，请选择单个门店后进行排班。" in page.text
+    assert "当前为多门店查看模式，请选择单个门店后进行排班操作。" in page.text
     assert "排班看板" in page.text
     assert "当月已排工时" in page.text
     assert "截至当前日期已排工时" in page.text
@@ -3398,6 +3660,10 @@ def test_admin_schedule_interaction_js_feedback_contract():
     assert "data-loading-label" in app_js
     assert "data-drawer-open" in app_js
     assert "data-drawer-close" in app_js
+    assert "data-employee-store-form" in app_js
+    assert "syncEmployeePrimaryStoreChoices" in app_js
+    assert "data-shift-scope-form" in app_js
+    assert "updateShiftScopeForm" in app_js
     assert "data-filter-toggle" in app_js
     assert "showAppToast" in app_js
     for selector in (
@@ -3874,6 +4140,7 @@ def test_legacy_database_is_migrated_without_losing_existing_rows(tmp_path, monk
             "ticket_comments",
             "ticket_tasks",
             "embedded_pages",
+            "shift_types",
         ]
         migrated_columns = {
             table: {row[1] for row in connection.execute(f"PRAGMA table_info({table})").fetchall()}
@@ -3899,6 +4166,7 @@ def test_legacy_database_is_migrated_without_losing_existing_rows(tmp_path, monk
     assert "embedded_pages" in tables
     assert {"storage_type", "entry_file", "file_size"}.issubset(embedded_columns)
     assert {"archived_at", "archived_by", "archive_reason"}.issubset(ticket_columns)
+    assert {"archived_at", "archived_by", "archive_reason"}.issubset(migrated_columns["shift_types"])
     for table in soft_delete_tables:
         assert {"deleted_at", "deleted_by", "delete_reason"}.issubset(migrated_columns[table])
     assert ticket_count == 1

@@ -10,6 +10,15 @@
 {% endblock %}
 
 {% block content %}
+{% macro shift_return_fields() -%}
+{% for store in selected_store_names %}
+<input type="hidden" name="return_store_names" value="{{ store }}">
+{% endfor %}
+<input type="hidden" name="return_status" value="{{ status_filter }}">
+<input type="hidden" name="return_global_scope" value="{{ global_scope }}">
+<input type="hidden" name="return_data_scope" value="{{ data_scope }}">
+{%- endmacro %}
+
 {% if error %}<div class="alert alert-error">{{ error }}</div>{% endif %}
 {% if success %}<div class="alert alert-success">{{ success }}</div>{% endif %}
 
@@ -44,6 +53,14 @@
         </div>
       </div>
       <label>
+        <span>数据范围</span>
+        <select name="data_scope">
+          {% for scope_value, scope_label in shift_data_scopes.items() %}
+          <option value="{{ scope_value }}" {% if data_scope == scope_value %}selected{% endif %}>{{ scope_label }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>
         <span>状态</span>
         <select name="status">
           <option value="all" {% if status_filter == 'all' %}selected{% endif %}>全部</option>
@@ -77,6 +94,7 @@
     {% endif %}
     <form class="schedule-form" method="post" action="/admin/shift-types/business-hours" data-feedback-form data-preserve-scroll data-loading-label="保存中...">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      {{ shift_return_fields() }}
       <input type="hidden" name="store_name" value="{{ selected_business_store }}">
       <label><span>门店</span><input value="{{ selected_business_store }}" disabled></label>
       <label><span>营业开始</span><input name="business_start_time" type="time" value="{{ selected_business_hours.business_start_time or '' }}"></label>
@@ -93,11 +111,23 @@
       <h2>新增班次</h2>
       <p>门店班次允许不同门店同名；同一门店或通用范围内名称不能重复。</p>
     </div>
-    <form class="schedule-form" method="post" action="/admin/shift-types" data-feedback-form data-loading-label="保存中...">
+    <form class="schedule-form" method="post" action="/admin/shift-types" data-shift-scope-form data-feedback-form data-loading-label="保存中...">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      {{ shift_return_fields() }}
+      <div class="scope-choice-group full-span" data-shift-scope-group>
+        <span>班次范围</span>
+        <label class="choice-chip scope-choice-chip">
+          <input type="radio" name="shift_scope" value="store" checked>
+          <span>门店班次</span>
+        </label>
+        <label class="choice-chip scope-choice-chip">
+          <input type="radio" name="shift_scope" value="global">
+          <span>通用班次</span>
+        </label>
+      </div>
       <label>
         <span>所属门店</span>
-        <select name="store_name">
+        <select name="store_name" data-shift-store-select required>
           <option value="">请选择门店</option>
           {% for store in stores %}
           <option value="{{ store }}" {% if selected_business_store == store %}selected{% endif %}>{{ store }}</option>
@@ -109,10 +139,6 @@
       <label><span>结束时间</span><input name="end_time" type="time"></label>
       <label><span>工时</span><input name="duration_hours" type="number" min="0" step="0.5" value="0"></label>
       <label><span>颜色</span><input name="color" type="color" value="#2563eb"></label>
-      <label class="inline-check">
-        <input name="is_global" type="checkbox" value="1">
-        <span>通用班次</span>
-      </label>
       <button class="primary-button compact" type="submit">新增班次</button>
     </form>
   </section>
@@ -125,22 +151,41 @@
           <span class="shift-color-dot" style="--shift-color: {{ shift.color or '#64748b' }}"></span>
           <div>
             <h3>{{ shift.shift_name }}</h3>
-            <p>{{ shift.store_label }} · {{ shift.duration_hours or 0 }} 小时</p>
+            <p class="shift-card-meta">
+              <span class="shift-scope-badge {{ 'global' if shift.is_global else 'store' }}">{{ '通用班次' if shift.is_global else '门店班次' }}</span>
+              <span>门店：{{ '全部门店可用' if shift.is_global else (shift.store_name or '未绑定门店') }}</span>
+              <span>{{ shift.duration_hours or 0 }} 小时</span>
+            </p>
           </div>
         </div>
-        <span class="shift-status-pill {{ 'active' if shift.is_active else 'inactive' }}">{{ '启用' if shift.is_active else '停用' }}</span>
+        <span class="shift-status-pill {% if shift.deleted_at %}deleted{% elif shift.archived_at %}archived{% elif shift.is_active %}active{% else %}inactive{% endif %}">
+          {% if shift.deleted_at %}回收站{% elif shift.archived_at %}已归档{% elif shift.is_active %}启用{% else %}停用{% endif %}
+        </span>
       </header>
       <div class="shift-time-axis">
         <span>{{ shift.start_time or '--:--' }}</span>
         <div><i style="--shift-color: {{ shift.color or '#64748b' }}"></i></div>
         <span>{{ shift.end_time or '--:--' }}</span>
       </div>
-      <form class="schedule-row-form shift-card-form" method="post" action="/admin/shift-types/{{ shift.id }}/update" data-feedback-form data-loading-label="保存中...">
+      {% if not shift.deleted_at and not shift.archived_at %}
+      <form class="schedule-row-form shift-card-form" method="post" action="/admin/shift-types/{{ shift.id }}/update" data-shift-scope-form data-feedback-form data-loading-label="保存中...">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        {{ shift_return_fields() }}
+        <div class="scope-choice-group full-span" data-shift-scope-group>
+          <span>班次范围</span>
+          <label class="choice-chip scope-choice-chip">
+            <input type="radio" name="shift_scope" value="store" {% if not shift.is_global %}checked{% endif %}>
+            <span>门店班次</span>
+          </label>
+          <label class="choice-chip scope-choice-chip">
+            <input type="radio" name="shift_scope" value="global" {% if shift.is_global %}checked{% endif %}>
+            <span>通用班次</span>
+          </label>
+        </div>
         <label>
-          <span>门店</span>
-          <select name="store_name">
-            <option value="">通用班次</option>
+          <span>所属门店</span>
+          <select name="store_name" data-shift-store-select {% if shift.is_global %}disabled{% else %}required{% endif %}>
+            <option value="">请选择门店</option>
             {% for store in stores %}
             <option value="{{ store }}" {% if shift.store_name == store %}selected{% endif %}>{{ store }}</option>
             {% endfor %}
@@ -152,19 +197,57 @@
         <label><span>工时</span><input name="duration_hours" type="number" min="0" step="0.5" value="{{ shift.duration_hours or 0 }}" aria-label="工时"></label>
         <label><span>颜色</span><input name="color" type="color" value="{{ shift.color or '#64748b' }}" aria-label="颜色"></label>
         <label class="inline-check">
-          <input name="is_global" type="checkbox" value="1" {% if shift.is_global %}checked{% endif %}>
-          <span>通用</span>
-        </label>
-        <label class="inline-check">
           <input name="is_active" type="checkbox" value="1" {% if shift.is_active %}checked{% endif %}>
           <span>启用</span>
         </label>
         <button class="ghost-button compact" type="submit">保存</button>
       </form>
-      <form method="post" action="/admin/shift-types/{{ shift.id }}/disable" onsubmit="return confirm('确认停用该班次吗？');" data-feedback-form data-loading-label="停用中...">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <button class="danger-button compact" type="submit">停用班次</button>
-      </form>
+      {% endif %}
+      <div class="shift-card-actions">
+        {% if shift.deleted_at %}
+        <form method="post" action="/admin/shift-types/{{ shift.id }}/restore" data-feedback-form data-loading-label="恢复中...">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          {{ shift_return_fields() }}
+          <button class="primary-button compact" type="submit">恢复班次</button>
+        </form>
+        <form method="post" action="/admin/shift-types/{{ shift.id }}/hard-delete" onsubmit="return confirm('确认永久删除该班次吗？此操作不可恢复。');" data-feedback-form data-loading-label="删除中...">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          {{ shift_return_fields() }}
+          <input type="hidden" name="confirm_delete" value="1">
+          <button class="danger-button compact" type="submit">永久删除</button>
+        </form>
+        {% elif shift.archived_at %}
+        <form method="post" action="/admin/shift-types/{{ shift.id }}/restore" data-feedback-form data-loading-label="恢复中...">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          {{ shift_return_fields() }}
+          <button class="primary-button compact" type="submit">取消归档</button>
+        </form>
+        <form method="post" action="/admin/shift-types/{{ shift.id }}/delete" onsubmit="return confirm('确认将该班次移入回收站吗？');" data-feedback-form data-loading-label="移入中...">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          {{ shift_return_fields() }}
+          <input type="hidden" name="delete_reason" value="班次设置移入回收站">
+          <button class="danger-button compact" type="submit">移入回收站</button>
+        </form>
+        {% else %}
+        <form method="post" action="/admin/shift-types/{{ shift.id }}/disable" onsubmit="return confirm('确认停用该班次吗？');" data-feedback-form data-loading-label="停用中...">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          {{ shift_return_fields() }}
+          <button class="danger-button compact" type="submit">停用班次</button>
+        </form>
+        <form method="post" action="/admin/shift-types/{{ shift.id }}/archive" onsubmit="return confirm('确认归档该班次吗？');" data-feedback-form data-loading-label="归档中...">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          {{ shift_return_fields() }}
+          <input type="hidden" name="archive_reason" value="班次设置归档">
+          <button class="ghost-button compact" type="submit">归档</button>
+        </form>
+        <form method="post" action="/admin/shift-types/{{ shift.id }}/delete" onsubmit="return confirm('确认将该班次移入回收站吗？');" data-feedback-form data-loading-label="移入中...">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          {{ shift_return_fields() }}
+          <input type="hidden" name="delete_reason" value="班次设置移入回收站">
+          <button class="danger-button compact" type="submit">移入回收站</button>
+        </form>
+        {% endif %}
+      </div>
     </article>
     {% else %}
     <div class="ops-card empty-cell">暂无班次。</div>
