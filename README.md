@@ -410,7 +410,9 @@ config/request_type_rules.json
 ]
 ```
 
-如果配置为空，系统仍可使用，详情页的处理人可以不指定。
+处理人列表会自动合并 `config/handlers.json` 与 `.env` 中的 `ADMIN_USERS` 用户名；如果 `config/handlers.json` 不存在，则直接使用 `ADMIN_USERS` 作为处理人列表。这样能登录后台的账号默认都可以被选择为处理人。旧的处理人名称（例如“总部运营”）继续通过 `config/handlers.json` 保留。
+
+后台也提供登录态接口 `GET /api/handlers`，返回当前统一处理人列表，便于前端控件使用同一来源。
 
 ### 后台多账号配置
 

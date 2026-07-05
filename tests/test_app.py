@@ -752,6 +752,55 @@ def test_admin_my_work_shows_assigned_tickets_and_user_tasks(tmp_path, monkeypat
     assert "跟进供应商报价" not in caigou_work.text
 
 
+def test_admin_users_are_valid_handler_options_for_detail_update(tmp_path, monkeypatch):
+    client, _ = build_client(
+        tmp_path,
+        monkeypatch,
+        config_overrides={"handlers.json": ["总部运营"]},
+        admin_users=f"{ADMIN_AUTH[0]}:{ADMIN_AUTH[1]},liuhao:pw,newaccount:pw",
+    )
+    logged_in_client(client)
+    submit_ticket(client, description="登录账号也能作为处理人的工单")
+
+    detail_page = client.get("/admin/ticket/1")
+    api_response = client.get("/api/handlers")
+
+    assert detail_page.status_code == 200
+    assert api_response.status_code == 200
+    for handler in ("总部运营", ADMIN_AUTH[0], "liuhao", "newaccount"):
+        assert f'value="{handler}"' in detail_page.text
+        assert handler in api_response.json()["handlers"]
+
+    update = admin_post(
+        client,
+        "/admin/ticket/1",
+        data={"status": "处理中", "assigned_to": "liuhao", "handler_note": "liuhao 接手处理"},
+        follow_redirects=False,
+    )
+
+    assert update.status_code == 303
+    assert rows_for(tmp_path, "tickets")[0]["assigned_to"] == "liuhao"
+    assert ticket_action_logs(tmp_path, 1)[-1]["new_assigned_to"] == "liuhao"
+
+
+def test_handlers_fallback_to_admin_users_when_config_file_missing(tmp_path, monkeypatch):
+    client, main = build_client(
+        tmp_path,
+        monkeypatch,
+        admin_users=f"{ADMIN_AUTH[0]}:{ADMIN_AUTH[1]},liuhao:pw,newaccount:pw",
+    )
+    (tmp_path / "config" / "handlers.json").unlink()
+    logged_in_client(client)
+
+    handlers = main.load_app_config().handlers
+    response = client.get("/api/handlers")
+
+    assert handlers == [ADMIN_AUTH[0], "liuhao", "newaccount"]
+    assert response.status_code == 200
+    assert response.json()["handlers"] == handlers
+    assert "总部运营" not in handlers
+
+
 def test_ticket_detail_workbench_comment_modes_and_close_prompt(tmp_path, monkeypatch):
     client, _ = build_client(tmp_path, monkeypatch)
     submit_ticket(client, description="协作工作台提示工单")

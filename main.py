@@ -48,7 +48,7 @@ DEFAULT_REQUEST_TYPES = ["建单需求", "审单需求", "商品异常", "缺货
 DEFAULT_URGENCY_LEVELS = ["普通", "加急", "当天必须处理"]
 DEFAULT_STATUSES = ["待处理", "处理中", "待门店补充", "已完成", "已驳回"]
 DEFAULT_BRANDS: List[str] = []
-DEFAULT_HANDLERS = ["总部商品", "总部运营", "采购", "财务"]
+DEFAULT_HANDLERS: List[str] = []
 TASK_STATUSES = ["待处理", "处理中", "已完成"]
 EMPLOYEE_STATUSES = ["在职", "离职", "停用"]
 DUE_STATUS_OPTIONS = ["已超时", "今日到期", "未到期", "未设置", "超时完成", "按时完成"]
@@ -260,6 +260,18 @@ def get_admin_credentials() -> List[Tuple[str, str]]:
     if not username or not password:
         raise HTTPException(status_code=503, detail="Admin credentials are not configured.")
     return [(username, password)]
+
+
+def admin_usernames_for_handlers() -> List[str]:
+    admin_users = os.environ.get("ADMIN_USERS")
+    if admin_users is not None:
+        return unique_clean_values(username for username, _password in parse_admin_users(admin_users))
+
+    username = os.environ.get("ADMIN_USERNAME", "").strip()
+    password = os.environ.get("ADMIN_PASSWORD", "")
+    if username and password:
+        return [username]
+    return []
 
 
 def authenticate_admin(username: str, password: str) -> Optional[str]:
@@ -1118,6 +1130,15 @@ def load_list_config(filename: str, default: List[str], allow_empty: bool = Fals
     return clean_string_list(load_json_file(filename, default), default, allow_empty=allow_empty)
 
 
+def load_handlers() -> List[str]:
+    admin_handlers = admin_usernames_for_handlers()
+    handlers_path = get_config_dir() / "handlers.json"
+    if handlers_path.exists():
+        configured_handlers = load_list_config("handlers.json", [], allow_empty=True)
+        return unique_clean_values([*configured_handlers, *admin_handlers])
+    return unique_clean_values(admin_handlers)
+
+
 def positive_int_config(system: Dict[str, object], key: str) -> int:
     value = system.get(key)
     default_value = int(DEFAULT_SYSTEM[key])
@@ -1201,7 +1222,7 @@ def load_app_config() -> AppConfig:
         urgency_levels=load_list_config("urgency_levels.json", DEFAULT_URGENCY_LEVELS),
         statuses=statuses,
         brands=load_list_config("brands.json", DEFAULT_BRANDS, allow_empty=True),
-        handlers=load_list_config("handlers.json", DEFAULT_HANDLERS, allow_empty=True),
+        handlers=load_handlers(),
         app_name=str(system["app_name"]),
         port=int(system["port"]),
         max_image_mb=int(system["max_image_mb"]),
@@ -4785,6 +4806,10 @@ def create_app() -> FastAPI:
             "required_missing_routes": required_missing_routes(app),
             "started_at": APP_STARTED_AT,
         }
+
+    @app.get("/api/handlers")
+    def handlers_api(_admin: str = Depends(require_admin)) -> Dict[str, List[str]]:
+        return {"handlers": load_app_config().handlers}
 
     @app.exception_handler(404)
     def admin_not_found_handler(request: Request, exc: HTTPException):
