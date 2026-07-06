@@ -148,6 +148,7 @@ ADMIN_PERMISSION_KEYS = [
     "schedule.update",
     "schedule.delete",
     "schedule.export",
+    "schedule.override_conflict",
     "employee.view",
     "employee.create",
     "employee.update",
@@ -2974,6 +2975,7 @@ def admin_permission_groups() -> List[Dict[str, object]]:
         "schedule.view": "查看排班",
         "schedule.create": "新增排班",
         "schedule.export": "导出排班",
+        "schedule.override_conflict": "覆盖排班冲突",
         "employee.view": "查看员工",
         "role.view": "查看角色",
         "role.update": "编辑角色权限",
@@ -6059,6 +6061,12 @@ def build_schedule_employee_summaries(
                 "schedule_day_count": len(scheduled_dates),
                 "rest_day_count": sum(1 for row in employee_rows if str(row.get("shift_name") or "") == "休息"),
                 "unscheduled_day_count": max(len(days) - len(scheduled_dates), 0),
+                "warnings": schedule_validation_service.build_schedule_warnings(
+                    employee_id,
+                    days[0]["date"][:7] if days else datetime.now().strftime("%Y-%m"),
+                    employee_rows,
+                ),
+                "conflict_count": sum(1 for row in employee_rows if row.get("has_conflict")),
             }
         )
     return summaries
@@ -6115,6 +6123,8 @@ def build_schedule_calendar_summary(days: List[Dict[str, object]], rows: List[Di
             shift_counts[shift_name] = shift_counts.get(shift_name, 0) + 1
             store_counts[store_name] = store_counts.get(store_name, 0) + 1
         total_hours = round(sum(float(row.get("duration_hours") or 0) for row in day_rows), 2)
+        conflict_count = sum(1 for row in day_rows if row.get("has_conflict"))
+        warning_count = sum(len(row.get("warnings") or []) for row in day_rows)
         summary.append(
             {
                 "day": day,
@@ -6125,6 +6135,8 @@ def build_schedule_calendar_summary(days: List[Dict[str, object]], rows: List[Di
                 "display_hours": f"{format_hours_value(total_hours)} 小时",
                 "shift_counts": shift_counts,
                 "store_counts": store_counts,
+                "conflict_count": conflict_count,
+                "warning_count": warning_count,
             }
         )
     return summary
@@ -6146,6 +6158,8 @@ def build_daily_schedule_overview(days: List[Dict[str, object]], rows: List[Dict
                 "total_hours": total_hours,
                 "display_hours": f"{format_hours_value(total_hours)} 小时",
                 "shift_count": len(day_rows),
+                "conflict_count": sum(1 for row in day_rows if row.get("has_conflict")),
+                "warning_count": sum(len(row.get("warnings") or []) for row in day_rows),
             }
         )
     return overview
@@ -7191,6 +7205,8 @@ def fetch_schedule_context(
         is_all_stores=is_all,
         selected_employee_ids=selected_ids,
     )
+    quality = schedule_validation_service.build_schedule_quality(rows, str(filters["month"]))
+    rows = list(quality["rows"])
     schedule_map: Dict[str, Dict[int, Dict[str, object]]] = {}
     daily_store_counts: Dict[str, Dict[str, int]] = {}
     for row in rows:
@@ -7206,6 +7222,8 @@ def fetch_schedule_context(
         "total_hours": total_hours,
         "unscheduled_day_count": max(len(days) - len(scheduled_dates), 0),
         "rest_shift_count": sum(1 for row in rows if str(row.get("shift_name") or "") == "休息"),
+        "conflict_count": int(quality["conflict_count"] or 0),
+        "warning_count": int(quality["warning_count"] or 0),
     }
     selected_id_strings = [str(employee_id) for employee_id in selected_ids]
     query_items: List[Tuple[str, str]] = [
@@ -7513,6 +7531,291 @@ def calculate_duration_from_times(start_time: str, end_time: str, break_minutes:
     return round((end_minutes - start_minutes - max(break_minutes, 0)) / 60, 2)
 
 
+class ScheduleValidationService:
+    def is_rest_schedule(self, schedule: Dict[str, object]) -> bool:
+        shift_name = str(schedule.get("shift_name") or schedule.get("custom_label") or "").strip()
+        if "休息" in shift_name:
+            return True
+        try:
+            duration = float(schedule.get("duration_hours") or schedule.get("custom_duration_hours") or 0)
+        except (TypeError, ValueError):
+            duration = 0.0
+        return duration <= 0 and not str(schedule.get("start_time") or schedule.get("custom_start_time") or "").strip()
+
+    def normalize_schedule_time(self, schedule: Dict[str, object]) -> Dict[str, object]:
+        date_text = normalize_schedule_date(str(schedule.get("schedule_date") or ""))
+        start_text = str(schedule.get("start_time") or schedule.get("custom_start_time") or "").strip()
+        end_text = str(schedule.get("end_time") or schedule.get("custom_end_time") or "").strip()
+        is_rest = self.is_rest_schedule(schedule)
+        normalized: Dict[str, object] = {
+            "schedule": schedule,
+            "date": date_text,
+            "start_time": start_text,
+            "end_time": end_text,
+            "is_rest": is_rest,
+            "has_time": bool(start_text and end_text and not is_rest),
+            "start_minutes": None,
+            "end_minutes": None,
+        }
+        if not normalized["has_time"]:
+            return normalized
+        start_minutes = time_to_minutes(start_text)
+        end_minutes = time_to_minutes(end_text)
+        base_date = datetime.strptime(date_text, "%Y-%m-%d")
+        if end_minutes <= start_minutes:
+            end_minutes += 24 * 60
+        normalized["start_minutes"] = int((base_date - datetime(1970, 1, 1)).total_seconds() // 60) + start_minutes
+        normalized["end_minutes"] = int((base_date - datetime(1970, 1, 1)).total_seconds() // 60) + end_minutes
+        return normalized
+
+    def time_ranges_overlap(self, first: Dict[str, object], second: Dict[str, object]) -> bool:
+        if not first.get("has_time") or not second.get("has_time"):
+            return False
+        return int(first["start_minutes"]) < int(second["end_minutes"]) and int(second["start_minutes"]) < int(first["end_minutes"])
+
+    def calculate_schedule_hours(self, start_time: str, end_time: str, break_minutes: int = 0) -> float:
+        return calculate_duration_from_times(start_time, end_time, break_minutes)
+
+    def describe_schedule(self, schedule: Dict[str, object]) -> str:
+        employee_name = str(schedule.get("employee_name") or schedule.get("employee_id") or "未知员工")
+        store_name = str(schedule.get("store_name") or "未知门店")
+        shift_name = str(schedule.get("shift_name") or schedule.get("custom_label") or "未设置班次")
+        display_time = str(schedule.get("display_time") or "").strip()
+        if not display_time or display_time == "-":
+            display_time, _is_cross_day = format_schedule_time_range(schedule.get("start_time") or schedule.get("custom_start_time"), schedule.get("end_time") or schedule.get("custom_end_time"))
+        return f"{employee_name} {schedule.get('schedule_date')} {display_time}（{store_name} · {shift_name}）"
+
+    def candidate_schedule(
+        self,
+        store_name: str,
+        employee: Dict[str, object],
+        schedule_date: str,
+        shift_type_id: int,
+        custom_schedule: Optional[Dict[str, object]] = None,
+    ) -> Dict[str, object]:
+        if custom_schedule:
+            return {
+                "id": None,
+                "store_name": store_name,
+                "employee_id": int(employee["id"]),
+                "employee_name": employee.get("employee_name") or "",
+                "schedule_date": normalize_schedule_date(schedule_date),
+                "shift_type_id": 0,
+                "shift_name": str(custom_schedule.get("custom_label") or "自定义"),
+                "start_time": str(custom_schedule.get("custom_start_time") or ""),
+                "end_time": str(custom_schedule.get("custom_end_time") or ""),
+                "duration_hours": float(custom_schedule.get("custom_duration_hours") or 0),
+                "is_custom_time": 1,
+            }
+        shift_type = fetch_shift_type(shift_type_id)
+        if not shift_type:
+            raise ValueError("班次不存在。")
+        return {
+            "id": None,
+            "store_name": store_name,
+            "employee_id": int(employee["id"]),
+            "employee_name": employee.get("employee_name") or "",
+            "schedule_date": normalize_schedule_date(schedule_date),
+            "shift_type_id": shift_type_id,
+            "shift_name": shift_type.get("shift_name") or "未设置班次",
+            "start_time": shift_type.get("start_time") or "",
+            "end_time": shift_type.get("end_time") or "",
+            "duration_hours": float(shift_type.get("duration_hours") or 0),
+            "is_custom_time": 0,
+        }
+
+    def detect_schedule_conflicts(
+        self,
+        employee_id: int,
+        schedule_date: str,
+        start_time: str,
+        end_time: str,
+        exclude_schedule_id: Optional[int] = None,
+        candidate: Optional[Dict[str, object]] = None,
+    ) -> List[Dict[str, object]]:
+        clean_date = normalize_schedule_date(schedule_date)
+        candidate_schedule = dict(candidate or {"employee_id": employee_id, "schedule_date": clean_date, "start_time": start_time, "end_time": end_time})
+        candidate_range = self.normalize_schedule_time(candidate_schedule)
+        if candidate_range.get("is_rest"):
+            return []
+        if not candidate_range.get("has_time"):
+            return [
+                {
+                    "type": "insufficient_time",
+                    "message": "时间不足，无法检测冲突。",
+                    "candidate": candidate_schedule,
+                    "existing": {},
+                }
+            ]
+        base_date = datetime.strptime(clean_date, "%Y-%m-%d").date()
+        from_date = (base_date - timedelta(days=1)).isoformat()
+        to_date = (base_date + timedelta(days=1)).isoformat()
+        with get_connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT
+                    schedules.id, schedules.store_name, schedules.employee_id, schedules.schedule_date,
+                    schedules.shift_type_id, COALESCE(schedules.is_custom_time, 0) AS is_custom_time,
+                    schedules.custom_start_time, schedules.custom_end_time, schedules.custom_duration_hours, schedules.custom_label,
+                    employees.employee_name,
+                    shift_types.shift_name, shift_types.start_time, shift_types.end_time, shift_types.duration_hours
+                FROM store_schedules AS schedules
+                JOIN employees ON employees.id = schedules.employee_id
+                LEFT JOIN shift_types ON shift_types.id = schedules.shift_type_id
+                WHERE schedules.employee_id = ?
+                  AND schedules.schedule_date >= ?
+                  AND schedules.schedule_date <= ?
+                ORDER BY schedules.schedule_date, schedules.id
+                """,
+                (int(employee_id), from_date, to_date),
+            ).fetchall()
+        conflicts: List[Dict[str, object]] = []
+        for row in rows:
+            existing = dict(row)
+            if exclude_schedule_id and int(existing.get("id") or 0) == int(exclude_schedule_id):
+                continue
+            if int(existing.get("is_custom_time") or 0) == 1:
+                existing["shift_name"] = existing.get("custom_label") or "自定义"
+                existing["start_time"] = existing.get("custom_start_time") or ""
+                existing["end_time"] = existing.get("custom_end_time") or ""
+                existing["duration_hours"] = float(existing.get("custom_duration_hours") or 0)
+            existing_range = self.normalize_schedule_time(existing)
+            if existing_range.get("is_rest"):
+                continue
+            if not existing_range.get("has_time"):
+                continue
+            if self.time_ranges_overlap(candidate_range, existing_range):
+                conflicts.append(
+                    {
+                        "type": "overlap",
+                        "message": f"排班冲突：{self.describe_schedule(candidate_schedule)} 与已存在排班 {self.describe_schedule(existing)} 时间重叠。",
+                        "candidate": candidate_schedule,
+                        "existing": existing,
+                    }
+                )
+        return conflicts
+
+    def detect_batch_schedule_conflicts(
+        self,
+        store_name: str,
+        employee_ids: List[int],
+        schedule_dates: List[str],
+        shift_type_id: int,
+        custom_schedule: Optional[Dict[str, object]] = None,
+        overwrite_existing: bool = False,
+    ) -> List[Dict[str, object]]:
+        conflicts: List[Dict[str, object]] = []
+        for selected_employee_id in employee_ids:
+            employee = fetch_employee(selected_employee_id)
+            if not employee:
+                continue
+            for selected_date in schedule_dates:
+                existing_same_store = existing_schedule_for(selected_employee_id, selected_date, store_name)
+                if existing_same_store and not overwrite_existing:
+                    continue
+                candidate = self.candidate_schedule(store_name, employee, selected_date, shift_type_id, custom_schedule)
+                conflicts.extend(
+                    self.detect_schedule_conflicts(
+                        selected_employee_id,
+                        selected_date,
+                        str(candidate.get("start_time") or ""),
+                        str(candidate.get("end_time") or ""),
+                        exclude_schedule_id=int(existing_same_store["id"]) if existing_same_store else None,
+                        candidate=candidate,
+                    )
+                )
+        return [conflict for conflict in conflicts if conflict.get("type") == "overlap"]
+
+    def build_schedule_warnings(self, employee_id: int, month: str, rows: List[Dict[str, object]]) -> List[Dict[str, object]]:
+        _normalized_month = normalize_month(month)
+        employee_rows = [dict(row) for row in rows if int(row.get("employee_id") or 0) == int(employee_id)]
+        rows_by_date: Dict[str, List[Dict[str, object]]] = {}
+        for row in employee_rows:
+            rows_by_date.setdefault(str(row.get("schedule_date") or ""), []).append(row)
+        warnings: List[Dict[str, object]] = []
+        working_dates: List[str] = []
+        for date_text, day_rows in sorted(rows_by_date.items()):
+            active_rows = [row for row in day_rows if not self.is_rest_schedule(row)]
+            if active_rows:
+                working_dates.append(date_text)
+            total_hours = round(sum(float(row.get("duration_hours") or 0) for row in active_rows), 2)
+            store_names = unique_clean_values([str(row.get("store_name") or "") for row in active_rows])
+            if total_hours > 12:
+                warnings.append({"level": "danger", "type": "daily_hours_high", "date": date_text, "message": f"{date_text} 单日工时严重偏高：{format_hours_value(total_hours)} 小时。"})
+            elif total_hours > 10:
+                warnings.append({"level": "warning", "type": "daily_hours_high", "date": date_text, "message": f"{date_text} 单日工时偏高：{format_hours_value(total_hours)} 小时。"})
+            if len(store_names) > 1:
+                warnings.append({"level": "info", "type": "cross_store", "date": date_text, "message": f"{date_text} 跨店排班：{join_display_values(store_names)}。"})
+            for row in active_rows:
+                if int(row.get("is_custom_time") or 0) == 1:
+                    warnings.append({"level": "custom", "type": "custom_time", "date": date_text, "message": f"{date_text} 自定义工时：{row.get('shift_name') or '自定义'}。"})
+        consecutive: List[str] = []
+        for date_text in sorted(working_dates):
+            if not consecutive:
+                consecutive = [date_text]
+                continue
+            previous = datetime.strptime(consecutive[-1], "%Y-%m-%d").date()
+            current = datetime.strptime(date_text, "%Y-%m-%d").date()
+            if current == previous + timedelta(days=1):
+                consecutive.append(date_text)
+            else:
+                if len(consecutive) > 6:
+                    warnings.append({"level": "warning", "type": "continuous_days", "date": consecutive[-1], "message": f"{consecutive[0]} 至 {consecutive[-1]} 连续排班超过 6 天。"})
+                consecutive = [date_text]
+        if len(consecutive) > 6:
+            warnings.append({"level": "warning", "type": "continuous_days", "date": consecutive[-1], "message": f"{consecutive[0]} 至 {consecutive[-1]} 连续排班超过 6 天。"})
+        return warnings
+
+    def build_schedule_quality(self, rows: List[Dict[str, object]], month: str) -> Dict[str, object]:
+        quality_rows = [dict(row) for row in rows]
+        by_id: Dict[int, Dict[str, object]] = {}
+        for row in quality_rows:
+            row["conflicts"] = []
+            row["warnings"] = []
+            row["warning_messages"] = []
+            row["has_conflict"] = False
+            row["has_warning"] = False
+            by_id[int(row["id"])] = row
+        by_employee: Dict[int, List[Dict[str, object]]] = {}
+        for row in quality_rows:
+            by_employee.setdefault(int(row.get("employee_id") or 0), []).append(row)
+        conflict_count = 0
+        for employee_rows in by_employee.values():
+            for index, first in enumerate(employee_rows):
+                first_range = self.normalize_schedule_time(first)
+                if first_range.get("is_rest") or not first_range.get("has_time"):
+                    continue
+                for second in employee_rows[index + 1 :]:
+                    second_range = self.normalize_schedule_time(second)
+                    if second_range.get("is_rest") or not second_range.get("has_time"):
+                        continue
+                    if self.time_ranges_overlap(first_range, second_range):
+                        message = f"{self.describe_schedule(first)} 与 {self.describe_schedule(second)} 时间重叠。"
+                        for row in (first, second):
+                            row["has_conflict"] = True
+                            row["conflicts"].append(message)
+                        conflict_count += 1
+        warning_count = 0
+        for employee_id, employee_rows in by_employee.items():
+            warnings = self.build_schedule_warnings(employee_id, month, employee_rows)
+            warning_count += len([item for item in warnings if item.get("type") != "custom_time"])
+            for warning in warnings:
+                date_text = str(warning.get("date") or "")
+                for row in employee_rows:
+                    if str(row.get("schedule_date") or "") == date_text:
+                        row["has_warning"] = True
+                        row["warnings"].append(warning)
+                        row["warning_messages"].append(warning["message"])
+        return {
+            "rows": quality_rows,
+            "conflict_count": conflict_count,
+            "warning_count": warning_count,
+        }
+
+
+schedule_validation_service = ScheduleValidationService()
+
+
 def normalize_custom_schedule_payload(
     schedule_mode: str,
     shift_type_id: int,
@@ -7555,6 +7858,7 @@ def bulk_upsert_schedules(
     operator: str,
     max_bulk_count: int,
     custom_schedule: Optional[Dict[str, object]] = None,
+    override_conflict: bool = False,
 ) -> Dict[str, int]:
     clean_store = store_name.strip()
     if not clean_store:
@@ -7584,6 +7888,17 @@ def bulk_upsert_schedules(
         if str(employee.get("status") or "") != "在职":
             raise ValueError("员工必须是在职状态。")
 
+    conflicts = schedule_validation_service.detect_batch_schedule_conflicts(
+        clean_store,
+        employee_ids,
+        schedule_dates,
+        shift_type_id,
+        custom_schedule=custom_schedule,
+        overwrite_existing=overwrite_existing,
+    )
+    if conflicts and not override_conflict:
+        raise ValueError("；".join([str(conflict.get("message") or "排班冲突") for conflict in conflicts[:5]]))
+
     created_count = 0
     updated_count = 0
     skipped_count = 0
@@ -7599,12 +7914,18 @@ def bulk_upsert_schedules(
             else:
                 created_count += 1
 
+    saved_rows = fetch_schedule_rows(clean_store, schedule_dates[0][:7], store_names=[clean_store], selected_employee_ids=employee_ids)
+    warnings = []
+    for selected_employee_id in employee_ids:
+        warnings.extend(schedule_validation_service.build_schedule_warnings(selected_employee_id, schedule_dates[0][:7], saved_rows))
     return {
         "created_count": created_count,
         "updated_count": updated_count,
         "skipped_count": skipped_count,
         "saved_count": created_count + updated_count,
         "total_count": total_count,
+        "conflict_count": len(conflicts),
+        "warnings": warnings,
     }
 
 
@@ -7689,7 +8010,7 @@ def build_schedule_excel(rows: List[Dict[str, object]]) -> BytesIO:
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "门店排班"
-    headers = ["门店", "员工", "日期", "星期", "班次", "排班时间", "工时", "是否自定义", "备注"]
+    headers = ["门店", "员工", "日期", "星期", "班次", "排班时间", "工时", "是否自定义", "备注", "是否冲突", "工时异常", "异常说明"]
     sheet.append(headers)
     header_fill = PatternFill(fill_type="solid", fgColor="E8EEF7")
     for cell in sheet[1]:
@@ -7708,9 +8029,12 @@ def build_schedule_excel(rows: List[Dict[str, object]]) -> BytesIO:
                 row.get("display_hours") or f"{format_hours_value(row.get('duration_hours'))} 小时",
                 "是" if int(row.get("is_custom_time") or 0) == 1 else "否",
                 row.get("note") or "",
+                "是" if row.get("has_conflict") else "否",
+                "是" if row.get("warnings") else "否",
+                "；".join([str(item.get("message") or item) for item in row.get("warnings") or []] + [str(item) for item in row.get("conflicts") or []]),
             ]
         )
-    widths = [18, 16, 14, 10, 14, 18, 12, 12, 28]
+    widths = [18, 16, 14, 10, 14, 18, 12, 12, 28, 10, 12, 40]
     for index, width in enumerate(widths, start=1):
         sheet.column_dimensions[get_column_letter(index)].width = width
     for row in sheet.iter_rows(min_row=2):
@@ -11673,6 +11997,7 @@ def create_app() -> FastAPI:
         custom_duration_hours: str = Form(""),
         note: str = Form(""),
         overwrite_existing: str = Form(""),
+        override_conflict: str = Form(""),
         csrf_token: str = Form(""),
     ) -> RedirectResponse:
         admin = str(current_user.get("username") or "")
@@ -11706,6 +12031,8 @@ def create_app() -> FastAPI:
             )
             month_for_return = clean_dates[0][:7]
             is_legacy_single_submission = not employee_ids and not schedule_dates and bool(employee_id and schedule_date.strip())
+            requested_override_conflict = override_conflict in {"1", "true", "on", "yes"}
+            can_override_conflict = permission_service.has_permission(current_user, "schedule.override_conflict")
             result = bulk_upsert_schedules(
                 return_store,
                 clean_employee_ids,
@@ -11716,9 +12043,30 @@ def create_app() -> FastAPI:
                 admin,
                 config.max_bulk_schedule_count,
                 custom_schedule=custom_schedule,
+                override_conflict=requested_override_conflict and can_override_conflict,
             )
         except (ValueError, HTTPException) as exc:
+            if "排班冲突" in form_error_message(exc):
+                record_operation_log(admin, "schedule.conflict_blocked", "schedule", "", {"store_name": return_store, "message": form_error_message(exc)}, request)
             return RedirectResponse(url=schedule_redirect_url(return_store, month_for_return, error=form_error_message(exc)), status_code=303)
+        if int(result.get("conflict_count") or 0) > 0:
+            record_operation_log(
+                admin,
+                "schedule.override_conflict",
+                "schedule",
+                "",
+                {"store_name": return_store, "month": month_for_return, "override_conflict": True, "conflict_count": result.get("conflict_count")},
+                request,
+            )
+        if result.get("warnings"):
+            record_operation_log(
+                admin,
+                "schedule.warning",
+                "schedule",
+                "",
+                {"store_name": return_store, "month": month_for_return, "warning_count": len(result.get("warnings") or [])},
+                request,
+            )
         record_operation_log(
             admin,
             "schedule.create",
@@ -13963,6 +14311,7 @@ def create_app() -> FastAPI:
             include_custom_shift=include_custom_shift,
             is_all_stores=is_all_stores,
         )
+        rows = list(schedule_validation_service.build_schedule_quality(rows, selected_month)["rows"])
         output = build_schedule_excel(rows)
         if not selected_store_names:
             filename_store = "全部门店"

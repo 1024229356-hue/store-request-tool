@@ -2997,6 +2997,48 @@ a:focus-visible {
   font-weight: 800;
 }
 
+.schedule-quality-badge {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  max-width: 100%;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: #eef2ff;
+  color: #3730a3;
+  font-size: 11px;
+  font-weight: 900;
+  line-height: 1.35;
+  white-space: normal;
+}
+
+.schedule-quality-badge.danger {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.schedule-quality-badge.warning {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.schedule-quality-badge.info {
+  background: #dbeafe;
+  color: #1e40af;
+}
+
+.schedule-quality-badge.custom {
+  background: #f3e8ff;
+  color: #6b21a8;
+}
+
+.schedule-warning-stack {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
 .calendar-shift-counts,
 .store-summary-counts {
   display: flex;

@@ -288,7 +288,8 @@ def csrf_token_for(client, path="/admin"):
 
 def admin_post(client, url, data=None, **kwargs):
     payload = dict(data or {})
-    payload.setdefault("csrf_token", csrf_token_for(client))
+    if "csrf_token" not in payload:
+        payload["csrf_token"] = csrf_token_for(client)
     return client.post(url, data=payload, **kwargs)
 
 
@@ -6091,7 +6092,8 @@ def test_schedule_multi_select_filters_dashboard_and_exports(tmp_path, monkeypat
 
     workbook = load_workbook(BytesIO(multi_export.content))
     rows = list(workbook.active.iter_rows(values_only=True))
-    assert rows[0] == ("门店", "员工", "日期", "星期", "班次", "排班时间", "工时", "是否自定义", "备注")
+    assert rows[0][:9] == ("门店", "员工", "日期", "星期", "班次", "排班时间", "工时", "是否自定义", "备注")
+    assert rows[0][-3:] == ("是否冲突", "工时异常", "异常说明")
     assert any(row[:8] == ("南京门东店", "南京看板员工", first_day, "周三", "早班", "09:30-17:30", "8 小时", "否") for row in rows)
     assert any(row[:8] == ("南昌万寿宫店", "南昌看板员工", second_day, "周四", "加班", "18:00-21:00", "3 小时", "是") for row in rows)
 
@@ -6131,6 +6133,237 @@ def test_store_specific_shift_cannot_be_used_for_other_store(tmp_path, monkeypat
     page = client.get(response.headers["location"])
     assert "班次不属于当前门店" in page.text
     assert rows_for(tmp_path, "store_schedules") == []
+
+
+def test_schedule_conflict_detection_hours_warnings_override_and_export(tmp_path, monkeypatch):
+    client, main = build_client(tmp_path, monkeypatch)
+    logged_in_client(client)
+    create_schedule_employee(client, "冲突员工", store_names=["南京门东店", "南昌万寿宫店"])
+
+    assert "schedule.override_conflict" in main.ADMIN_PERMISSION_KEYS
+    assert "schedule.override_conflict" in main.permission_service.get_user_permissions(main.fetch_admin_user_by_username(ADMIN_AUTH[0]))
+
+    created = admin_post(
+        client,
+        "/admin/schedules",
+        data={
+            "store_name": "南京门东店",
+            "employee_id": "1",
+            "schedule_date": "2026-07-08",
+            "shift_type_id": "1",
+            "note": "早班",
+        },
+        follow_redirects=False,
+    )
+    assert created.status_code == 303
+    assert len(rows_for(tmp_path, "store_schedules")) == 1
+
+    blocked = admin_post(
+        client,
+        "/admin/schedules",
+        data={
+            "store_name": "南昌万寿宫店",
+            "employee_id": "1",
+            "schedule_date": "2026-07-08",
+            "shift_type_id": "1",
+            "note": "跨店重叠",
+        },
+        follow_redirects=False,
+    )
+    assert blocked.status_code == 303
+    blocked_page = client.get(blocked.headers["location"])
+    assert "排班冲突" in blocked_page.text
+    assert "冲突员工" in blocked_page.text
+    assert "南昌万寿宫店" in blocked_page.text
+    assert len(rows_for(tmp_path, "store_schedules")) == 1
+
+    readonly_role = create_role_with_permissions(tmp_path, "schedule-no-override", ["schedule.view", "schedule.create", "schedule.update"])
+    update_admin_user_access(tmp_path, ADMIN_AUTH[0], readonly_role)
+    no_override_page = client.get("/admin/schedules?store_name=南京门东店&month=2026-07")
+    assert "忽略冲突并保存" not in no_override_page.text
+
+    still_blocked = admin_post(
+        client,
+        "/admin/schedules",
+        data={
+            "store_name": "南昌万寿宫店",
+            "employee_id": "1",
+            "schedule_date": "2026-07-08",
+            "shift_type_id": "1",
+            "override_conflict": "1",
+            "csrf_token": csrf_token_for(client, "/admin/schedules?store_name=南京门东店&month=2026-07"),
+        },
+        follow_redirects=False,
+    )
+    assert still_blocked.status_code == 303
+    assert "排班冲突" in client.get(still_blocked.headers["location"]).text
+    assert len(rows_for(tmp_path, "store_schedules")) == 1
+
+    system_role_id = next(row["id"] for row in rows_for(tmp_path, "admin_roles") if row["role_name"] == "系统管理员")
+    update_admin_user_access(tmp_path, ADMIN_AUTH[0], system_role_id)
+    override_page = client.get("/admin/schedules?store_name=南京门东店&month=2026-07")
+    assert "忽略冲突并保存" in override_page.text
+    overridden = admin_post(
+        client,
+        "/admin/schedules",
+        data={
+            "store_name": "南昌万寿宫店",
+            "employee_id": "1",
+            "schedule_date": "2026-07-08",
+            "shift_type_id": "1",
+            "override_conflict": "1",
+            "note": "允许覆盖",
+        },
+        follow_redirects=False,
+    )
+    assert overridden.status_code == 303
+    assert len(rows_for(tmp_path, "store_schedules")) == 2
+    operations = rows_for(tmp_path, "admin_operation_logs")
+    assert any(row["action"] == "schedule.override_conflict" and "override_conflict" in row["detail"] for row in operations)
+
+    custom_overlap = admin_post(
+        client,
+        "/admin/schedules",
+        data={
+            "store_name": "南京门东店",
+            "employee_id": "1",
+            "schedule_date": "2026-07-08",
+            "schedule_mode": "custom",
+            "shift_type_id": "custom",
+            "custom_label": "自定义重叠",
+            "custom_start_time": "10:00",
+            "custom_end_time": "12:00",
+        },
+        follow_redirects=False,
+    )
+    assert "排班冲突" in client.get(custom_overlap.headers["location"]).text
+    assert len(rows_for(tmp_path, "store_schedules")) == 2
+
+    admin_post(
+        client,
+        "/admin/schedules",
+        data={
+            "store_name": "南京门东店",
+            "employee_id": "1",
+            "schedule_date": "2026-07-09",
+            "schedule_mode": "custom",
+            "shift_type_id": "custom",
+            "custom_label": "跨天",
+            "custom_start_time": "23:00",
+            "custom_end_time": "01:00",
+        },
+        follow_redirects=False,
+    )
+    cross_day_block = admin_post(
+        client,
+        "/admin/schedules",
+        data={
+            "store_name": "南昌万寿宫店",
+            "employee_id": "1",
+            "schedule_date": "2026-07-10",
+            "schedule_mode": "custom",
+            "shift_type_id": "custom",
+            "custom_label": "次日凌晨",
+            "custom_start_time": "00:30",
+            "custom_end_time": "08:00",
+        },
+        follow_redirects=False,
+    )
+    assert "排班冲突" in client.get(cross_day_block.headers["location"]).text
+
+    rest_shift = admin_post(
+        client,
+        "/admin/schedules",
+        data={
+            "store_name": "南昌万寿宫店",
+            "employee_id": "1",
+            "schedule_date": "2026-07-09",
+            "shift_type_id": "4",
+        },
+        follow_redirects=False,
+    )
+    assert rest_shift.status_code == 303
+
+    page = client.get("/admin/schedules?store_names=南京门东店&store_names=南昌万寿宫店&month=2026-07&view_mode=calendar")
+    assert page.status_code == 200
+    assert "冲突" in page.text
+    assert "异常" in page.text
+    assert "跨店排班" in page.text
+
+    employee_page = client.get("/admin/schedules?store_names=南京门东店&store_names=南昌万寿宫店&month=2026-07&view_mode=employee")
+    assert "本月工时" in employee_page.text
+    assert "跨店排班" in employee_page.text
+
+    export_response = client.get("/admin/schedules/export?store_names=南京门东店&store_names=南昌万寿宫店&month=2026-07")
+    workbook = load_workbook(BytesIO(export_response.content))
+    rows = list(workbook.active.iter_rows(values_only=True))
+    assert rows[0][-3:] == ("是否冲突", "工时异常", "异常说明")
+    assert any(row[-3] == "是" and "跨店排班" in (row[-1] or "") for row in rows[1:])
+
+    overview = client.get("/admin/permission-overview")
+    assert overview.status_code == 200
+    assert "schedule.override_conflict" in overview.text
+    assert "高风险 POST 未接入：0" in overview.text
+
+
+def test_schedule_validation_service_overlap_rest_and_hour_rules(tmp_path, monkeypatch):
+    client, main = build_client(tmp_path, monkeypatch)
+    logged_in_client(client)
+    create_schedule_employee(client, "规则员工")
+
+    morning = {"employee_id": 1, "schedule_date": "2026-07-08", "start_time": "09:00", "end_time": "18:00", "shift_name": "早班"}
+    evening = {"employee_id": 1, "schedule_date": "2026-07-08", "start_time": "18:00", "end_time": "22:00", "shift_name": "晚班"}
+    overlap = {"employee_id": 1, "schedule_date": "2026-07-08", "start_time": "13:00", "end_time": "20:00", "shift_name": "中班"}
+    rest = {"employee_id": 1, "schedule_date": "2026-07-08", "start_time": "", "end_time": "", "shift_name": "休息"}
+
+    assert not main.schedule_validation_service.time_ranges_overlap(
+        main.schedule_validation_service.normalize_schedule_time(morning),
+        main.schedule_validation_service.normalize_schedule_time(evening),
+    )
+    assert main.schedule_validation_service.time_ranges_overlap(
+        main.schedule_validation_service.normalize_schedule_time(morning),
+        main.schedule_validation_service.normalize_schedule_time(overlap),
+    )
+    assert main.schedule_validation_service.normalize_schedule_time(rest)["is_rest"]
+
+    yellow = main.schedule_validation_service.build_schedule_warnings(
+        1,
+        "2026-07",
+        [
+            {**morning, "duration_hours": 11, "store_name": "南京门东店", "employee_name": "规则员工"},
+        ],
+    )
+    red = main.schedule_validation_service.build_schedule_warnings(
+        1,
+        "2026-07",
+        [
+            {**morning, "duration_hours": 13, "store_name": "南京门东店", "employee_name": "规则员工"},
+        ],
+    )
+    assert any(item["level"] == "warning" and "单日工时偏高" in item["message"] for item in yellow)
+    assert any(item["level"] == "danger" and "单日工时严重偏高" in item["message"] for item in red)
+
+    continuous_rows = [
+        {
+            "employee_id": 1,
+            "employee_name": "规则员工",
+            "schedule_date": f"2026-07-{day:02d}",
+            "shift_name": "早班",
+            "store_name": "南京门东店",
+            "duration_hours": 8,
+            "start_time": "09:00",
+            "end_time": "18:00",
+        }
+        for day in range(1, 8)
+    ]
+    continuous = main.schedule_validation_service.build_schedule_warnings(1, "2026-07", continuous_rows)
+    assert any("连续排班超过 6 天" in item["message"] for item in continuous)
+    interrupted = main.schedule_validation_service.build_schedule_warnings(
+        1,
+        "2026-07",
+        [*continuous_rows[:3], {**continuous_rows[3], "shift_name": "休息", "duration_hours": 0}, *continuous_rows[4:]],
+    )
+    assert not any("连续排班超过 6 天" in item["message"] for item in interrupted)
 
 
 def test_admin_schedule_interaction_js_feedback_contract():
@@ -6321,8 +6554,9 @@ def test_schedule_create_update_validation_public_view_export_and_logs(tmp_path,
     assert "%E9%97%A8%E5%BA%97%E6%8E%92%E7%8F%AD_%E5%8D%97%E4%BA%AC%E9%97%A8%E4%B8%9C%E5%BA%97_2026-07.xlsx" in export_response.headers["content-disposition"]
     workbook = load_workbook(BytesIO(export_response.content))
     values = list(workbook.active.iter_rows(values_only=True))
-    assert values[0] == ("门店", "员工", "日期", "星期", "班次", "排班时间", "工时", "是否自定义", "备注")
-    assert ("南京门东店", "王早班", "2026-07-06", "周一", "晚班", "14:00-22:00", "8 小时", "否", "改晚班") in values
+    assert values[0][:9] == ("门店", "员工", "日期", "星期", "班次", "排班时间", "工时", "是否自定义", "备注")
+    assert values[0][-3:] == ("是否冲突", "工时异常", "异常说明")
+    assert any(row[:9] == ("南京门东店", "王早班", "2026-07-06", "周一", "晚班", "14:00-22:00", "8 小时", "否", "改晚班") for row in values)
 
     delete_schedule = admin_post(client, "/admin/schedules/1/delete", follow_redirects=False)
     assert delete_schedule.status_code == 303

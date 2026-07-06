@@ -62,6 +62,8 @@
     <article class="ops-card metric-card"><span>当月排班人数</span><strong>{{ context.dashboard.employee_count }}</strong></article>
     <article class="ops-card metric-card"><span>休息班次数</span><strong>{{ context.dashboard.rest_shift_count }}</strong></article>
     <article class="ops-card metric-card"><span>自定义/加班班次数</span><strong>{{ context.dashboard.custom_shift_count }}</strong></article>
+    <article class="ops-card metric-card"><span>冲突标记</span><strong>{{ context.stats.conflict_count }}</strong><small>历史冲突仅提示</small></article>
+    <article class="ops-card metric-card"><span>异常提醒</span><strong>{{ context.stats.warning_count }}</strong><small>工时与跨店提示</small></article>
   </div>
   <section class="schedule-dashboard-detail ops-card">
     <div class="section-heading admin-section-heading">
@@ -279,6 +281,12 @@
         <input type="checkbox" name="overwrite_existing" value="1" checked>
         <span>如果员工当天已有排班，则覆盖为本次选择的班次</span>
       </label>
+      {% if has_perm('schedule.override_conflict') %}
+      <label class="checkbox-line schedule-overwrite-line schedule-conflict-override-line">
+        <input type="checkbox" name="override_conflict" value="1">
+        <span>忽略冲突并保存</span>
+      </label>
+      {% endif %}
       <div class="schedule-bulk-summary" data-schedule-bulk-summary>已选 0 名员工 × 0 天 = 将生成 0 条排班</div>
       <div class="schedule-quick-actions full-span">
         <button class="ghost-button compact" type="button" data-select-rest-shift>一键设置休息日</button>
@@ -322,6 +330,8 @@
         <div class="schedule-day-summary">
           <span>{{ item.scheduled_people_count }} 人</span>
           <span>{{ item.display_hours }}</span>
+          {% if item.conflict_count %}<span class="schedule-quality-badge danger">冲突 {{ item.conflict_count }}</span>{% endif %}
+          {% if item.warning_count %}<span class="schedule-quality-badge warning">异常 {{ item.warning_count }}</span>{% endif %}
         </div>
         <div class="schedule-shift-summary calendar-shift-counts">
           {% for shift_name, count in item.shift_counts.items() %}
@@ -338,6 +348,10 @@
             <strong>{{ schedule.shift_name }}</strong>
             <small>{{ schedule.store_name }}</small>
             <small class="schedule-time-line">{{ schedule.display_time }} · {{ schedule.display_hours }}</small>
+            {% if schedule.has_conflict %}<small class="schedule-quality-badge danger">冲突</small>{% endif %}
+            {% for warning in schedule.warnings %}
+            <small class="schedule-quality-badge {{ warning.level }}">{{ warning.message }}</small>
+            {% endfor %}
             {% if schedule.note %}<small>{{ schedule.note }}</small>{% endif %}
           </button>
           {% else %}
@@ -368,7 +382,15 @@
           <span class="metric-hours"><strong>{{ summary.total_hours }}</strong><small>本月工时</small></span>
           <span class="metric-days"><strong>{{ summary.schedule_day_count }}</strong><small>排班天数</small></span>
           <span><strong>{{ summary.rest_day_count }}</strong><small>休息天数</small></span>
+          <span><strong>{{ summary.conflict_count }}</strong><small>冲突</small></span>
         </div>
+        {% if summary.warnings %}
+        <div class="schedule-warning-stack">
+          {% for warning in summary.warnings %}
+          <span class="schedule-quality-badge {{ warning.level }}">{{ warning.message }}</span>
+          {% endfor %}
+        </div>
+        {% endif %}
         <div class="employee-timeline">
           {% for item in summary.timeline %}
           {% set schedules = item.schedules %}
@@ -376,6 +398,8 @@
             {{ item.day.day }}
             {% for schedule in schedules %}
             <small class="employee-schedule-store">{{ schedule.store_name }} · {{ schedule.shift_name }} · {{ schedule.display_time }} · {{ schedule.display_hours }}</small>
+            {% if schedule.has_conflict %}<small class="schedule-quality-badge danger">冲突</small>{% endif %}
+            {% for warning in schedule.warnings %}<small class="schedule-quality-badge {{ warning.level }}">{{ warning.message }}</small>{% endfor %}
             {% endfor %}
           </span>
           {% endfor %}
@@ -456,10 +480,12 @@
             {% set employee_hours.total = employee_hours.total + (schedule.duration_hours or 0) %}
             {% endif %}
             <td class="schedule-cell {% if day.is_weekend %}schedule-weekend{% endif %} {% if day.is_today %}schedule-today{% endif %}">
-              {% if schedule %}
-              <span class="shift-badge {% if schedule.is_custom_time %}custom-shift-badge{% endif %}" style="--shift-color: {{ schedule.color or '#64748b' }}">{{ schedule.shift_name }}</span>
-              <small class="schedule-time-line">{{ schedule.display_time }} · {{ schedule.display_hours }}</small>
-              {% if schedule.note %}<small>{{ schedule.note }}</small>{% endif %}
+          {% if schedule %}
+          <span class="shift-badge {% if schedule.is_custom_time %}custom-shift-badge{% endif %}" style="--shift-color: {{ schedule.color or '#64748b' }}">{{ schedule.shift_name }}</span>
+          <small class="schedule-time-line">{{ schedule.display_time }} · {{ schedule.display_hours }}</small>
+          {% if schedule.has_conflict %}<small class="schedule-quality-badge danger">冲突</small>{% endif %}
+          {% for warning in schedule.warnings %}<small class="schedule-quality-badge {{ warning.level }}">{{ warning.message }}</small>{% endfor %}
+          {% if schedule.note %}<small>{{ schedule.note }}</small>{% endif %}
               {% if has_perm('schedule.delete') %}
               <form method="post" action="/admin/schedules/{{ schedule.id }}/delete" onsubmit="return confirm('确认删除这条排班吗？');" data-feedback-form data-preserve-scroll data-loading-label="删除中...">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -495,6 +521,8 @@
         <span>{{ item.scheduled_people_count }} 人</span>
         <span>{{ item.display_hours }}</span>
         <small>{{ item.shift_count }} 个班次</small>
+        {% if item.conflict_count %}<small class="schedule-quality-badge danger">冲突 {{ item.conflict_count }}</small>{% endif %}
+        {% if item.warning_count %}<small class="schedule-quality-badge warning">异常 {{ item.warning_count }}</small>{% endif %}
       </div>
       {% endfor %}
     </div>
