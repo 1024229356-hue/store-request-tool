@@ -699,6 +699,8 @@ def require_permission(permission_key: str):
     def dependency(request: Request) -> Dict[str, object]:
         user = current_admin_user(request)
         if not user:
+            if should_redirect_to_login(request):
+                raise HTTPException(status_code=303, detail="Login required.", headers={"Location": login_redirect_location(request)})
             raise HTTPException(status_code=http_status.HTTP_401_UNAUTHORIZED, detail="Login required.")
         if not has_permission(user, permission_key):
             raise HTTPException(status_code=http_status.HTTP_403_FORBIDDEN, detail="权限不足")
@@ -711,6 +713,8 @@ def require_any_permission(permission_keys: List[str]):
     def dependency(request: Request) -> Dict[str, object]:
         user = current_admin_user(request)
         if not user:
+            if should_redirect_to_login(request):
+                raise HTTPException(status_code=303, detail="Login required.", headers={"Location": login_redirect_location(request)})
             raise HTTPException(status_code=http_status.HTTP_401_UNAUTHORIZED, detail="Login required.")
         if not any(has_permission(user, permission_key) for permission_key in permission_keys):
             raise HTTPException(status_code=http_status.HTTP_403_FORBIDDEN, detail="权限不足")
@@ -840,6 +844,7 @@ def should_redirect_to_login(request: Request) -> bool:
         or path == "/admin/dashboard"
         or path == "/admin/settings"
         or path == "/admin/account"
+        or path == "/admin/roles"
         or path == "/admin/system"
         or path == "/admin/route-health"
         or path == "/admin/my-work"
@@ -1374,6 +1379,35 @@ def fetch_admin_roles() -> List[Dict[str, object]]:
         ]
 
 
+def replace_admin_role_permissions(role_id: int, permission_keys: Iterable[object]) -> Dict[str, object]:
+    selected_permissions = {str(value or "").strip() for value in permission_keys}
+    clean_permissions = [
+        permission_key
+        for permission_key in ADMIN_PERMISSION_KEYS
+        if permission_key in selected_permissions
+    ]
+    timestamp = now_text()
+    with get_connection() as connection:
+        role = connection.execute("SELECT * FROM admin_roles WHERE id = ?", (int(role_id),)).fetchone()
+        if not role:
+            raise HTTPException(status_code=404, detail="角色不存在")
+        connection.execute("DELETE FROM admin_role_permissions WHERE role_id = ?", (int(role_id),))
+        for permission_key in clean_permissions:
+            connection.execute(
+                """
+                INSERT INTO admin_role_permissions (role_id, permission_key, created_at)
+                VALUES (?, ?, ?)
+                """,
+                (int(role_id), permission_key, timestamp),
+            )
+        connection.execute("UPDATE admin_roles SET updated_at = ? WHERE id = ?", (timestamp, int(role_id)))
+        return {
+            "id": int(role["id"]),
+            "role_name": str(role["role_name"] or ""),
+            "permissions": clean_permissions,
+        }
+
+
 def fetch_assignable_admin_usernames() -> List[str]:
     with get_connection() as connection:
         if not table_exists(connection, "admin_users"):
@@ -1448,9 +1482,70 @@ def record_operation_log(
         return
 
 
+def admin_permission_groups() -> List[Dict[str, object]]:
+    labels = {
+        "ticket.view": "查看工单",
+        "ticket.update": "处理工单",
+        "ticket.export": "导出工单",
+        "schedule.view": "查看排班",
+        "schedule.create": "新增排班",
+        "schedule.export": "导出排班",
+        "employee.view": "查看员工",
+        "role.view": "查看角色",
+        "role.update": "编辑角色权限",
+    }
+    grouped_prefixes = [
+        ("工单", "ticket."),
+        ("排班", "schedule."),
+        ("员工", "employee."),
+        ("班次", "shift."),
+        ("嵌入页", "embedded."),
+        ("配置", "config."),
+        ("账号与角色", ("account.", "role.")),
+        ("系统", "system."),
+    ]
+    groups: List[Dict[str, object]] = []
+    for group_name, prefixes in grouped_prefixes:
+        prefix_tuple = prefixes if isinstance(prefixes, tuple) else (prefixes,)
+        permissions = [
+            {"key": key, "label": labels.get(key, key)}
+            for key in ADMIN_PERMISSION_KEYS
+            if key.startswith(prefix_tuple)
+        ]
+        if permissions:
+            groups.append({"name": group_name, "permissions": permissions})
+    return groups
+
+
 def normalize_admin_data_scope(value: str) -> str:
     clean_value = (value or "").strip()
     return clean_value if clean_value in DATA_SCOPE_OPTIONS else "all"
+
+
+def scoped_ticket_filters_for_admin(user: Optional[Dict[str, object]], filters: Dict[str, object]) -> Dict[str, object]:
+    scoped_filters = dict(filters)
+    if not user:
+        scoped_filters["__scope_no_rows"] = "1"
+        return scoped_filters
+    data_scope = normalize_admin_data_scope(str(user.get("data_scope") or "all"))
+    if data_scope == "assigned":
+        scoped_filters["__scope_assigned_to"] = str(user.get("username") or "").strip()
+    elif data_scope == "stores":
+        store_names = split_multi_value_text(user.get("store_names"))
+        if store_names:
+            scoped_filters["__scope_store_names"] = store_names
+        else:
+            scoped_filters["__scope_no_rows"] = "1"
+    return scoped_filters
+
+
+def require_ticket_scope_access(user: Optional[Dict[str, object]], ticket_id: int, ticket_scope: str = "store") -> None:
+    filters: Dict[str, object] = {
+        "__ticket_scope": ticket_scope,
+        "__selected_ticket_ids": [int(ticket_id)],
+    }
+    if count_tickets(scoped_ticket_filters_for_admin(user, filters)) <= 0:
+        raise HTTPException(status_code=http_status.HTTP_403_FORBIDDEN, detail="权限不足")
 
 
 def deactivate_admin_user_errors(target_user: Dict[str, object], actor_username: str) -> List[str]:
@@ -3141,6 +3236,45 @@ def build_ticket_where(filters: Dict[str, str]) -> Tuple[str, List[str]]:
     elif not include_deleted:
         clauses.append("tickets.deleted_at IS NULL")
         clauses.append("tickets.archived_at IS NULL")
+
+    if str(filters.get("__scope_no_rows") or "").strip() == "1":
+        clauses.append("1 = 0")
+
+    if "__selected_ticket_ids" in filters:
+        selected_ids = normalize_ticket_ids(filters.get("__selected_ticket_ids") or [])
+        if selected_ids:
+            placeholders = ",".join("?" for _ in selected_ids)
+            clauses.append(f"tickets.id IN ({placeholders})")
+            params.extend(selected_ids)
+        else:
+            clauses.append("1 = 0")
+
+    scope_assigned_to = str(filters.get("__scope_assigned_to") or "").strip()
+    if scope_assigned_to:
+        clauses.append("assigned_to = ?")
+        params.append(scope_assigned_to)
+
+    raw_scope_store_names = filters.get("__scope_store_names")
+    if raw_scope_store_names:
+        if isinstance(raw_scope_store_names, (list, tuple, set)):
+            scope_store_names = unique_clean_values(raw_scope_store_names)
+        else:
+            scope_store_names = split_multi_value_text(raw_scope_store_names)
+        if scope_store_names:
+            placeholders = ",".join("?" for _ in scope_store_names)
+            clauses.append(
+                f"""
+                EXISTS (
+                    SELECT 1
+                    FROM ticket_stores
+                    WHERE ticket_stores.ticket_id = tickets.id
+                      AND ticket_stores.store_name IN ({placeholders})
+                )
+                """
+            )
+            params.extend(scope_store_names)
+        else:
+            clauses.append("1 = 0")
 
     exact_fields = {
         "ticket_no": "ticket_no",
@@ -6190,7 +6324,12 @@ def bulk_ticket_ids_from_scope(
 ) -> List[int]:
     if select_scope == "filtered":
         return normalize_ticket_ids(ticket["id"] for ticket in fetch_tickets(filters, sort, config))
-    return normalize_ticket_ids(ticket_ids)
+    selected_ids = normalize_ticket_ids(ticket_ids)
+    if not selected_ids:
+        return []
+    scoped_filters = dict(filters)
+    scoped_filters["__selected_ticket_ids"] = selected_ids
+    return normalize_ticket_ids(ticket["id"] for ticket in fetch_tickets(scoped_filters, sort, config))
 
 
 def in_clause_for_ids(ticket_ids: List[int]) -> Tuple[str, List[int]]:
@@ -7552,6 +7691,39 @@ def create_app() -> FastAPI:
             status_code=404,
         )
 
+    @app.exception_handler(http_status.HTTP_403_FORBIDDEN)
+    def admin_forbidden_handler(request: Request, exc: HTTPException):
+        if not request.url.path.startswith("/admin"):
+            return JSONResponse({"detail": str(getattr(exc, "detail", "") or "Forbidden")}, status_code=403)
+        admin = current_admin_username(request) or ""
+        detail = html.escape(str(getattr(exc, "detail", "") or "权限不足"))
+        content = f"""
+        <!doctype html>
+        <html lang="zh-CN">
+        <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <title>权限不足</title>
+          <link rel="stylesheet" href="/static/style.css?v={current_asset_version()}">
+        </head>
+        <body class="admin-forbidden-page">
+          <main class="admin-layout">
+            <section class="work-card account-denied-card">
+              <p class="eyebrow">403</p>
+              <h1>权限不足</h1>
+              <p>{detail}</p>
+              <p>当前账号：{html.escape(admin or "-")}</p>
+              <div class="form-actions">
+                <a class="ghost-button" href="/admin/dashboard">返回后台</a>
+                <a class="primary-button" href="/admin/account">查看账号</a>
+              </div>
+            </section>
+          </main>
+        </body>
+        </html>
+        """
+        return HTMLResponse(content, status_code=403)
+
     def make_legacy_admin_redirect(target_path: str):
         def legacy_admin_redirect(_admin: str = Depends(require_admin)) -> RedirectResponse:
             return RedirectResponse(url=target_path, status_code=303)
@@ -7690,6 +7862,29 @@ def create_app() -> FastAPI:
             error="权限不足，无法执行账号管理操作。",
             status_code=http_status.HTTP_403_FORBIDDEN,
             permission_denied=True,
+        )
+
+    def render_roles_page(
+        request: Request,
+        admin: str,
+        error: str = "",
+        success: str = "",
+        status_code: int = 200,
+    ) -> HTMLResponse:
+        roles = fetch_admin_roles()
+        return templates.TemplateResponse(
+            request,
+            "roles.html",
+            {
+                "request": request,
+                "admin_user": admin,
+                "roles": roles,
+                "permission_groups": admin_permission_groups(),
+                "error": error,
+                "success": success,
+                "csrf_token": current_csrf_token(request),
+            },
+            status_code=status_code,
         )
 
     def validate_account_password(password: str, password_confirm: str) -> Optional[str]:
@@ -8679,7 +8874,7 @@ def create_app() -> FastAPI:
     @app.get("/admin", response_class=HTMLResponse)
     def admin_page(
         request: Request,
-        admin: str = Depends(require_admin),
+        current_user: Dict[str, object] = Depends(require_permission("ticket.view")),
         store_name: str = Query(""),
         request_type: str = Query(""),
         urgency: str = Query(""),
@@ -8707,8 +8902,9 @@ def create_app() -> FastAPI:
             "due_status": due_status,
         }
         config = load_app_config()
-        tickets, pagination = fetch_ticket_page(filters, sort, config, page)
-        summary = fetch_ticket_summary(filters)
+        scoped_filters = scoped_ticket_filters_for_admin(current_user, filters)
+        tickets, pagination = fetch_ticket_page(scoped_filters, sort, config, page)
+        summary = fetch_ticket_summary(scoped_filters)
         return_url = safe_admin_return_url(request_path_with_query(request))
         for ticket in tickets:
             ticket["detail_url"] = f"/admin/ticket/{ticket['id']}?{urlencode({'return_url': return_url})}"
@@ -8738,7 +8934,8 @@ def create_app() -> FastAPI:
                 "archived_count": max(archived_count, 0),
                 "deleted_count": max(deleted_count, 0),
                 "error": error,
-                "admin_user": admin,
+                "admin_user": str(current_user.get("username") or ""),
+                "can_export_ticket": has_permission(current_user, "ticket.export"),
                 "csrf_token": current_csrf_token(request),
                 "brands": config.brands,
                 "image_accept": ",".join(f".{extension}" for extension in config.allowed_image_extensions),
@@ -8756,7 +8953,8 @@ def create_app() -> FastAPI:
         )
 
     @app.get("/admin/my-work", response_class=HTMLResponse)
-    def admin_my_work(request: Request, admin: str = Depends(require_admin)) -> HTMLResponse:
+    def admin_my_work(request: Request, current_user: Dict[str, object] = Depends(require_permission("ticket.view"))) -> HTMLResponse:
+        admin = str(current_user.get("username") or "")
         config = load_app_config()
         work = fetch_my_work(admin, config)
         return templates.TemplateResponse(
@@ -8773,7 +8971,7 @@ def create_app() -> FastAPI:
     @app.get("/admin/employees", response_class=HTMLResponse)
     def admin_employees(
         request: Request,
-        admin: str = Depends(require_admin),
+        current_user: Dict[str, object] = Depends(require_permission("employee.view")),
         store_name: str = Query(""),
         status: str = Query(""),
         scope: str = Query("active"),
@@ -8781,6 +8979,7 @@ def create_app() -> FastAPI:
         error: str = Query(""),
         success: str = Query(""),
     ) -> HTMLResponse:
+        admin = str(current_user.get("username") or "")
         return render_employees_page(request, admin, store_name, status, scope=scope, page=page, error=error, success=success)
 
     @app.post("/admin/employees")
@@ -9202,7 +9401,7 @@ def create_app() -> FastAPI:
     @app.get("/admin/schedules", response_class=HTMLResponse)
     def admin_schedules(
         request: Request,
-        admin: str = Depends(require_admin),
+        current_user: Dict[str, object] = Depends(require_permission("schedule.view")),
         store_name: str = Query(""),
         store_names: Optional[List[str]] = Query(None),
         month: str = Query(""),
@@ -9226,6 +9425,7 @@ def create_app() -> FastAPI:
         deleted: int = Query(0),
         error: str = Query(""),
     ) -> HTMLResponse:
+        admin = str(current_user.get("username") or "")
         parsed_employee_ids, has_invalid_employee_ids = parse_optional_int_list(employee_ids)
         parsed_shift_type_ids, include_custom_shift, has_invalid_shift_type_ids = parse_shift_filter_values(shift_type_ids, shift_type_id)
         parsed_shift_type_id = parsed_shift_type_ids[0] if len(parsed_shift_type_ids) == 1 and not include_custom_shift else 0
@@ -9277,7 +9477,7 @@ def create_app() -> FastAPI:
     @app.post("/admin/schedules")
     def create_schedule_route(
         request: Request,
-        admin: str = Depends(require_admin),
+        current_user: Dict[str, object] = Depends(require_permission("schedule.create")),
         store_name: str = Form(""),
         store_names: Optional[List[str]] = Form(None),
         employee_ids: Optional[List[str]] = Form(None),
@@ -9295,6 +9495,7 @@ def create_app() -> FastAPI:
         overwrite_existing: str = Form(""),
         csrf_token: str = Form(""),
     ) -> RedirectResponse:
+        admin = str(current_user.get("username") or "")
         require_admin_csrf(request, csrf_token)
         month_for_return = datetime.now().strftime("%Y-%m")
         return_store = store_name.strip()
@@ -9702,6 +9903,53 @@ def create_app() -> FastAPI:
         record_operation_log(admin, "account.reset_password", "admin_user", user_id, {"username": target_user["username"]}, request)
         return RedirectResponse(url="/admin/account?success=password_reset", status_code=303)
 
+    @app.get("/admin/roles", response_class=HTMLResponse)
+    def admin_roles_page(
+        request: Request,
+        current_user: Dict[str, object] = Depends(require_permission("role.view")),
+        success: str = Query(""),
+    ) -> HTMLResponse:
+        success_messages = {"updated": "角色权限已保存。"}
+        return render_roles_page(
+            request,
+            str(current_user.get("username") or ""),
+            success=success_messages.get(success, ""),
+        )
+
+    @app.post("/admin/roles/{role_id}/permissions", response_class=HTMLResponse)
+    def update_admin_role_permissions(
+        request: Request,
+        role_id: int,
+        current_user: Dict[str, object] = Depends(require_permission("role.update")),
+        csrf_token: str = Form(""),
+        permissions: Optional[List[str]] = Form(None),
+    ):
+        admin = str(current_user.get("username") or "")
+        require_admin_csrf(request, csrf_token)
+        try:
+            role = replace_admin_role_permissions(role_id, permissions or [])
+        except HTTPException as exc:
+            return render_roles_page(request, admin, error=form_error_message(exc), status_code=exc.status_code)
+        except sqlite3.Error:
+            return render_roles_page(request, admin, error="角色权限保存失败，请稍后重试。", status_code=500)
+        record_operation_log(
+            admin,
+            "role.permissions.update",
+            "admin_role",
+            role_id,
+            {"role_name": role["role_name"], "permissions": role["permissions"]},
+            request,
+        )
+        record_operation_log(
+            admin,
+            "role.update",
+            "admin_role",
+            role_id,
+            {"role_name": role["role_name"]},
+            request,
+        )
+        return RedirectResponse(url="/admin/roles?success=updated", status_code=303)
+
     @app.get("/admin/system", response_class=HTMLResponse)
     def admin_system(request: Request, admin: str = Depends(require_admin)) -> HTMLResponse:
         return templates.TemplateResponse(
@@ -9757,7 +10005,7 @@ def create_app() -> FastAPI:
     @app.get("/admin/archive", response_class=HTMLResponse)
     def admin_archive(
         request: Request,
-        admin: str = Depends(require_admin),
+        current_user: Dict[str, object] = Depends(require_permission("ticket.view")),
         store_name: str = Query(""),
         request_type: str = Query(""),
         urgency: str = Query(""),
@@ -9773,6 +10021,7 @@ def create_app() -> FastAPI:
         deleted_count: int = Query(0),
         error: str = Query(""),
     ) -> HTMLResponse:
+        admin = str(current_user.get("username") or "")
         filters = ticket_filters_from_params(
             store_name,
             request_type,
@@ -9788,7 +10037,7 @@ def create_app() -> FastAPI:
         return render_archive_page(
             request,
             admin,
-            filters=filters,
+            filters=scoped_ticket_filters_for_admin(current_user, filters),
             sort=sort,
             page=page,
             unarchived_count=max(unarchived_count, 0),
@@ -9799,7 +10048,7 @@ def create_app() -> FastAPI:
     @app.get("/admin/trash", response_class=HTMLResponse)
     def admin_trash(
         request: Request,
-        admin: str = Depends(require_admin),
+        current_user: Dict[str, object] = Depends(require_permission("ticket.view")),
         store_name: str = Query(""),
         request_type: str = Query(""),
         urgency: str = Query(""),
@@ -9815,6 +10064,7 @@ def create_app() -> FastAPI:
         hard_deleted_count: int = Query(0),
         error: str = Query(""),
     ) -> HTMLResponse:
+        admin = str(current_user.get("username") or "")
         filters = ticket_filters_from_params(
             store_name,
             request_type,
@@ -9830,7 +10080,7 @@ def create_app() -> FastAPI:
         return render_trash_page(
             request,
             admin,
-            filters=filters,
+            filters=scoped_ticket_filters_for_admin(current_user, filters),
             sort=sort,
             page=page,
             restored_count=max(restored_count, 0),
@@ -10107,8 +10357,10 @@ def create_app() -> FastAPI:
         attachments_saved: str = Query(""),
         upload_error: str = Query(""),
         return_url: str = Query(""),
-        admin: str = Depends(require_admin),
+        current_user: Dict[str, object] = Depends(require_permission("ticket.view")),
     ) -> HTMLResponse:
+        admin = str(current_user.get("username") or "")
+        require_ticket_scope_access(current_user, ticket_id)
         return render_ticket_detail(
             request,
             ticket_id,
@@ -10123,11 +10375,13 @@ def create_app() -> FastAPI:
     def accept_ticket_route(
         request: Request,
         ticket_id: int,
-        admin: str = Depends(require_admin),
+        current_user: Dict[str, object] = Depends(require_permission("ticket.update")),
         return_url: str = Form(""),
         csrf_token: str = Form(""),
     ) -> RedirectResponse:
+        admin = str(current_user.get("username") or "")
         require_admin_csrf(request, csrf_token)
+        require_ticket_scope_access(current_user, ticket_id)
         accept_ticket(ticket_id, admin)
         if return_url.strip():
             return RedirectResponse(url=safe_admin_return_url(return_url), status_code=303)
@@ -10136,7 +10390,7 @@ def create_app() -> FastAPI:
     @app.post("/admin/tickets/bulk-archive")
     def bulk_archive_tickets_route(
         request: Request,
-        admin: str = Depends(require_admin),
+        current_user: Dict[str, object] = Depends(require_permission("ticket.update")),
         filters: Dict[str, str] = Depends(admin_ticket_filters_from_form),
         ticket_ids: Optional[List[int]] = Form(None),
         select_scope: str = Form("selected"),
@@ -10145,9 +10399,11 @@ def create_app() -> FastAPI:
         archive_reason: str = Form("批量归档"),
         csrf_token: str = Form(""),
     ) -> RedirectResponse:
+        admin = str(current_user.get("username") or "")
         require_admin_csrf(request, csrf_token)
         filters["__ticket_scope"] = "active"
-        ids = bulk_ticket_ids_from_scope(ticket_ids or [], select_scope, filters, sort, load_app_config())
+        scoped_filters = scoped_ticket_filters_for_admin(current_user, filters)
+        ids = bulk_ticket_ids_from_scope(ticket_ids or [], select_scope, scoped_filters, sort, load_app_config())
         if not ids:
             return RedirectResponse(url=admin_redirect_url(source_view, error=BULK_SELECTION_REQUIRED_MESSAGE), status_code=303)
         archived_count = bulk_archive_tickets(ids, admin, archive_reason)
@@ -10156,7 +10412,7 @@ def create_app() -> FastAPI:
     @app.post("/admin/tickets/bulk-delete")
     def bulk_delete_tickets_route(
         request: Request,
-        admin: str = Depends(require_admin),
+        current_user: Dict[str, object] = Depends(require_permission("ticket.update")),
         filters: Dict[str, str] = Depends(admin_ticket_filters_from_form),
         ticket_ids: Optional[List[int]] = Form(None),
         select_scope: str = Form("selected"),
@@ -10165,17 +10421,30 @@ def create_app() -> FastAPI:
         delete_reason: str = Form("批量移入回收站"),
         csrf_token: str = Form(""),
     ) -> RedirectResponse:
+        admin = str(current_user.get("username") or "")
         require_admin_csrf(request, csrf_token)
-        ids = bulk_ticket_ids_from_scope(ticket_ids or [], select_scope, filters, sort, load_app_config())
+        validation_filters = dict(filters)
+        if select_scope != "filtered" and validation_filters.get("__ticket_scope") == "active":
+            validation_filters["__ticket_scope"] = "store"
+        scoped_filters = scoped_ticket_filters_for_admin(current_user, validation_filters)
+        ids = bulk_ticket_ids_from_scope(ticket_ids or [], select_scope, scoped_filters, sort, load_app_config())
         if not ids:
             return RedirectResponse(url=admin_redirect_url(source_view, error=BULK_SELECTION_REQUIRED_MESSAGE), status_code=303)
         deleted_count = bulk_soft_delete_tickets(ids, admin, delete_reason)
+        record_operation_log(
+            admin,
+            "ticket.delete",
+            "ticket",
+            "",
+            {"mode": "bulk", "ticket_ids": ids, "count": deleted_count, "reason": delete_reason},
+            request,
+        )
         return RedirectResponse(url=admin_redirect_url(source_view, deleted_count=deleted_count), status_code=303)
 
     @app.post("/admin/tickets/bulk-unarchive")
     def bulk_unarchive_tickets_route(
         request: Request,
-        admin: str = Depends(require_admin),
+        current_user: Dict[str, object] = Depends(require_permission("ticket.update")),
         filters: Dict[str, str] = Depends(admin_ticket_filters_from_form),
         ticket_ids: Optional[List[int]] = Form(None),
         select_scope: str = Form("selected"),
@@ -10183,9 +10452,11 @@ def create_app() -> FastAPI:
         sort: str = Form("newest"),
         csrf_token: str = Form(""),
     ) -> RedirectResponse:
+        admin = str(current_user.get("username") or "")
         require_admin_csrf(request, csrf_token)
         filters["__ticket_scope"] = "archive"
-        ids = bulk_ticket_ids_from_scope(ticket_ids or [], select_scope, filters, sort, load_app_config())
+        scoped_filters = scoped_ticket_filters_for_admin(current_user, filters)
+        ids = bulk_ticket_ids_from_scope(ticket_ids or [], select_scope, scoped_filters, sort, load_app_config())
         if not ids:
             return RedirectResponse(url=admin_redirect_url(source_view, error=BULK_SELECTION_REQUIRED_MESSAGE), status_code=303)
         unarchived_count = bulk_unarchive_tickets(ids, admin)
@@ -10194,7 +10465,7 @@ def create_app() -> FastAPI:
     @app.post("/admin/tickets/bulk-restore")
     def bulk_restore_tickets_route(
         request: Request,
-        admin: str = Depends(require_admin),
+        current_user: Dict[str, object] = Depends(require_permission("ticket.update")),
         filters: Dict[str, str] = Depends(admin_ticket_filters_from_form),
         ticket_ids: Optional[List[int]] = Form(None),
         select_scope: str = Form("selected"),
@@ -10202,9 +10473,11 @@ def create_app() -> FastAPI:
         sort: str = Form("newest"),
         csrf_token: str = Form(""),
     ) -> RedirectResponse:
+        admin = str(current_user.get("username") or "")
         require_admin_csrf(request, csrf_token)
         filters["__ticket_scope"] = "deleted"
-        ids = bulk_ticket_ids_from_scope(ticket_ids or [], select_scope, filters, sort, load_app_config())
+        scoped_filters = scoped_ticket_filters_for_admin(current_user, filters)
+        ids = bulk_ticket_ids_from_scope(ticket_ids or [], select_scope, scoped_filters, sort, load_app_config())
         if not ids:
             return RedirectResponse(url=admin_redirect_url(source_view, error=BULK_SELECTION_REQUIRED_MESSAGE), status_code=303)
         restored_count = bulk_restore_tickets(ids, admin)
@@ -10213,7 +10486,7 @@ def create_app() -> FastAPI:
     @app.post("/admin/tickets/bulk-hard-delete")
     def bulk_hard_delete_tickets_route(
         request: Request,
-        admin: str = Depends(require_admin),
+        current_user: Dict[str, object] = Depends(require_permission("ticket.update")),
         filters: Dict[str, str] = Depends(admin_ticket_filters_from_form),
         ticket_ids: Optional[List[int]] = Form(None),
         select_scope: str = Form("selected"),
@@ -10222,26 +10495,38 @@ def create_app() -> FastAPI:
         confirm_delete: str = Form(""),
         csrf_token: str = Form(""),
     ) -> RedirectResponse:
+        admin = str(current_user.get("username") or "")
         require_admin_csrf(request, csrf_token)
         if confirm_delete not in {"1", "true", "on", "yes"}:
             return RedirectResponse(url=admin_redirect_url(source_view, error="请二次确认永久删除"), status_code=303)
         filters["__ticket_scope"] = "deleted"
-        ids = bulk_ticket_ids_from_scope(ticket_ids or [], select_scope, filters, sort, load_app_config())
+        scoped_filters = scoped_ticket_filters_for_admin(current_user, filters)
+        ids = bulk_ticket_ids_from_scope(ticket_ids or [], select_scope, scoped_filters, sort, load_app_config())
         if not ids:
             return RedirectResponse(url=admin_redirect_url(source_view, error=BULK_SELECTION_REQUIRED_MESSAGE), status_code=303)
         hard_deleted_count = bulk_hard_delete_tickets(ids, admin)
+        record_operation_log(
+            admin,
+            "ticket.delete",
+            "ticket",
+            "",
+            {"mode": "bulk_hard_delete", "ticket_ids": ids, "count": hard_deleted_count},
+            request,
+        )
         return RedirectResponse(url=admin_redirect_url(source_view, hard_deleted_count=hard_deleted_count), status_code=303)
 
     @app.post("/admin/ticket/{ticket_id}/archive")
     def archive_ticket_route(
         request: Request,
         ticket_id: int,
-        admin: str = Depends(require_admin),
+        current_user: Dict[str, object] = Depends(require_permission("ticket.update")),
         archive_reason: str = Form("后台手动归档"),
         return_url: str = Form(""),
         csrf_token: str = Form(""),
     ) -> RedirectResponse:
+        admin = str(current_user.get("username") or "")
         require_admin_csrf(request, csrf_token)
+        require_ticket_scope_access(current_user, ticket_id)
         archive_ticket(ticket_id, admin, archive_reason)
         return RedirectResponse(url=safe_admin_return_url(return_url or "/admin"), status_code=303)
 
@@ -10249,11 +10534,13 @@ def create_app() -> FastAPI:
     def unarchive_ticket_route(
         request: Request,
         ticket_id: int,
-        admin: str = Depends(require_admin),
+        current_user: Dict[str, object] = Depends(require_permission("ticket.update")),
         return_url: str = Form(""),
         csrf_token: str = Form(""),
     ) -> RedirectResponse:
+        admin = str(current_user.get("username") or "")
         require_admin_csrf(request, csrf_token)
+        require_ticket_scope_access(current_user, ticket_id, "archive")
         unarchive_ticket(ticket_id, admin)
         return RedirectResponse(url=safe_admin_return_url(return_url or "/admin/archive"), status_code=303)
 
@@ -10261,23 +10548,35 @@ def create_app() -> FastAPI:
     def delete_ticket_route(
         request: Request,
         ticket_id: int,
-        admin: str = Depends(require_admin),
+        current_user: Dict[str, object] = Depends(require_permission("ticket.update")),
         delete_reason: str = Form(""),
         return_url: str = Form(""),
         csrf_token: str = Form(""),
     ) -> RedirectResponse:
+        admin = str(current_user.get("username") or "")
         require_admin_csrf(request, csrf_token)
+        require_ticket_scope_access(current_user, ticket_id)
         soft_delete_ticket(ticket_id, admin, delete_reason)
+        record_operation_log(
+            admin,
+            "ticket.delete",
+            "ticket",
+            ticket_id,
+            {"mode": "soft_delete", "reason": delete_reason},
+            request,
+        )
         return RedirectResponse(url=safe_admin_return_url(return_url or "/admin"), status_code=303)
 
     @app.post("/admin/ticket/{ticket_id}/restore")
     def restore_ticket_route(
         request: Request,
         ticket_id: int,
-        admin: str = Depends(require_admin),
+        current_user: Dict[str, object] = Depends(require_permission("ticket.update")),
         csrf_token: str = Form(""),
     ) -> RedirectResponse:
+        admin = str(current_user.get("username") or "")
         require_admin_csrf(request, csrf_token)
+        require_ticket_scope_access(current_user, ticket_id, "deleted")
         restore_ticket(ticket_id, admin)
         return RedirectResponse(url="/admin/trash", status_code=303)
 
@@ -10285,14 +10584,24 @@ def create_app() -> FastAPI:
     def hard_delete_ticket_route(
         request: Request,
         ticket_id: int,
-        admin: str = Depends(require_admin),
+        current_user: Dict[str, object] = Depends(require_permission("ticket.update")),
         confirm_delete: str = Form(""),
         csrf_token: str = Form(""),
     ) -> RedirectResponse:
+        admin = str(current_user.get("username") or "")
         require_admin_csrf(request, csrf_token)
         if confirm_delete not in {"1", "true", "on", "yes"}:
             raise HTTPException(status_code=400, detail="请确认永久删除。")
+        require_ticket_scope_access(current_user, ticket_id, "deleted")
         hard_delete_ticket(ticket_id, admin)
+        record_operation_log(
+            admin,
+            "ticket.delete",
+            "ticket",
+            ticket_id,
+            {"mode": "hard_delete"},
+            request,
+        )
         return RedirectResponse(url="/admin/trash", status_code=303)
 
     @app.post("/admin/ticket/{ticket_id}/participants")
@@ -10452,14 +10761,16 @@ def create_app() -> FastAPI:
     def update_ticket(
         request: Request,
         ticket_id: int,
-        admin: str = Depends(require_admin),
+        current_user: Dict[str, object] = Depends(require_permission("ticket.update")),
         status: str = Form(""),
         assigned_to: str = Form(""),
         handler_note: str = Form(""),
         return_url: str = Form(""),
         csrf_token: str = Form(""),
     ) -> RedirectResponse:
+        admin = str(current_user.get("username") or "")
         require_admin_csrf(request, csrf_token)
+        require_ticket_scope_access(current_user, ticket_id)
         config = load_app_config()
         if status not in config.statuses:
             raise HTTPException(status_code=400, detail="状态不正确")
@@ -10676,7 +10987,8 @@ def create_app() -> FastAPI:
 
     @app.get("/admin/schedules/export")
     def export_schedules(
-        _admin: str = Depends(require_admin),
+        request: Request,
+        current_user: Dict[str, object] = Depends(require_permission("schedule.export")),
         store_name: str = Query(""),
         store_names: Optional[List[str]] = Query(None),
         month: str = Query(""),
@@ -10684,6 +10996,7 @@ def create_app() -> FastAPI:
         shift_type_ids: Optional[List[str]] = Query(None),
         employee_statuses: Optional[List[str]] = Query(None),
     ) -> StreamingResponse:
+        admin = str(current_user.get("username") or "")
         config = load_app_config()
         selected_month = normalize_month(month)
         selected_store_names, is_all_stores, _invalid_store = normalize_schedule_store_filter(
@@ -10711,6 +11024,14 @@ def create_app() -> FastAPI:
         else:
             filename_store = "多门店"
         filename = f"门店排班_{filename_store}_{selected_month}.xlsx"
+        record_operation_log(
+            admin,
+            "schedule.export",
+            "schedule",
+            "",
+            {"store_names": selected_store_names, "month": selected_month, "row_count": len(rows)},
+            request,
+        )
         return StreamingResponse(
             output,
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -10719,7 +11040,8 @@ def create_app() -> FastAPI:
 
     @app.get("/admin/archive/export")
     def export_archived_tickets(
-        _admin: str = Depends(require_admin),
+        request: Request,
+        current_user: Dict[str, object] = Depends(require_permission("ticket.export")),
         store_name: str = Query(""),
         request_type: str = Query(""),
         urgency: str = Query(""),
@@ -10731,6 +11053,7 @@ def create_app() -> FastAPI:
         due_status: str = Query(""),
         sort: str = Query("newest"),
     ) -> StreamingResponse:
+        admin = str(current_user.get("username") or "")
         filters = ticket_filters_from_params(
             store_name,
             request_type,
@@ -10744,8 +11067,18 @@ def create_app() -> FastAPI:
             scope="archive",
         )
         config = load_app_config()
-        output = build_excel(fetch_tickets(filters, sort, config))
+        scoped_filters = scoped_ticket_filters_for_admin(current_user, filters)
+        tickets = fetch_tickets(scoped_filters, sort, config)
+        output = build_excel(tickets)
         filename = f"{config.excel_filename_prefix}_归档_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+        record_operation_log(
+            admin,
+            "ticket.export",
+            "ticket",
+            "",
+            {"scope": "archive", "filters": filters, "row_count": len(tickets), "data_scope": current_user.get("data_scope")},
+            request,
+        )
         return StreamingResponse(
             output,
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -10754,7 +11087,8 @@ def create_app() -> FastAPI:
 
     @app.get("/admin/export")
     def export_tickets(
-        _admin: str = Depends(require_admin),
+        request: Request,
+        current_user: Dict[str, object] = Depends(require_permission("ticket.export")),
         store_name: str = Query(""),
         request_type: str = Query(""),
         urgency: str = Query(""),
@@ -10766,6 +11100,7 @@ def create_app() -> FastAPI:
         due_status: str = Query(""),
         sort: str = Query("newest"),
     ) -> StreamingResponse:
+        admin = str(current_user.get("username") or "")
         filters = {
             "store_name": store_name,
             "request_type": request_type,
@@ -10778,8 +11113,18 @@ def create_app() -> FastAPI:
             "due_status": due_status,
         }
         config = load_app_config()
-        output = build_excel(fetch_tickets(filters, sort, config))
+        scoped_filters = scoped_ticket_filters_for_admin(current_user, filters)
+        tickets = fetch_tickets(scoped_filters, sort, config)
+        output = build_excel(tickets)
         filename = f"{config.excel_filename_prefix}_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+        record_operation_log(
+            admin,
+            "ticket.export",
+            "ticket",
+            "",
+            {"scope": "active", "filters": filters, "row_count": len(tickets), "data_scope": current_user.get("data_scope")},
+            request,
+        )
         return StreamingResponse(
             output,
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

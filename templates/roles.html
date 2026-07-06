@@ -1,0 +1,75 @@
+{% set page_title = '角色权限' %}
+{% set page_subtitle = '用最小权限矩阵维护角色可访问的后台能力，保存后立即生效。' %}
+{% set page_eyebrow = '账号与权限' %}
+{% set current_menu = 'roles' %}
+{% extends "base_admin.html" %}
+
+{% block topbar_actions %}
+<a class="ghost-button compact" href="/admin/account">账号管理</a>
+{% endblock %}
+
+{% block content %}
+{% if success %}
+<div class="alert alert-success">{{ success }}</div>
+{% endif %}
+{% if error %}
+<div class="alert alert-error">{{ error }}</div>
+{% endif %}
+
+<section class="section-heading admin-section-heading">
+  <h2>角色权限矩阵</h2>
+  <p>第二阶段只做轻量编辑，不调整角色结构和账号列表。</p>
+</section>
+
+<div class="account-grid">
+  {% for role in roles %}
+  <article class="work-card account-card">
+    <header class="account-card-header">
+      <div>
+        <p class="eyebrow">Role #{{ role.id }}</p>
+        <h2>{{ role.role_name }}</h2>
+        <p>{{ role.description or '暂无描述' }}</p>
+      </div>
+      {% if role.is_system %}
+      <span class="status-badge role-badge">系统角色</span>
+      {% else %}
+      <span class="status-badge">自定义角色</span>
+      {% endif %}
+    </header>
+
+    <form class="form-stack" method="post" action="/admin/roles/{{ role.id }}/permissions">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      {% for group in permission_groups %}
+      <div class="permission-group">
+        <h3>{{ group.name }}</h3>
+        <div class="permission-check-grid">
+          {% for permission in group.permissions %}
+          <label class="inline-check permission-check">
+            <input
+              type="checkbox"
+              name="permissions"
+              value="{{ permission.key }}"
+              {% if permission.key in role.permissions %}checked{% endif %}
+            >
+            <span>
+              <strong>{{ permission.label }}</strong>
+              <small>{{ permission.key }}</small>
+            </span>
+          </label>
+          {% endfor %}
+        </div>
+      </div>
+      {% endfor %}
+      <footer class="form-actions">
+        <button class="primary-button compact" type="submit">保存权限</button>
+      </footer>
+    </form>
+  </article>
+  {% else %}
+  <article class="work-card account-card">
+    <h2>暂无角色</h2>
+    <p>请先完成 RBAC 初始化。</p>
+  </article>
+  {% endfor %}
+</div>
+{% endblock %}

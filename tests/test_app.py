@@ -824,6 +824,48 @@ def user_id_by_username(tmp_path, username):
     return int(row[0])
 
 
+def create_role_with_permissions(tmp_path, role_name, permissions):
+    with sqlite3.connect(tmp_path / "tickets.db") as connection:
+        timestamp = "2026-07-06 10:00:00"
+        cursor = connection.execute(
+            """
+            INSERT INTO admin_roles (role_name, description, is_system, created_at, updated_at)
+            VALUES (?, ?, 0, ?, ?)
+            """,
+            (role_name, "test role", timestamp, timestamp),
+        )
+        role_id = int(cursor.lastrowid)
+        for permission in permissions:
+            connection.execute(
+                """
+                INSERT INTO admin_role_permissions (role_id, permission_key, created_at)
+                VALUES (?, ?, ?)
+                """,
+                (role_id, permission, timestamp),
+            )
+    return role_id
+
+
+def update_admin_user_access(tmp_path, username, role_id, data_scope="all", store_names=""):
+    with sqlite3.connect(tmp_path / "tickets.db") as connection:
+        connection.execute(
+            """
+            UPDATE admin_users
+            SET role_id = ?, data_scope = ?, store_names = ?, is_active = 1
+            WHERE username = ?
+            """,
+            (int(role_id), data_scope, store_names, username),
+        )
+
+
+def set_ticket_assignment(tmp_path, ticket_id, assigned_to):
+    with sqlite3.connect(tmp_path / "tickets.db") as connection:
+        connection.execute(
+            "UPDATE tickets SET assigned_to = ?, updated_at = ? WHERE id = ?",
+            (assigned_to, "2026-07-06 10:00:00", int(ticket_id)),
+        )
+
+
 def test_rbac_tables_env_migration_password_hashes_and_login_logs(tmp_path, monkeypatch):
     client, _ = build_client(
         tmp_path,
@@ -1051,6 +1093,118 @@ def test_database_assignable_admin_users_extend_handler_candidates(tmp_path, mon
     assert update.status_code == 303
     assert rows_for(tmp_path, "tickets")[0]["assigned_to"] == "liuhao"
     assert ticket_action_logs(tmp_path, 1)[-1]["new_assigned_to"] == "liuhao"
+
+
+def test_phase2_ticket_permissions_and_data_scope_are_enforced(tmp_path, monkeypatch):
+    client, _ = build_client(
+        tmp_path,
+        monkeypatch,
+        admin_users="admin:123456,blocked:123456,storeuser:123456,assigneduser:123456",
+    )
+    no_ticket_role = create_role_with_permissions(tmp_path, "no-ticket-access", [])
+    store_role = create_role_with_permissions(tmp_path, "store-ticket-exporter", ["ticket.view", "ticket.export"])
+    assigned_role = create_role_with_permissions(tmp_path, "assigned-ticket-exporter", ["ticket.view", "ticket.export"])
+    update_admin_user_access(tmp_path, "blocked", no_ticket_role)
+    update_admin_user_access(tmp_path, "storeuser", store_role, data_scope="stores", store_names="南京门东店")
+    update_admin_user_access(tmp_path, "assigneduser", assigned_role, data_scope="assigned")
+
+    submit_ticket(client, store_name="南京门东店", description="phase2 visible nanjing ticket")
+    submit_ticket(client, store_name="南昌万寿宫店", description="phase2 hidden nanchang ticket")
+    set_ticket_assignment(tmp_path, 1, "assigneduser")
+    set_ticket_assignment(tmp_path, 2, "someone-else")
+
+    assert_login_success(login_admin(client, "blocked", "123456"))
+    denied_list = client.get("/admin")
+    assert denied_list.status_code == 403
+    assert "权限不足" in denied_list.text
+    assert "application/json" not in denied_list.headers.get("content-type", "")
+    denied_export = client.get("/admin/export")
+    assert denied_export.status_code == 403
+
+    assert_login_success(login_admin(client, "storeuser", "123456"))
+    list_page = client.get("/admin")
+    assert list_page.status_code == 200
+    assert "phase2 visible nanjing ticket" in list_page.text
+    assert "phase2 hidden nanchang ticket" not in list_page.text
+    bypass_page = client.get("/admin?store_name=南昌万寿宫店")
+    assert bypass_page.status_code == 200
+    assert "phase2 hidden nanchang ticket" not in bypass_page.text
+
+    store_export = client.get("/admin/export")
+    assert store_export.status_code == 200
+    workbook = load_workbook(BytesIO(store_export.content))
+    descriptions = {row[10].value for row in workbook.active.iter_rows(min_row=2)}
+    assert "phase2 visible nanjing ticket" in descriptions
+    assert "phase2 hidden nanchang ticket" not in descriptions
+
+    assert_login_success(login_admin(client, "assigneduser", "123456"))
+    assigned_page = client.get("/admin")
+    assert assigned_page.status_code == 200
+    assert "phase2 visible nanjing ticket" in assigned_page.text
+    assert "phase2 hidden nanchang ticket" not in assigned_page.text
+    assigned_export = client.get("/admin/export")
+    assert assigned_export.status_code == 200
+    assigned_workbook = load_workbook(BytesIO(assigned_export.content))
+    assigned_descriptions = {row[10].value for row in assigned_workbook.active.iter_rows(min_row=2)}
+    assert assigned_descriptions == {"phase2 visible nanjing ticket"}
+
+    operation_logs = rows_for(tmp_path, "admin_operation_logs")
+    assert any(row["action"] == "ticket.export" and row["username"] == "storeuser" for row in operation_logs)
+
+
+def test_phase2_schedule_employee_and_roles_permissions_are_enforced(tmp_path, monkeypatch):
+    client, main = build_client(
+        tmp_path,
+        monkeypatch,
+        admin_users="admin:123456,limited:123456,ops:123456",
+    )
+    limited_role = create_role_with_permissions(tmp_path, "phase2-limited", [])
+    update_admin_user_access(tmp_path, "limited", limited_role)
+
+    no_login_client = TestClient(main.app)
+    no_login_response = no_login_client.get("/admin/roles", follow_redirects=False)
+    assert no_login_response.status_code == 303
+    assert no_login_response.headers["location"].startswith("/admin/login")
+
+    assert_login_success(login_admin(client, "limited", "123456"))
+    assert client.get("/admin/schedules").status_code == 403
+    assert client.get("/admin/employees").status_code == 403
+    assert client.get("/admin/schedules/export").status_code == 403
+
+    assert_login_success(login_admin(client, "admin", "123456"))
+    roles_page = client.get("/admin/roles")
+    assert roles_page.status_code == 200
+    assert "ticket.view" in roles_page.text
+    ops_role_id = role_id_by_name(tmp_path, "运营管理")
+    grant = client.post(
+        f"/admin/roles/{ops_role_id}/permissions",
+        data={
+            "csrf_token": csrf_token_for(client, "/admin/roles"),
+            "permissions": ["ticket.view", "schedule.view", "employee.view"],
+        },
+        follow_redirects=False,
+    )
+    assert grant.status_code == 303
+
+    assert_login_success(login_admin(client, "ops", "123456"))
+    assert client.get("/admin/schedules").status_code == 200
+    assert client.get("/admin/employees").status_code == 200
+    assert client.get("/admin/export").status_code == 403
+
+    assert_login_success(login_admin(client, "admin", "123456"))
+    revoke = client.post(
+        f"/admin/roles/{ops_role_id}/permissions",
+        data={"csrf_token": csrf_token_for(client, "/admin/roles"), "permissions": ["ticket.view"]},
+        follow_redirects=False,
+    )
+    assert revoke.status_code == 303
+
+    assert_login_success(login_admin(client, "ops", "123456"))
+    assert client.get("/admin/schedules").status_code == 403
+    assert client.get("/admin/employees").status_code == 403
+
+    operation_logs = rows_for(tmp_path, "admin_operation_logs")
+    assert any(row["action"] == "role.permissions.update" for row in operation_logs)
 
 
 def test_ticket_detail_workbench_comment_modes_and_close_prompt(tmp_path, monkeypatch):
