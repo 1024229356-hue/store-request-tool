@@ -1,0 +1,171 @@
+{% set page_title = '权限治理概览' %}
+{% set page_subtitle = '统一查看角色权限、接口覆盖与 data_scope 生效规则。' %}
+{% set page_eyebrow = 'PermissionService' %}
+{% set current_menu = 'roles' %}
+{% extends "base_admin.html" %}
+
+{% block topbar_actions %}
+<a class="ghost-button compact" href="/admin/roles">角色权限</a>
+<a class="ghost-button compact" href="/admin/account">账号管理</a>
+{% endblock %}
+
+{% block content %}
+<section class="stats-section work-card">
+  <div class="stats-grid">
+    <article class="stat-card">
+      <span>角色数</span>
+      <strong>{{ roles|length }}</strong>
+      <small>admin_roles</small>
+    </article>
+    <article class="stat-card">
+      <span>权限点</span>
+      <strong>{{ permission_route_map|length }}</strong>
+      <small>ADMIN_PERMISSION_KEYS</small>
+    </article>
+    <article class="stat-card">
+      <span>已映射接口</span>
+      <strong>{{ route_items|selectattr('exists')|list|length }}</strong>
+      <small>PermissionService</small>
+    </article>
+    <article class="stat-card">
+      <span>未接入权限系统</span>
+      <strong>{{ uncontrolled_routes|length }}</strong>
+      <small>需要分批收敛</small>
+    </article>
+  </div>
+</section>
+
+<section class="section-heading admin-section-heading">
+  <h2>角色 → 权限矩阵</h2>
+  <p>这里是只读治理视图，修改角色权限请进入角色权限页。</p>
+</section>
+
+<div class="account-grid">
+  {% for role in roles %}
+  <article class="work-card account-card">
+    <header class="account-card-header">
+      <div>
+        <p class="eyebrow">Role #{{ role.id }}</p>
+        <h2>{{ role.role_name }}</h2>
+        <p>{{ role.description or '暂无描述' }}</p>
+      </div>
+      {% if role.is_system %}
+      <span class="status-badge role-badge">系统角色</span>
+      {% else %}
+      <span class="status-badge">自定义角色</span>
+      {% endif %}
+    </header>
+    {% for group in permission_groups %}
+    <div class="permission-group">
+      <h3>{{ group.name }}</h3>
+      <div class="permission-check-grid">
+        {% for permission in group.permissions %}
+        <div class="inline-check permission-check">
+          <span>
+            <strong>{{ permission.label }}</strong>
+            <small>{{ permission.key }}</small>
+          </span>
+          {% if permission.key in role.permissions %}
+          <span class="status-badge assignable-badge">已授权</span>
+          {% else %}
+          <span class="status-badge inactive-badge">未授权</span>
+          {% endif %}
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+    {% endfor %}
+  </article>
+  {% endfor %}
+</div>
+
+<section class="section-heading admin-section-heading">
+  <h2>权限 → 页面/接口映射</h2>
+  <p>每个受控入口都应有清晰权限点，便于后续排查和扩展。</p>
+</section>
+
+<section class="work-card">
+  <div class="table-wrapper">
+    <table class="admin-table">
+      <thead>
+        <tr>
+          <th>模块</th>
+          <th>权限点</th>
+          <th>方法</th>
+          <th>页面/接口</th>
+          <th>状态</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for item in route_items %}
+        <tr>
+          <td>{{ item.module }}</td>
+          <td><span class="status-badge role-badge">{{ item.permission }}</span></td>
+          <td>{{ item.method }}</td>
+          <td>{{ item.label }}<br><small>{{ item.path }}</small></td>
+          <td>
+            {% if item.exists %}
+            <span class="status-badge assignable-badge">已接入</span>
+            {% else %}
+            <span class="status-badge inactive-badge">路由缺失</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="section-heading admin-section-heading">
+  <h2>data_scope 可视化</h2>
+  <p>统一入口 apply_data_scope 同时服务工单、排班、导出与 dashboard 统计。</p>
+</section>
+
+<div class="account-grid">
+  {% for rule in data_scope_rules %}
+  <article class="work-card account-card">
+    <header class="account-card-header">
+      <div>
+        <p class="eyebrow">data_scope</p>
+        <h2>{{ rule.key }}</h2>
+        <p>{{ rule.description }}</p>
+      </div>
+      <span class="status-badge">{{ rule.label }}</span>
+    </header>
+  </article>
+  {% endfor %}
+</div>
+
+<section class="section-heading admin-section-heading">
+  <h2>未接入权限系统</h2>
+  <p>红色项表示尚未纳入 PermissionService 显式映射，后续阶段应继续收敛。</p>
+</section>
+
+<section class="work-card">
+  {% if uncontrolled_routes %}
+  <div class="table-wrapper">
+    <table class="admin-table">
+      <thead>
+        <tr>
+          <th>方法</th>
+          <th>接口</th>
+          <th>状态</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for route in uncontrolled_routes %}
+        <tr>
+          <td>{{ route.method }}</td>
+          <td>{{ route.path }}</td>
+          <td><span class="status-badge inactive-badge">未接入权限系统</span></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="empty-note">当前后台路由均已纳入权限映射。</p>
+  {% endif %}
+</section>
+{% endblock %}

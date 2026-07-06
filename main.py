@@ -688,39 +688,114 @@ def current_admin_user(request: Request) -> Optional[Dict[str, object]]:
     return None
 
 
+class PermissionService:
+    def get_user_permissions(self, user: Optional[Dict[str, object]]) -> List[str]:
+        if not user:
+            return []
+        return [str(permission) for permission in user.get("permissions") or []]
+
+    def has_permission(self, user: Optional[Dict[str, object]], key: str) -> bool:
+        return str(key or "").strip() in set(self.get_user_permissions(user))
+
+    def get_role_permissions(self, role_id: int) -> List[str]:
+        try:
+            with get_connection() as connection:
+                return permissions_for_role(connection, int(role_id))
+        except (sqlite3.Error, TypeError, ValueError):
+            return []
+
+    def require_permission(self, key: str):
+        def dependency(request: Request) -> Dict[str, object]:
+            user = current_admin_user(request)
+            if not user:
+                if should_redirect_to_login(request):
+                    raise HTTPException(status_code=303, detail="Login required.", headers={"Location": login_redirect_location(request)})
+                raise HTTPException(status_code=http_status.HTTP_401_UNAUTHORIZED, detail="Login required.")
+            if not self.has_permission(user, key):
+                raise HTTPException(status_code=http_status.HTTP_403_FORBIDDEN, detail="权限不足")
+            return user
+
+        return dependency
+
+    def require_any_permission(self, keys: List[str]):
+        def dependency(request: Request) -> Dict[str, object]:
+            user = current_admin_user(request)
+            if not user:
+                if should_redirect_to_login(request):
+                    raise HTTPException(status_code=303, detail="Login required.", headers={"Location": login_redirect_location(request)})
+                raise HTTPException(status_code=http_status.HTTP_401_UNAUTHORIZED, detail="Login required.")
+            if not any(self.has_permission(user, key) for key in keys):
+                raise HTTPException(status_code=http_status.HTTP_403_FORBIDDEN, detail="权限不足")
+            return user
+
+        return dependency
+
+    def apply_data_scope(self, query: Optional[Dict[str, object]], user: Optional[Dict[str, object]]) -> Dict[str, object]:
+        scoped_query = dict(query or {})
+        scope_kind = str(scoped_query.pop("__scope_kind", "ticket") or "ticket")
+        if not user:
+            scoped_query["__scope_no_rows"] = "1"
+            return scoped_query
+        data_scope = normalize_admin_data_scope(str(user.get("data_scope") or "all"))
+        if data_scope == "all":
+            return scoped_query
+        if scope_kind == "schedule":
+            return self._apply_schedule_scope(scoped_query, user, data_scope)
+        return self._apply_ticket_scope(scoped_query, user, data_scope)
+
+    def filter_query_by_scope(self, query: Optional[Dict[str, object]], user: Optional[Dict[str, object]]) -> Dict[str, object]:
+        return self.apply_data_scope(query, user)
+
+    def _apply_ticket_scope(self, query: Dict[str, object], user: Dict[str, object], data_scope: str) -> Dict[str, object]:
+        scoped_query = dict(query)
+        if data_scope == "assigned":
+            scoped_query["__scope_assigned_to"] = str(user.get("username") or "").strip()
+        elif data_scope == "stores":
+            store_names = split_multi_value_text(user.get("store_names"))
+            if store_names:
+                scoped_query["__scope_store_names"] = store_names
+            else:
+                scoped_query["__scope_no_rows"] = "1"
+        return scoped_query
+
+    def _apply_schedule_scope(self, query: Dict[str, object], user: Dict[str, object], data_scope: str) -> Dict[str, object]:
+        scoped_query = dict(query)
+        if data_scope == "assigned":
+            scoped_query["store_names"] = []
+            scoped_query["is_all_stores"] = False
+            scoped_query["__scope_no_rows"] = "1"
+            return scoped_query
+        store_names = split_multi_value_text(user.get("store_names"))
+        if not store_names:
+            scoped_query["store_names"] = []
+            scoped_query["is_all_stores"] = False
+            scoped_query["__scope_no_rows"] = "1"
+            return scoped_query
+        requested_store_names = unique_clean_values(scoped_query.get("store_names") or [])
+        scoped_query["store_names"] = [store_name for store_name in requested_store_names if store_name in store_names] if requested_store_names else store_names
+        scoped_query["is_all_stores"] = False
+        if not scoped_query["store_names"]:
+            scoped_query["__scope_no_rows"] = "1"
+        return scoped_query
+
+
+permission_service = PermissionService()
+
+
 def has_permission(user: Optional[Dict[str, object]], permission_key: str) -> bool:
-    if not user:
-        return False
-    permissions = set(str(permission) for permission in user.get("permissions") or [])
-    return permission_key in permissions
+    return permission_service.has_permission(user, permission_key)
 
 
 def require_permission(permission_key: str):
-    def dependency(request: Request) -> Dict[str, object]:
-        user = current_admin_user(request)
-        if not user:
-            if should_redirect_to_login(request):
-                raise HTTPException(status_code=303, detail="Login required.", headers={"Location": login_redirect_location(request)})
-            raise HTTPException(status_code=http_status.HTTP_401_UNAUTHORIZED, detail="Login required.")
-        if not has_permission(user, permission_key):
-            raise HTTPException(status_code=http_status.HTTP_403_FORBIDDEN, detail="权限不足")
-        return user
-
-    return dependency
+    return permission_service.require_permission(permission_key)
 
 
 def require_any_permission(permission_keys: List[str]):
-    def dependency(request: Request) -> Dict[str, object]:
-        user = current_admin_user(request)
-        if not user:
-            if should_redirect_to_login(request):
-                raise HTTPException(status_code=303, detail="Login required.", headers={"Location": login_redirect_location(request)})
-            raise HTTPException(status_code=http_status.HTTP_401_UNAUTHORIZED, detail="Login required.")
-        if not any(has_permission(user, permission_key) for permission_key in permission_keys):
-            raise HTTPException(status_code=http_status.HTTP_403_FORBIDDEN, detail="权限不足")
-        return user
+    return permission_service.require_any_permission(permission_keys)
 
-    return dependency
+
+def apply_data_scope(query: Optional[Dict[str, object]], user: Optional[Dict[str, object]]) -> Dict[str, object]:
+    return permission_service.apply_data_scope(query, user)
 
 
 def current_csrf_token(request: Request) -> str:
@@ -845,6 +920,7 @@ def should_redirect_to_login(request: Request) -> bool:
         or path == "/admin/settings"
         or path == "/admin/account"
         or path == "/admin/roles"
+        or path == "/admin/permission-overview"
         or path == "/admin/system"
         or path == "/admin/route-health"
         or path == "/admin/my-work"
@@ -1423,27 +1499,71 @@ def fetch_assignable_admin_usernames() -> List[str]:
     return unique_clean_values(row["username"] for row in rows)
 
 
+class AuditService:
+    def record_login(self, request: Request, username: str, success: bool, message: str = "") -> None:
+        try:
+            with get_connection() as connection:
+                if not table_exists(connection, "admin_login_logs"):
+                    return
+                connection.execute(
+                    """
+                    INSERT INTO admin_login_logs (username, success, ip_address, user_agent, message, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        username.strip(),
+                        1 if success else 0,
+                        request.client.host if request.client else "",
+                        request.headers.get("user-agent", ""),
+                        message,
+                        now_text(),
+                    ),
+                )
+        except sqlite3.Error:
+            return
+
+    def record_operation(
+        self,
+        username: str,
+        action: str,
+        target_type: str = "",
+        target_id: object = "",
+        detail: Dict[str, object] | str = "",
+        request: Optional[Request] = None,
+    ) -> None:
+        if isinstance(detail, dict):
+            clean_detail = {key: value for key, value in detail.items() if "password" not in key}
+            detail_text = json.dumps(clean_detail, ensure_ascii=False, sort_keys=True)
+        else:
+            detail_text = str(detail or "")
+        try:
+            with get_connection() as connection:
+                if not table_exists(connection, "admin_operation_logs"):
+                    return
+                connection.execute(
+                    """
+                    INSERT INTO admin_operation_logs (username, action, target_type, target_id, detail, ip_address, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        username.strip(),
+                        action,
+                        target_type,
+                        str(target_id or ""),
+                        detail_text,
+                        request.client.host if request and request.client else "",
+                        now_text(),
+                    ),
+                )
+        except sqlite3.Error:
+            return
+
+
+audit_service = AuditService()
+
+
 def record_login_log(request: Request, username: str, success: bool, message: str = "") -> None:
-    try:
-        with get_connection() as connection:
-            if not table_exists(connection, "admin_login_logs"):
-                return
-            connection.execute(
-                """
-                INSERT INTO admin_login_logs (username, success, ip_address, user_agent, message, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    username.strip(),
-                    1 if success else 0,
-                    request.client.host if request.client else "",
-                    request.headers.get("user-agent", ""),
-                    message,
-                    now_text(),
-                ),
-            )
-    except sqlite3.Error:
-        return
+    audit_service.record_login(request, username, success, message)
 
 
 def record_operation_log(
@@ -1454,32 +1574,7 @@ def record_operation_log(
     detail: Dict[str, object] | str = "",
     request: Optional[Request] = None,
 ) -> None:
-    if isinstance(detail, dict):
-        clean_detail = {key: value for key, value in detail.items() if "password" not in key}
-        detail_text = json.dumps(clean_detail, ensure_ascii=False, sort_keys=True)
-    else:
-        detail_text = str(detail or "")
-    try:
-        with get_connection() as connection:
-            if not table_exists(connection, "admin_operation_logs"):
-                return
-            connection.execute(
-                """
-                INSERT INTO admin_operation_logs (username, action, target_type, target_id, detail, ip_address, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    username.strip(),
-                    action,
-                    target_type,
-                    str(target_id or ""),
-                    detail_text,
-                    request.client.host if request and request.client else "",
-                    now_text(),
-                ),
-            )
-    except sqlite3.Error:
-        return
+    audit_service.record_operation(username, action, target_type, target_id, detail, request)
 
 
 def admin_permission_groups() -> List[Dict[str, object]]:
@@ -1517,26 +1612,120 @@ def admin_permission_groups() -> List[Dict[str, object]]:
     return groups
 
 
+PERMISSION_ROUTE_RULES: List[Dict[str, str]] = [
+    {"method": "GET", "path": "/admin", "permission": "ticket.view", "module": "工单", "label": "工单列表"},
+    {"method": "GET", "path": "/admin/dashboard", "permission": "ticket.view", "module": "工单", "label": "经营看板"},
+    {"method": "GET", "path": "/admin/my-work", "permission": "ticket.view", "module": "工单", "label": "我的工作台"},
+    {"method": "GET", "path": "/admin/ticket/{ticket_id}", "permission": "ticket.view", "module": "工单", "label": "工单详情"},
+    {"method": "POST", "path": "/admin/ticket/{ticket_id}", "permission": "ticket.update", "module": "工单", "label": "更新工单"},
+    {"method": "POST", "path": "/admin/ticket/{ticket_id}/delete", "permission": "ticket.update", "module": "工单", "label": "删除工单"},
+    {"method": "POST", "path": "/admin/ticket/{ticket_id}/hard-delete", "permission": "ticket.update", "module": "工单", "label": "永久删除工单"},
+    {"method": "GET", "path": "/admin/export", "permission": "ticket.export", "module": "工单", "label": "导出工单"},
+    {"method": "GET", "path": "/admin/archive/export", "permission": "ticket.export", "module": "工单", "label": "导出归档工单"},
+    {"method": "GET", "path": "/admin/schedules", "permission": "schedule.view", "module": "排班", "label": "排班列表"},
+    {"method": "POST", "path": "/admin/schedules", "permission": "schedule.create", "module": "排班", "label": "新增排班"},
+    {"method": "GET", "path": "/admin/schedules/export", "permission": "schedule.export", "module": "排班", "label": "导出排班"},
+    {"method": "GET", "path": "/admin/employees", "permission": "employee.view", "module": "员工", "label": "员工列表"},
+    {"method": "GET", "path": "/admin/shift-types", "permission": "shift.view", "module": "班次", "label": "班次列表"},
+    {"method": "POST", "path": "/admin/shift-types", "permission": "shift.create", "module": "班次", "label": "新增班次"},
+    {"method": "POST", "path": "/admin/shift-types/{shift_type_id}/update", "permission": "shift.update", "module": "班次", "label": "编辑班次"},
+    {"method": "POST", "path": "/admin/shift-types/business-hours", "permission": "shift.update", "module": "班次", "label": "营业时间"},
+    {"method": "POST", "path": "/admin/shift-types/{shift_type_id}/disable", "permission": "shift.update", "module": "班次", "label": "停用班次"},
+    {"method": "POST", "path": "/admin/shift-types/{shift_type_id}/archive", "permission": "shift.archive", "module": "班次", "label": "归档班次"},
+    {"method": "POST", "path": "/admin/shift-types/{shift_type_id}/delete", "permission": "shift.delete", "module": "班次", "label": "删除班次"},
+    {"method": "POST", "path": "/admin/shift-types/{shift_type_id}/restore", "permission": "shift.update", "module": "班次", "label": "恢复班次"},
+    {"method": "POST", "path": "/admin/shift-types/{shift_type_id}/hard-delete", "permission": "shift.hard_delete", "module": "班次", "label": "永久删除班次"},
+    {"method": "GET", "path": "/admin/embedded-pages", "permission": "embedded.view", "module": "嵌入页", "label": "嵌入页列表"},
+    {"method": "POST", "path": "/admin/embedded-pages", "permission": "embedded.create", "module": "嵌入页", "label": "新增嵌入页"},
+    {"method": "POST", "path": "/admin/embedded-pages/{page_key}/replace", "permission": "embedded.update", "module": "嵌入页", "label": "替换嵌入页"},
+    {"method": "POST", "path": "/admin/embedded-pages/{page_key}/toggle", "permission": "embedded.update", "module": "嵌入页", "label": "启停嵌入页"},
+    {"method": "POST", "path": "/admin/embedded-pages/{page_key}/delete", "permission": "embedded.delete", "module": "嵌入页", "label": "删除嵌入页"},
+    {"method": "POST", "path": "/admin/embedded-pages/{page_key}/restore", "permission": "embedded.update", "module": "嵌入页", "label": "恢复嵌入页"},
+    {"method": "POST", "path": "/admin/embedded-pages/{page_key}/hard-delete", "permission": "embedded.hard_delete", "module": "嵌入页", "label": "永久删除嵌入页"},
+    {"method": "GET", "path": "/admin/embed/{page_key}", "permission": "embedded.view", "module": "嵌入页", "label": "嵌入页预览"},
+    {"method": "GET", "path": "/admin/embed-content/{page_key}", "permission": "embedded.view", "module": "嵌入页", "label": "嵌入页内容"},
+    {"method": "GET", "path": "/admin/embed-content/{page_key}/{resource_path:path}", "permission": "embedded.view", "module": "嵌入页", "label": "嵌入页资源"},
+    {"method": "GET", "path": "/admin/settings", "permission": "config.view", "module": "配置", "label": "配置中心"},
+    {"method": "GET", "path": "/admin/account", "permission": "account.view", "module": "账号", "label": "账号管理"},
+    {"method": "POST", "path": "/admin/account/users", "permission": "account.create", "module": "账号", "label": "新增账号"},
+    {"method": "POST", "path": "/admin/account/users/{user_id}/update", "permission": "account.update", "module": "账号", "label": "编辑账号"},
+    {"method": "POST", "path": "/admin/account/users/{user_id}/disable", "permission": "account.disable", "module": "账号", "label": "停用账号"},
+    {"method": "POST", "path": "/admin/account/users/{user_id}/enable", "permission": "account.disable", "module": "账号", "label": "启用账号"},
+    {"method": "POST", "path": "/admin/account/users/{user_id}/reset-password", "permission": "account.reset_password", "module": "账号", "label": "重置密码"},
+    {"method": "GET", "path": "/admin/roles", "permission": "role.view", "module": "角色", "label": "角色管理"},
+    {"method": "POST", "path": "/admin/roles/{role_id}/permissions", "permission": "role.update", "module": "角色", "label": "编辑角色权限"},
+    {"method": "GET", "path": "/admin/permission-overview", "permission": "role.view", "module": "角色", "label": "权限概览"},
+    {"method": "GET", "path": "/admin/system", "permission": "system.view", "module": "系统", "label": "系统信息"},
+    {"method": "GET", "path": "/admin/route-health", "permission": "system.route_health", "module": "系统", "label": "路由健康"},
+]
+
+
+def permission_route_items(app: FastAPI) -> List[Dict[str, object]]:
+    route_pairs = registered_route_pairs(app)
+    return [
+        {
+            **rule,
+            "exists": route_exists(route_pairs, rule["method"], rule["path"]),
+            "status": "OK" if route_exists(route_pairs, rule["method"], rule["path"]) else "MISSING",
+        }
+        for rule in PERMISSION_ROUTE_RULES
+    ]
+
+
+def is_permission_controlled_route(method: str, path: str) -> bool:
+    return any(
+        method == rule["method"] and route_pattern(rule["path"]).match(path)
+        for rule in PERMISSION_ROUTE_RULES
+    )
+
+
+def is_permission_overview_exempt_route(method: str, path: str) -> bool:
+    return (
+        path in {"/admin/login", "/admin/logout", "/admin/api/notifications", "/admin/api/notifications/{event_id}/read", "/admin/api/notifications/read-all"}
+        or path.startswith("/admin/uploads")
+        or path.startswith("/admin/files")
+    )
+
+
+def uncontrolled_admin_routes(app: FastAPI) -> List[Dict[str, str]]:
+    results: List[Dict[str, str]] = []
+    for method, path in registered_route_pairs(app):
+        if not path.startswith("/admin") or is_permission_overview_exempt_route(method, path):
+            continue
+        if not is_permission_controlled_route(method, path):
+            results.append({"method": method, "path": path})
+    return results
+
+
+def permission_overview_context(app: FastAPI) -> Dict[str, object]:
+    roles = fetch_admin_roles()
+    groups = admin_permission_groups()
+    route_items = permission_route_items(app)
+    permission_route_map = {
+        permission_key: [route for route in route_items if route["permission"] == permission_key]
+        for permission_key in ADMIN_PERMISSION_KEYS
+    }
+    return {
+        "roles": roles,
+        "permission_groups": groups,
+        "route_items": route_items,
+        "permission_route_map": permission_route_map,
+        "uncontrolled_routes": uncontrolled_admin_routes(app),
+        "data_scope_rules": [
+            {"key": "all", "label": "全部数据", "description": "不追加业务数据过滤。"},
+            {"key": "stores", "label": "指定门店", "description": "按账号 store_names 限制门店数据。"},
+            {"key": "assigned", "label": "仅本人处理", "description": "按 assigned_to = 当前账号限制工单。"},
+        ],
+    }
+
+
 def normalize_admin_data_scope(value: str) -> str:
     clean_value = (value or "").strip()
     return clean_value if clean_value in DATA_SCOPE_OPTIONS else "all"
 
 
 def scoped_ticket_filters_for_admin(user: Optional[Dict[str, object]], filters: Dict[str, object]) -> Dict[str, object]:
-    scoped_filters = dict(filters)
-    if not user:
-        scoped_filters["__scope_no_rows"] = "1"
-        return scoped_filters
-    data_scope = normalize_admin_data_scope(str(user.get("data_scope") or "all"))
-    if data_scope == "assigned":
-        scoped_filters["__scope_assigned_to"] = str(user.get("username") or "").strip()
-    elif data_scope == "stores":
-        store_names = split_multi_value_text(user.get("store_names"))
-        if store_names:
-            scoped_filters["__scope_store_names"] = store_names
-        else:
-            scoped_filters["__scope_no_rows"] = "1"
-    return scoped_filters
+    return apply_data_scope(filters, user)
 
 
 def require_ticket_scope_access(user: Optional[Dict[str, object]], ticket_id: int, ticket_scope: str = "store") -> None:
@@ -8210,6 +8399,7 @@ def create_app() -> FastAPI:
         deleted: int = 0,
         error: str = "",
         status_code: int = 200,
+        current_user: Optional[Dict[str, object]] = None,
     ) -> HTMLResponse:
         config = load_app_config()
         selected_view = normalize_schedule_view(view)
@@ -8226,6 +8416,23 @@ def create_app() -> FastAPI:
             default_to_first=default_to_first,
         )
         selected_scope = "all" if is_all_stores or scope == "all" or normalized_store_scope == "all" or (selected_view == "store-summary" and not selected_store_names) else "store"
+        scope_result = apply_data_scope(
+            {
+                "__scope_kind": "schedule",
+                "store_names": selected_store_names,
+                "is_all_stores": selected_scope == "all",
+            },
+            current_user,
+        )
+        if scope_result.get("__scope_no_rows"):
+            selected_store_names = ["__permission_no_store__"]
+            selected_scope = "store"
+            normalized_store_scope = "selected_stores"
+        else:
+            selected_store_names = list(scope_result.get("store_names") or [])
+            selected_scope = "all" if scope_result.get("is_all_stores") and not selected_store_names else "store"
+            if selected_store_names:
+                normalized_store_scope = "selected_stores"
         selected_store = selected_store_names[0] if len(selected_store_names) == 1 else ""
         combined_error = combine_error_messages(
             error,
@@ -9134,7 +9341,7 @@ def create_app() -> FastAPI:
     @app.get("/admin/shift-types", response_class=HTMLResponse)
     def admin_shift_types(
         request: Request,
-        admin: str = Depends(require_admin),
+        current_user: Dict[str, object] = Depends(require_permission("shift.view")),
         store_names: Optional[List[str]] = Query(None),
         status_filter: str = Query("all", alias="status"),
         global_scope: str = Query("all"),
@@ -9144,7 +9351,7 @@ def create_app() -> FastAPI:
     ) -> HTMLResponse:
         return render_shift_types_page(
             request,
-            admin,
+            str(current_user.get("username") or ""),
             error=error,
             success=success,
             store_names=store_names,
@@ -9156,7 +9363,7 @@ def create_app() -> FastAPI:
     @app.post("/admin/shift-types")
     def create_shift_type_route(
         request: Request,
-        admin: str = Depends(require_admin),
+        current_user: Dict[str, object] = Depends(require_permission("shift.create")),
         shift_scope: str = Form(""),
         store_name: str = Form(""),
         is_global: str = Form(""),
@@ -9171,6 +9378,7 @@ def create_app() -> FastAPI:
         return_global_scope: str = Form(""),
         return_data_scope: str = Form(""),
     ) -> RedirectResponse:
+        admin = str(current_user.get("username") or "")
         require_admin_csrf(request, csrf_token)
         try:
             create_shift_type(
@@ -9197,7 +9405,7 @@ def create_app() -> FastAPI:
     def update_shift_type_route(
         request: Request,
         shift_type_id: int,
-        admin: str = Depends(require_admin),
+        current_user: Dict[str, object] = Depends(require_permission("shift.update")),
         shift_scope: str = Form(""),
         store_name: str = Form(""),
         is_global: str = Form(""),
@@ -9213,6 +9421,7 @@ def create_app() -> FastAPI:
         return_global_scope: str = Form(""),
         return_data_scope: str = Form(""),
     ) -> RedirectResponse:
+        admin = str(current_user.get("username") or "")
         require_admin_csrf(request, csrf_token)
         try:
             update_shift_type(
@@ -9240,7 +9449,7 @@ def create_app() -> FastAPI:
     @app.post("/admin/shift-types/business-hours")
     def update_store_business_hours_route(
         request: Request,
-        admin: str = Depends(require_admin),
+        current_user: Dict[str, object] = Depends(require_permission("shift.update")),
         store_name: str = Form(""),
         business_start_time: str = Form(""),
         business_end_time: str = Form(""),
@@ -9250,6 +9459,7 @@ def create_app() -> FastAPI:
         return_global_scope: str = Form(""),
         return_data_scope: str = Form(""),
     ) -> RedirectResponse:
+        admin = str(current_user.get("username") or "")
         require_admin_csrf(request, csrf_token)
         try:
             upsert_store_business_hours(store_name, business_start_time, business_end_time, load_app_config())
@@ -9274,7 +9484,7 @@ def create_app() -> FastAPI:
     def disable_shift_type_route(
         request: Request,
         shift_type_id: int,
-        _admin: str = Depends(require_admin),
+        _current_user: Dict[str, object] = Depends(require_permission("shift.update")),
         csrf_token: str = Form(""),
         return_store_names: Optional[List[str]] = Form(None),
         return_status: str = Form(""),
@@ -9298,7 +9508,7 @@ def create_app() -> FastAPI:
     def archive_shift_type_route(
         request: Request,
         shift_type_id: int,
-        admin: str = Depends(require_admin),
+        current_user: Dict[str, object] = Depends(require_permission("shift.archive")),
         archive_reason: str = Form(""),
         csrf_token: str = Form(""),
         return_store_names: Optional[List[str]] = Form(None),
@@ -9306,6 +9516,7 @@ def create_app() -> FastAPI:
         return_global_scope: str = Form(""),
         return_data_scope: str = Form(""),
     ) -> RedirectResponse:
+        admin = str(current_user.get("username") or "")
         require_admin_csrf(request, csrf_token)
         try:
             archive_shift_type(shift_type_id, admin, archive_reason)
@@ -9323,7 +9534,7 @@ def create_app() -> FastAPI:
     def delete_shift_type_route(
         request: Request,
         shift_type_id: int,
-        admin: str = Depends(require_admin),
+        current_user: Dict[str, object] = Depends(require_permission("shift.delete")),
         delete_reason: str = Form(""),
         csrf_token: str = Form(""),
         return_store_names: Optional[List[str]] = Form(None),
@@ -9331,6 +9542,7 @@ def create_app() -> FastAPI:
         return_global_scope: str = Form(""),
         return_data_scope: str = Form(""),
     ) -> RedirectResponse:
+        admin = str(current_user.get("username") or "")
         require_admin_csrf(request, csrf_token)
         try:
             soft_delete_shift_type(shift_type_id, admin, delete_reason)
@@ -9348,7 +9560,7 @@ def create_app() -> FastAPI:
     def restore_shift_type_route(
         request: Request,
         shift_type_id: int,
-        _admin: str = Depends(require_admin),
+        _current_user: Dict[str, object] = Depends(require_permission("shift.update")),
         csrf_token: str = Form(""),
         return_store_names: Optional[List[str]] = Form(None),
         return_status: str = Form(""),
@@ -9372,7 +9584,7 @@ def create_app() -> FastAPI:
     def hard_delete_shift_type_route(
         request: Request,
         shift_type_id: int,
-        _admin: str = Depends(require_admin),
+        _current_user: Dict[str, object] = Depends(require_permission("shift.hard_delete")),
         confirm_delete: str = Form(""),
         csrf_token: str = Form(""),
         return_store_names: Optional[List[str]] = Form(None),
@@ -9460,6 +9672,7 @@ def create_app() -> FastAPI:
             normalized_employee_scope,
             parsed_employee_ids,
             parsed_shift_type_id or 0,
+            current_user=current_user,
             store_names=store_names,
             employee_statuses=parsed_employee_statuses,
             shift_type_ids=parsed_shift_type_ids,
@@ -9614,7 +9827,7 @@ def create_app() -> FastAPI:
     @app.get("/admin/dashboard", response_class=HTMLResponse)
     def admin_dashboard(
         request: Request,
-        admin: str = Depends(require_admin),
+        current_user: Dict[str, object] = Depends(require_permission("ticket.view")),
         store_name: str = Query(""),
         request_type: str = Query(""),
         status: str = Query(""),
@@ -9631,7 +9844,8 @@ def create_app() -> FastAPI:
             "date_start": date_start,
             "date_end": date_end,
         }
-        stats = fetch_dashboard_stats(filters)
+        scoped_filters = apply_data_scope(filters, current_user)
+        stats = fetch_dashboard_stats(scoped_filters)
         for ticket in stats["recent_tickets"]:
             ticket["detail_url"] = build_ticket_detail_url(int(ticket["id"]), "/admin/dashboard")
         return templates.TemplateResponse(
@@ -9646,19 +9860,19 @@ def create_app() -> FastAPI:
                 "filters": filters,
                 "stats": stats,
                 "today_label": datetime.now().strftime("%Y-%m-%d"),
-                "admin_user": admin,
+                "admin_user": str(current_user.get("username") or ""),
                 "csrf_token": current_csrf_token(request),
             },
         )
 
     @app.get("/admin/settings", response_class=HTMLResponse)
-    def admin_settings(request: Request, admin: str = Depends(require_admin)) -> HTMLResponse:
+    def admin_settings(request: Request, current_user: Dict[str, object] = Depends(require_permission("config.view"))) -> HTMLResponse:
         return templates.TemplateResponse(
             request,
             "settings.html",
             {
                 "request": request,
-                "admin_user": admin,
+                "admin_user": str(current_user.get("username") or ""),
                 "csrf_token": current_csrf_token(request),
                 "config_files": [
                     "stores.json",
@@ -9676,12 +9890,10 @@ def create_app() -> FastAPI:
     @app.get("/admin/account", response_class=HTMLResponse)
     def admin_account(
         request: Request,
-        admin: str = Depends(require_admin),
+        current_user: Dict[str, object] = Depends(require_permission("account.view")),
         success: str = Query(""),
     ) -> HTMLResponse:
-        current_user = current_admin_user(request)
-        if not has_permission(current_user, "account.view"):
-            return account_permission_denied(request, admin)
+        admin = str(current_user.get("username") or "")
         success_messages = {
             "created": "账号已新增。",
             "updated": "账号已更新。",
@@ -9694,7 +9906,7 @@ def create_app() -> FastAPI:
     @app.post("/admin/account/users", response_class=HTMLResponse)
     def create_admin_account(
         request: Request,
-        admin: str = Depends(require_admin),
+        current_user: Dict[str, object] = Depends(require_permission("account.create")),
         csrf_token: str = Form(""),
         username: str = Form(""),
         display_name: str = Form(""),
@@ -9706,10 +9918,8 @@ def create_app() -> FastAPI:
         is_assignable: str = Form(""),
         is_active: str = Form(""),
     ):
+        admin = str(current_user.get("username") or "")
         require_admin_csrf(request, csrf_token)
-        current_user = current_admin_user(request)
-        if not has_permission(current_user, "account.create"):
-            return account_permission_denied(request, admin)
         clean_username = username.strip()
         if not clean_username or not USERNAME_RE.match(clean_username):
             return render_account_page(request, admin, error="用户名只能使用字母、数字、下划线和短横线。", status_code=400)
@@ -9764,7 +9974,7 @@ def create_app() -> FastAPI:
     def update_admin_account(
         request: Request,
         user_id: int,
-        admin: str = Depends(require_admin),
+        current_user: Dict[str, object] = Depends(require_permission("account.update")),
         csrf_token: str = Form(""),
         display_name: str = Form(""),
         role_id: int = Form(0),
@@ -9773,10 +9983,8 @@ def create_app() -> FastAPI:
         is_assignable: str = Form(""),
         is_active: str = Form(""),
     ):
+        admin = str(current_user.get("username") or "")
         require_admin_csrf(request, csrf_token)
-        current_user = current_admin_user(request)
-        if not has_permission(current_user, "account.update"):
-            return account_permission_denied(request, admin)
         target_user = fetch_admin_user_by_id(user_id)
         if not target_user:
             return render_account_page(request, admin, error="账号不存在。", status_code=404)
@@ -9833,13 +10041,11 @@ def create_app() -> FastAPI:
     def disable_admin_account(
         request: Request,
         user_id: int,
-        admin: str = Depends(require_admin),
+        current_user: Dict[str, object] = Depends(require_permission("account.disable")),
         csrf_token: str = Form(""),
     ):
+        admin = str(current_user.get("username") or "")
         require_admin_csrf(request, csrf_token)
-        current_user = current_admin_user(request)
-        if not has_permission(current_user, "account.disable"):
-            return account_permission_denied(request, admin)
         target_user = fetch_admin_user_by_id(user_id)
         if not target_user:
             return render_account_page(request, admin, error="账号不存在。", status_code=404)
@@ -9858,13 +10064,11 @@ def create_app() -> FastAPI:
     def enable_admin_account(
         request: Request,
         user_id: int,
-        admin: str = Depends(require_admin),
+        current_user: Dict[str, object] = Depends(require_permission("account.disable")),
         csrf_token: str = Form(""),
     ):
+        admin = str(current_user.get("username") or "")
         require_admin_csrf(request, csrf_token)
-        current_user = current_admin_user(request)
-        if not has_permission(current_user, "account.disable"):
-            return account_permission_denied(request, admin)
         target_user = fetch_admin_user_by_id(user_id)
         if not target_user:
             return render_account_page(request, admin, error="账号不存在。", status_code=404)
@@ -9880,15 +10084,13 @@ def create_app() -> FastAPI:
     def reset_admin_account_password(
         request: Request,
         user_id: int,
-        admin: str = Depends(require_admin),
+        current_user: Dict[str, object] = Depends(require_permission("account.reset_password")),
         csrf_token: str = Form(""),
         password: str = Form(""),
         password_confirm: str = Form(""),
     ):
+        admin = str(current_user.get("username") or "")
         require_admin_csrf(request, csrf_token)
-        current_user = current_admin_user(request)
-        if not has_permission(current_user, "account.reset_password"):
-            return account_permission_denied(request, admin)
         target_user = fetch_admin_user_by_id(user_id)
         if not target_user:
             return render_account_page(request, admin, error="账号不存在。", status_code=404)
@@ -9950,14 +10152,30 @@ def create_app() -> FastAPI:
         )
         return RedirectResponse(url="/admin/roles?success=updated", status_code=303)
 
+    @app.get("/admin/permission-overview", response_class=HTMLResponse)
+    def admin_permission_overview(
+        request: Request,
+        current_user: Dict[str, object] = Depends(require_permission("role.view")),
+    ) -> HTMLResponse:
+        return templates.TemplateResponse(
+            request,
+            "permission_overview.html",
+            {
+                "request": request,
+                "admin_user": str(current_user.get("username") or ""),
+                "csrf_token": current_csrf_token(request),
+                **permission_overview_context(app),
+            },
+        )
+
     @app.get("/admin/system", response_class=HTMLResponse)
-    def admin_system(request: Request, admin: str = Depends(require_admin)) -> HTMLResponse:
+    def admin_system(request: Request, current_user: Dict[str, object] = Depends(require_permission("system.view"))) -> HTMLResponse:
         return templates.TemplateResponse(
             request,
             "system.html",
             {
                 "request": request,
-                "admin_user": admin,
+                "admin_user": str(current_user.get("username") or ""),
                 "csrf_token": current_csrf_token(request),
                 "database_path": str(get_db_path()),
                 "upload_dir": str(get_upload_dir()),
@@ -9966,7 +10184,7 @@ def create_app() -> FastAPI:
         )
 
     @app.get("/admin/route-health", response_class=HTMLResponse)
-    def admin_route_health(request: Request, admin: str = Depends(require_admin)) -> HTMLResponse:
+    def admin_route_health(request: Request, current_user: Dict[str, object] = Depends(require_permission("system.route_health"))) -> HTMLResponse:
         route_pairs = registered_route_pairs(app)
         admin_get_routes = [path for method, path in route_pairs if method == "GET" and path.startswith("/admin")]
         admin_post_routes = [path for method, path in route_pairs if method == "POST" and path.startswith("/admin")]
@@ -9983,7 +10201,7 @@ def create_app() -> FastAPI:
             "route_health.html",
             {
                 "request": request,
-                "admin_user": admin,
+                "admin_user": str(current_user.get("username") or ""),
                 "csrf_token": current_csrf_token(request),
                 "main_file": str(BASE_DIR / "main.py"),
                 "route_count": len(route_pairs),
@@ -10154,13 +10372,16 @@ def create_app() -> FastAPI:
         return RedirectResponse(url=f"/admin/cleanup?deleted_count={len(candidates)}", status_code=303)
 
     @app.get("/admin/embedded-pages", response_class=HTMLResponse)
-    def embedded_pages_admin(request: Request, admin: str = Depends(require_admin)) -> HTMLResponse:
-        return render_embedded_pages_admin(request, admin)
+    def embedded_pages_admin(
+        request: Request,
+        current_user: Dict[str, object] = Depends(require_permission("embedded.view")),
+    ) -> HTMLResponse:
+        return render_embedded_pages_admin(request, str(current_user.get("username") or ""))
 
     @app.post("/admin/embedded-pages", response_class=HTMLResponse)
     async def create_embedded_page_route(
         request: Request,
-        admin: str = Depends(require_admin),
+        current_user: Dict[str, object] = Depends(require_permission("embedded.create")),
         page_key: str = Form(""),
         title: str = Form(""),
         nav_label: str = Form(""),
@@ -10168,6 +10389,7 @@ def create_app() -> FastAPI:
         html_file: Optional[UploadFile] = File(None),
         csrf_token: str = Form(""),
     ) -> HTMLResponse:
+        admin = str(current_user.get("username") or "")
         require_admin_csrf(request, csrf_token)
         config = load_app_config()
         try:
@@ -10188,10 +10410,11 @@ def create_app() -> FastAPI:
     async def replace_embedded_page_route(
         request: Request,
         page_key: str,
-        admin: str = Depends(require_admin),
+        current_user: Dict[str, object] = Depends(require_permission("embedded.update")),
         html_file: Optional[UploadFile] = File(None),
         csrf_token: str = Form(""),
     ) -> HTMLResponse:
+        admin = str(current_user.get("username") or "")
         require_admin_csrf(request, csrf_token)
         config = load_app_config()
         try:
@@ -10205,10 +10428,11 @@ def create_app() -> FastAPI:
     def toggle_embedded_page_route(
         request: Request,
         page_key: str,
-        admin: str = Depends(require_admin),
+        current_user: Dict[str, object] = Depends(require_permission("embedded.update")),
         enabled: str = Form("0"),
         csrf_token: str = Form(""),
     ) -> RedirectResponse:
+        admin = str(current_user.get("username") or "")
         require_admin_csrf(request, csrf_token)
         set_embedded_page_enabled(page_key, enabled in {"1", "true", "on", "yes"}, admin)
         return RedirectResponse(url="/admin/embedded-pages", status_code=303)
@@ -10217,10 +10441,11 @@ def create_app() -> FastAPI:
     def delete_embedded_page_route(
         request: Request,
         page_key: str,
-        admin: str = Depends(require_admin),
+        current_user: Dict[str, object] = Depends(require_permission("embedded.delete")),
         delete_reason: str = Form(""),
         csrf_token: str = Form(""),
     ) -> RedirectResponse:
+        admin = str(current_user.get("username") or "")
         require_admin_csrf(request, csrf_token)
         soft_delete_embedded_page(page_key, admin, delete_reason)
         return RedirectResponse(url="/admin/embedded-pages", status_code=303)
@@ -10229,9 +10454,10 @@ def create_app() -> FastAPI:
     def restore_embedded_page_route(
         request: Request,
         page_key: str,
-        admin: str = Depends(require_admin),
+        current_user: Dict[str, object] = Depends(require_permission("embedded.update")),
         csrf_token: str = Form(""),
     ) -> RedirectResponse:
+        admin = str(current_user.get("username") or "")
         require_admin_csrf(request, csrf_token)
         restore_embedded_page(page_key, admin)
         return RedirectResponse(url="/admin/trash", status_code=303)
@@ -10240,7 +10466,7 @@ def create_app() -> FastAPI:
     def hard_delete_embedded_page_route(
         request: Request,
         page_key: str,
-        _admin: str = Depends(require_admin),
+        _current_user: Dict[str, object] = Depends(require_permission("embedded.hard_delete")),
         confirm_delete: str = Form(""),
         csrf_token: str = Form(""),
     ) -> RedirectResponse:
@@ -10267,23 +10493,27 @@ def create_app() -> FastAPI:
         )
 
     @app.get("/admin/embed-content/{page_key}", response_class=FileResponse)
-    def embedded_page_content_index(page_key: str, admin: str = Depends(require_admin)) -> FileResponse:
-        return embedded_page_content_response(page_key, "index.html", admin)
+    def embedded_page_content_index(
+        page_key: str,
+        current_user: Dict[str, object] = Depends(require_permission("embedded.view")),
+    ) -> FileResponse:
+        return embedded_page_content_response(page_key, "index.html", str(current_user.get("username") or ""))
 
     @app.get("/admin/embed-content/{page_key}/{resource_path:path}", response_class=FileResponse)
     def embedded_page_content(
         page_key: str,
         resource_path: str,
-        admin: str = Depends(require_admin),
+        current_user: Dict[str, object] = Depends(require_permission("embedded.view")),
     ) -> FileResponse:
-        return embedded_page_content_response(page_key, resource_path, admin)
+        return embedded_page_content_response(page_key, resource_path, str(current_user.get("username") or ""))
 
     @app.get("/admin/embed/{page_key}", response_class=HTMLResponse)
     def embedded_page_view(
         request: Request,
         page_key: str,
-        admin: str = Depends(require_admin),
+        current_user: Dict[str, object] = Depends(require_permission("embedded.view")),
     ) -> HTMLResponse:
+        admin = str(current_user.get("username") or "")
         page = fetch_embedded_page(page_key, enabled_only=True)
         if not page:
             raise HTTPException(status_code=404, detail="嵌入页面不存在或未启用")
@@ -11005,6 +11235,20 @@ def create_app() -> FastAPI:
             config,
             default_to_first=False,
         )
+        scope_result = apply_data_scope(
+            {
+                "__scope_kind": "schedule",
+                "store_names": selected_store_names,
+                "is_all_stores": is_all_stores,
+            },
+            current_user,
+        )
+        if scope_result.get("__scope_no_rows"):
+            selected_store_names = ["__permission_no_store__"]
+            is_all_stores = False
+        else:
+            selected_store_names = list(scope_result.get("store_names") or [])
+            is_all_stores = bool(scope_result.get("is_all_stores")) and not selected_store_names
         selected_shift_ids, include_custom_shift, _invalid_shift = parse_shift_filter_values(shift_type_ids, shift_type_id)
         selected_employee_statuses, _invalid_status = normalize_employee_status_filters(employee_statuses, "")
         rows = fetch_schedule_rows(

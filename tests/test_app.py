@@ -1207,6 +1207,143 @@ def test_phase2_schedule_employee_and_roles_permissions_are_enforced(tmp_path, m
     assert any(row["action"] == "role.permissions.update" for row in operation_logs)
 
 
+def test_phase3_permission_service_scope_audit_and_overview(tmp_path, monkeypatch):
+    client, main = build_client(
+        tmp_path,
+        monkeypatch,
+        admin_users="admin:123456,storeuser:123456",
+    )
+    store_role = create_role_with_permissions(
+        tmp_path,
+        "phase3-store-governance",
+        ["ticket.view", "ticket.export", "schedule.view", "schedule.export", "role.view"],
+    )
+    update_admin_user_access(tmp_path, "storeuser", store_role, data_scope="stores", store_names="南京门东店")
+
+    submit_ticket(client, store_name="南京门东店", description="phase3 visible ticket")
+    submit_ticket(client, store_name="南昌万寿宫店", description="phase3 hidden ticket")
+    visible_employee_id = main.create_employee("phase3 visible employee", "南京门东店", "店员", "", "在职", main.load_app_config())
+    hidden_employee_id = main.create_employee("phase3 hidden employee", "南昌万寿宫店", "店员", "", "在职", main.load_app_config())
+    visible_shift_id = main.create_shift_type("phase3 visible shift", "09:00", "18:00", "8", "#2563eb", store_name="南京门东店", config=main.load_app_config())
+    hidden_shift_id = main.create_shift_type("phase3 hidden shift", "09:00", "18:00", "8", "#dc2626", store_name="南昌万寿宫店", config=main.load_app_config())
+    main.bulk_upsert_schedules("南京门东店", [visible_employee_id], ["2026-07-07"], visible_shift_id, "", False, "admin", 20)
+    main.bulk_upsert_schedules("南昌万寿宫店", [hidden_employee_id], ["2026-07-07"], hidden_shift_id, "", False, "admin", 20)
+
+    user = main.fetch_admin_user_by_username("storeuser")
+    assert user is not None
+    assert isinstance(main.permission_service, main.PermissionService)
+    assert main.permission_service.has_permission(user, "ticket.view")
+    assert "ticket.export" in main.permission_service.get_user_permissions(user)
+    assert "ticket.view" in main.permission_service.get_role_permissions(store_role)
+
+    scoped_filters = main.apply_data_scope({}, user)
+    scoped_tickets = main.fetch_tickets(scoped_filters, "newest", main.load_app_config())
+    assert {ticket["description"] for ticket in scoped_tickets} == {"phase3 visible ticket"}
+    assert main.permission_service.filter_query_by_scope({}, user) == scoped_filters
+
+    scoped_schedule_query = main.apply_data_scope({"__scope_kind": "schedule", "store_names": ["南京门东店", "南昌万寿宫店"], "is_all_stores": False}, user)
+    assert scoped_schedule_query["store_names"] == ["南京门东店"]
+
+    main.audit_service.record_operation("storeuser", "phase3.audit", "unit", "1", {"password": "secret", "safe": True}, None)
+    audit_rows = rows_for(tmp_path, "admin_operation_logs")
+    assert any(row["action"] == "phase3.audit" and '"safe": true' in row["detail"] for row in audit_rows)
+    assert "secret" not in json.dumps(audit_rows, ensure_ascii=False)
+
+    assert_login_success(login_admin(client, "storeuser", "123456"))
+    list_page = client.get("/admin")
+    assert list_page.status_code == 200
+    assert "phase3 visible ticket" in list_page.text
+    assert "phase3 hidden ticket" not in list_page.text
+
+    dashboard = client.get("/admin/dashboard")
+    assert dashboard.status_code == 200
+    assert "phase3 visible ticket" in dashboard.text
+    assert "phase3 hidden ticket" not in dashboard.text
+
+    ticket_export = client.get("/admin/export")
+    assert ticket_export.status_code == 200
+    ticket_workbook = load_workbook(BytesIO(ticket_export.content))
+    exported_ticket_descriptions = {row[10].value for row in ticket_workbook.active.iter_rows(min_row=2)}
+    assert exported_ticket_descriptions == {"phase3 visible ticket"}
+
+    schedule_page = client.get("/admin/schedules?store_scope=all&month=2026-07")
+    assert schedule_page.status_code == 200
+    assert "phase3 visible employee" in schedule_page.text
+    assert "phase3 hidden employee" not in schedule_page.text
+
+    schedule_export = client.get("/admin/schedules/export?store_names=南京门东店&store_names=南昌万寿宫店&month=2026-07")
+    assert schedule_export.status_code == 200
+    schedule_workbook = load_workbook(BytesIO(schedule_export.content))
+    exported_schedule_stores = {row[0].value for row in schedule_workbook.active.iter_rows(min_row=2)}
+    exported_schedule_employees = {row[1].value for row in schedule_workbook.active.iter_rows(min_row=2)}
+    assert exported_schedule_stores == {"南京门东店"}
+    assert exported_schedule_employees == {"phase3 visible employee"}
+
+    assert_login_success(login_admin(client, "admin", "123456"))
+    overview = client.get("/admin/permission-overview")
+    assert overview.status_code == 200
+    assert "PermissionService" in overview.text
+    assert "data_scope" in overview.text
+    assert "ticket.view" in overview.text
+    assert "未接入权限系统" in overview.text
+
+
+def test_phase3_p0_routes_use_html_permission_denials(tmp_path, monkeypatch):
+    client, main = build_client(
+        tmp_path,
+        monkeypatch,
+        admin_users="admin:123456,limited:123456,governed:123456",
+    )
+    limited_role = create_role_with_permissions(tmp_path, "phase3-no-access", [])
+    governed_role = create_role_with_permissions(
+        tmp_path,
+        "phase3-p0-access",
+        ["embedded.view", "shift.view", "config.view", "system.view", "system.route_health", "role.view"],
+    )
+    update_admin_user_access(tmp_path, "limited", limited_role)
+    update_admin_user_access(tmp_path, "governed", governed_role)
+
+    unauthenticated = TestClient(main.app).get("/admin/permission-overview", follow_redirects=False)
+    assert unauthenticated.status_code == 303
+    assert unauthenticated.headers["location"].startswith("/admin/login")
+
+    assert_login_success(login_admin(client, "limited", "123456"))
+    for path in (
+        "/admin/embedded-pages",
+        "/admin/shift-types",
+        "/admin/settings",
+        "/admin/system",
+        "/admin/route-health",
+        "/admin/permission-overview",
+    ):
+        denied = client.get(path)
+        assert denied.status_code == 403, path
+        assert "text/html" in denied.headers.get("content-type", ""), path
+        assert "application/json" not in denied.headers.get("content-type", ""), path
+        assert "权限不足" in denied.text
+
+    assert_login_success(login_admin(client, "governed", "123456"))
+    for path in (
+        "/admin/embedded-pages",
+        "/admin/shift-types",
+        "/admin/settings",
+        "/admin/system",
+        "/admin/route-health",
+        "/admin/permission-overview",
+    ):
+        allowed = client.get(path)
+        assert allowed.status_code == 200, path
+
+
+def test_phase3_permission_and_audit_legacy_paths_are_consolidated():
+    source = (PROJECT_DIR / "main.py").read_text(encoding="utf-8")
+    assert "class PermissionService" in source
+    assert "class AuditService" in source
+    assert "def apply_data_scope(" in source
+    assert "if not has_permission(" not in source
+    assert source.count("INSERT INTO admin_operation_logs") == 1
+
+
 def test_ticket_detail_workbench_comment_modes_and_close_prompt(tmp_path, monkeypatch):
     client, _ = build_client(tmp_path, monkeypatch)
     submit_ticket(client, description="协作工作台提示工单")
