@@ -20,6 +20,28 @@ python -m uvicorn main:app --host 127.0.0.1 --port 8701
 .venv\Scripts\python.exe startup_check.py --format text
 ```
 
+## 本地启动与更新
+
+日常启动：
+
+```bat
+run.bat
+```
+
+代码更新后：
+
+```bat
+restart.bat
+```
+
+检查运行版本：
+
+```bat
+check_runtime.bat
+```
+
+后台打不开时，先打开 `http://127.0.0.1:8701/healthz`，再打开 `http://127.0.0.1:8701/__version`。如果 `check_runtime.bat` 显示本地 commit 和运行中 commit 不一致，说明可能仍有旧进程占用 8701，请执行 `restart.bat`。
+
 首次启动会自动初始化 `data/tickets.db`，并自动创建 `uploads` 目录。
 后续版本升级时，系统启动也会自动补齐缺失的数据表和字段，不需要删除数据库。
 

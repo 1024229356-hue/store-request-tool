@@ -116,10 +116,11 @@ exit /b 1
 
 :port_busy
 echo WARNING: Port %PORT% is already in use by PID %PORT_PID%.
-echo PID=%PORT_PID%
+echo 当前 8701 已被 PID %PORT_PID% 占用。
 tasklist /FI "PID eq %PORT_PID%"
-echo If this is a stale python.exe from this project, you can close it or run:
-echo taskkill /PID %PORT_PID% /F
+echo 这可能是旧服务未关闭。
+echo 请执行 restart.bat。
+echo run.bat 不会自动停止进程，避免误杀非本项目 Python 进程。
 pause
 exit /b 1
 

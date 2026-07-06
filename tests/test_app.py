@@ -2756,7 +2756,9 @@ def test_version_endpoint_reports_runtime_route_health(tmp_path, monkeypatch):
     assert payload["route_count"] == len(main.app.routes)
     assert payload["required_missing_routes"] == []
     assert set(required_paths).issubset({route.path for route in main.app.routes if hasattr(route, "path")})
-    assert payload["git_commit"]
+    assert payload["git_commit"] == main.APP_GIT_COMMIT
+    monkeypatch.setattr(main, "current_git_commit", lambda: "newer-disk-commit")
+    assert client.get("/__version").json()["git_commit"] == main.APP_GIT_COMMIT
     assert "started_at" in payload
     assert ".env" not in json.dumps(payload, ensure_ascii=False)
 
@@ -2921,6 +2923,9 @@ def test_access_url_docs_run_bat_and_asset_versions_are_stable():
         assert text in access_content
 
     readme = (PROJECT_DIR / "README.md").read_text(encoding="utf-8")
+    assert "本地启动与更新" in readme
+    assert "restart.bat" in readme
+    assert "check_runtime.bat" in readme
     assert "访问地址不变原则" in readme
     assert "/__version" in readme
     assert "Ctrl+F5" in readme
@@ -2931,6 +2936,9 @@ def test_access_url_docs_run_bat_and_asset_versions_are_stable():
     assert "PORT=8701" in run_bat
     assert "PID" in run_bat
     assert "WARNING" in run_bat
+    assert "当前 8701 已被 PID" in run_bat
+    assert "这可能是旧服务未关闭" in run_bat
+    assert "请执行 restart.bat" in run_bat
     assert "http://127.0.0.1:8701/submit" in run_bat
     assert "http://127.0.0.1:8701/admin/route-health" in run_bat
     assert "python -m uvicorn main:app --host 127.0.0.1 --port 8701" in run_bat
@@ -2995,9 +3003,58 @@ def test_run_bat_prints_startup_route_diagnostics():
     assert "Critical routes missing. Do not continue startup." in content
     assert "python -m uvicorn main:app --host 127.0.0.1 --port 8701" in content
     assert "startup_check.py" in content
+    assert "请执行 restart.bat" in content
     assert "pause" in content.lower()
     assert raw_content.count(b"\r\n") > 20
     assert raw_content.count(b"\n") == raw_content.count(b"\r\n")
+
+
+def test_runtime_restart_scripts_are_project_scoped_and_version_aware():
+    stop_bat = PROJECT_DIR / "stop.bat"
+    restart_bat = PROJECT_DIR / "restart.bat"
+    check_runtime_bat = PROJECT_DIR / "check_runtime.bat"
+
+    for script in (stop_bat, restart_bat, check_runtime_bat):
+        assert script.exists(), script.name
+        text = script.read_text(encoding="utf-8")
+        assert "taskkill /IM python.exe" not in text
+        assert "taskkill /IM python" not in text
+
+    stop_text = stop_bat.read_text(encoding="utf-8")
+    assert "Get-NetTCPConnection" in stop_text
+    assert "Get-CimInstance Win32_Process" in stop_text
+    assert "store_request_tool" in stop_text
+    assert "uvicorn main:app" in stop_text
+    assert r"D:\需求小程序\store_request_tool" in stop_text
+    assert "taskkill /PID" in stop_text
+    assert "--no-pause" in stop_text
+    assert "无法确认这是本项目进程" in stop_text
+    assert "8701 未运行" in stop_text
+    assert "pause" in stop_text.lower()
+
+    restart_text = restart_bat.read_text(encoding="utf-8")
+    assert 'call "%~dp0stop.bat" --no-pause' in restart_text
+    assert "timeout /t 1" in restart_text
+    assert 'call "%~dp0run.bat"' in restart_text
+    assert "git rev-parse --short HEAD" in restart_text
+    assert "C:\\Program Files\\Git\\cmd\\git.exe" in restart_text
+    for url in (
+        "http://127.0.0.1:8701/healthz",
+        "http://127.0.0.1:8701/__version",
+        "http://127.0.0.1:8701/admin/login",
+        "http://127.0.0.1:8701/admin/dashboard",
+    ):
+        assert url in restart_text
+
+    check_text = check_runtime_bat.read_text(encoding="utf-8")
+    assert "git rev-parse --short HEAD" in check_text
+    assert "C:\\Program Files\\Git\\cmd\\git.exe" in check_text
+    assert "http://127.0.0.1:8701/__version" in check_text
+    assert "ConvertFrom-Json" in check_text
+    assert "运行态一致" in check_text
+    assert "运行态不一致，请执行 restart.bat" in check_text
+    assert "服务未启动" in check_text
+    assert "pause" in check_text.lower()
 
 
 def test_startup_diagnostics_scripts_are_present_and_safe(tmp_path, monkeypatch):

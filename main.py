@@ -1114,8 +1114,11 @@ def current_git_commit() -> str:
     return read_git_head_short()
 
 
+APP_GIT_COMMIT = current_git_commit()
+
+
 def current_asset_version() -> str:
-    commit = current_git_commit()
+    commit = APP_GIT_COMMIT
     if commit != "unknown":
         return commit
     return re.sub(r"\D+", "", APP_STARTED_AT) or "dev"
@@ -8027,7 +8030,7 @@ def create_app() -> FastAPI:
             "name": "止痒 ERP",
             "main_file": str(BASE_DIR / "main.py"),
             "route_count": len(app.routes),
-            "git_commit": current_git_commit(),
+            "git_commit": APP_GIT_COMMIT,
             "port": config.port,
             "required_missing_routes": required_missing_routes(app),
             "started_at": APP_STARTED_AT,
