@@ -1,0 +1,327 @@
+{% set page_title = '工单规则' %}
+{% set page_subtitle = '配置自动分派和 SLA 时效，减少人工派单并统一截止时间。' %}
+{% set page_eyebrow = '规则治理' %}
+{% set current_menu = 'ticket-rules' %}
+{% extends "base_admin.html" %}
+
+{% block topbar_actions %}
+<a class="ghost-button compact" href="/admin/settings">配置中心</a>
+<a class="ghost-button compact" href="/admin/permission-overview">权限总览</a>
+{% endblock %}
+
+{% block content %}
+{% set can_update_assignment = has_perm('ticket.assignment_rule.update') %}
+{% set can_update_sla = has_perm('ticket.sla_rule.update') %}
+
+{% if success %}
+<div class="alert alert-success">{{ success }}</div>
+{% endif %}
+{% if error %}
+<div class="alert alert-error">{{ error }}</div>
+{% endif %}
+
+<section class="detail-summary-card work-card">
+  <div>
+    <span>自动分派</span>
+    <strong>减少人工派单</strong>
+  </div>
+  <div>
+    <span>SLA</span>
+    <strong>控制处理时效</strong>
+  </div>
+  <div>
+    <span>规则优先级</span>
+    <strong>数字越小越优先</strong>
+  </div>
+  <div>
+    <span>生效范围</span>
+    <strong>仅影响新工单</strong>
+  </div>
+</section>
+
+<section class="admin-section work-card">
+  <div class="section-heading admin-section-heading">
+    <h2>自动分派规则</h2>
+    <p>按门店、需求类型和品牌匹配；具体处理人优先，兜底角色会选择第一个可指派账号。</p>
+  </div>
+  {% if can_update_assignment %}
+  <form class="filter-bar" method="post" action="/admin/ticket-rules/assignment">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label>
+      <span>门店</span>
+      <select name="store_name">
+        <option value="">通用</option>
+        {% for store in stores %}
+        <option value="{{ store }}">{{ store }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>
+      <span>需求类型</span>
+      <select name="request_type">
+        <option value="">通用</option>
+        {% for item in request_types %}
+        <option value="{{ item }}">{{ item }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>
+      <span>品牌</span>
+      <input name="brand" list="brand-options" placeholder="留空表示通用">
+    </label>
+    <label>
+      <span>默认处理人</span>
+      <select name="default_handler">
+        <option value="">按角色兜底</option>
+        {% for handler in handlers %}
+        <option value="{{ handler }}">{{ handler }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>
+      <span>兜底角色</span>
+      <select name="default_role_id">
+        <option value="">不设置</option>
+        {% for role in roles %}
+        <option value="{{ role.id }}">{{ role.role_name }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>
+      <span>优先级</span>
+      <input type="number" min="1" name="priority" value="100">
+    </label>
+    <label class="inline-check">
+      <input type="checkbox" name="enabled" value="1" checked>
+      <span>启用</span>
+    </label>
+    <label class="filter-keyword">
+      <span>备注</span>
+      <input name="note" placeholder="可选">
+    </label>
+    <div class="filter-actions">
+      <button class="primary-button compact" type="submit">新增分派规则</button>
+    </div>
+  </form>
+  {% endif %}
+
+  <div class="table-wrap">
+    <table class="ticket-table erp-table">
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>门店</th>
+          <th>需求类型</th>
+          <th>品牌</th>
+          <th>处理人</th>
+          <th>兜底角色</th>
+          <th>优先级</th>
+          <th>状态</th>
+          <th>备注</th>
+          {% if can_update_assignment %}<th>操作</th>{% endif %}
+        </tr>
+      </thead>
+      <tbody>
+        {% for rule in assignment_rules %}
+        <tr>
+          <td>{{ rule.id }}</td>
+          <td>{{ rule.store_name or '通用' }}</td>
+          <td>{{ rule.request_type or '通用' }}</td>
+          <td>{{ rule.brand or '通用' }}</td>
+          <td>{{ rule.default_handler or '-' }}</td>
+          <td>{{ rule.default_role_name or '-' }}</td>
+          <td>{{ rule.priority }}</td>
+          <td>
+            {% if rule.enabled %}
+            <span class="badge active-badge">启用</span>
+            {% else %}
+            <span class="badge archive-badge">停用</span>
+            {% endif %}
+          </td>
+          <td>{{ rule.note or '' }}</td>
+          {% if can_update_assignment %}
+          <td>
+            <form class="inline-action-form" method="post" action="/admin/ticket-rules/assignment/{{ rule.id }}/toggle">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <input type="hidden" name="enabled" value="{{ 0 if rule.enabled else 1 }}">
+              <button class="ghost-button compact" type="submit">{{ '停用' if rule.enabled else '启用' }}</button>
+            </form>
+            <form class="inline-action-form" method="post" action="/admin/ticket-rules/assignment/{{ rule.id }}/delete">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <button class="danger-button compact" type="submit">停用</button>
+            </form>
+          </td>
+          {% endif %}
+        </tr>
+        {% else %}
+        <tr><td class="empty-cell" colspan="{{ 10 if can_update_assignment else 9 }}">暂无自动分派规则。</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="admin-section work-card">
+  <div class="section-heading admin-section-heading">
+    <h2>SLA 规则</h2>
+    <p>新工单未手动填写期望完成时间时，按匹配规则自动生成截止时间。</p>
+  </div>
+  {% if can_update_sla %}
+  <form class="filter-bar" method="post" action="/admin/ticket-rules/sla">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label>
+      <span>需求类型</span>
+      <select name="request_type">
+        <option value="">通用</option>
+        {% for item in request_types %}
+        <option value="{{ item }}">{{ item }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>
+      <span>紧急程度</span>
+      <select name="urgency_level">
+        <option value="">通用</option>
+        {% for item in urgency_levels %}
+        <option value="{{ item }}">{{ item }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>
+      <span>处理时限小时</span>
+      <input type="number" min="1" name="due_hours" value="24" required>
+    </label>
+    <label class="inline-check">
+      <input type="checkbox" name="enabled" value="1" checked>
+      <span>启用</span>
+    </label>
+    <label class="filter-keyword">
+      <span>备注</span>
+      <input name="note" placeholder="可选">
+    </label>
+    <div class="filter-actions">
+      <button class="primary-button compact" type="submit">新增 SLA 规则</button>
+    </div>
+  </form>
+  {% endif %}
+
+  <div class="table-wrap">
+    <table class="ticket-table erp-table">
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>需求类型</th>
+          <th>紧急程度</th>
+          <th>小时</th>
+          <th>状态</th>
+          <th>备注</th>
+          {% if can_update_sla %}<th>操作</th>{% endif %}
+        </tr>
+      </thead>
+      <tbody>
+        {% for rule in sla_rules %}
+        <tr>
+          <td>{{ rule.id }}</td>
+          <td>{{ rule.request_type or '通用' }}</td>
+          <td>{{ rule.urgency_level or '通用' }}</td>
+          <td>{{ rule.due_hours }}</td>
+          <td>
+            {% if rule.enabled %}
+            <span class="badge active-badge">启用</span>
+            {% else %}
+            <span class="badge archive-badge">停用</span>
+            {% endif %}
+          </td>
+          <td>{{ rule.note or '' }}</td>
+          {% if can_update_sla %}
+          <td>
+            <form class="inline-action-form" method="post" action="/admin/ticket-rules/sla/{{ rule.id }}/toggle">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <input type="hidden" name="enabled" value="{{ 0 if rule.enabled else 1 }}">
+              <button class="ghost-button compact" type="submit">{{ '停用' if rule.enabled else '启用' }}</button>
+            </form>
+            <form class="inline-action-form" method="post" action="/admin/ticket-rules/sla/{{ rule.id }}/delete">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <button class="danger-button compact" type="submit">停用</button>
+            </form>
+          </td>
+          {% endif %}
+        </tr>
+        {% else %}
+        <tr><td class="empty-cell" colspan="{{ 7 if can_update_sla else 6 }}">暂无 SLA 规则。</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="admin-section work-card">
+  <div class="section-heading admin-section-heading">
+    <h2>测试匹配</h2>
+    <p>输入门店、需求类型、品牌和紧急程度，预览新工单会命中的分派和 SLA 规则。</p>
+  </div>
+  <form class="filter-bar" method="post" action="/admin/ticket-rules/test">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label>
+      <span>门店</span>
+      <select name="store_name">
+        <option value="">不指定</option>
+        {% for store in stores %}
+        <option value="{{ store }}">{{ store }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>
+      <span>需求类型</span>
+      <select name="request_type">
+        <option value="">不指定</option>
+        {% for item in request_types %}
+        <option value="{{ item }}">{{ item }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>
+      <span>品牌</span>
+      <input name="brand" list="brand-options" placeholder="可选">
+    </label>
+    <label>
+      <span>紧急程度</span>
+      <select name="urgency_level">
+        <option value="">不指定</option>
+        {% for item in urgency_levels %}
+        <option value="{{ item }}">{{ item }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <div class="filter-actions">
+      <button class="primary-button compact" type="submit">测试匹配</button>
+    </div>
+  </form>
+  {% if match_result %}
+  <div class="detail-summary-card">
+    <div>
+      <span>分派规则</span>
+      <strong>{{ ('#' ~ match_result.assignment_rule.id) if match_result.assignment_rule else '未匹配' }}</strong>
+    </div>
+    <div>
+      <span>预计处理人</span>
+      <strong>{{ match_result.assigned_to or '待分派' }}</strong>
+    </div>
+    <div>
+      <span>SLA 规则</span>
+      <strong>{{ ('#' ~ match_result.sla_rule.id) if match_result.sla_rule else '未匹配' }}</strong>
+    </div>
+    <div>
+      <span>预计截止</span>
+      <strong>{{ match_result.deadline or '不自动设置' }}</strong>
+    </div>
+  </div>
+  {% endif %}
+</section>
+
+<datalist id="brand-options">
+  {% for brand in brands %}
+  <option value="{{ brand }}"></option>
+  {% endfor %}
+</datalist>
+{% endblock %}

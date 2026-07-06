@@ -42,6 +42,7 @@
         <th>门店</th>
         <th>需求类型</th>
         <th>状态</th>
+        <th>时效</th>
         <th>下一步</th>
         <th>最后更新</th>
         <th>操作</th>
@@ -54,6 +55,7 @@
         <td>{{ ticket.store_name }}</td>
         <td>{{ ticket.request_type }}</td>
         <td><span class="badge status-badge status-{{ ticket.status }}">{{ ticket.status }}</span></td>
+        <td><span class="badge status-badge due-{{ ticket.due_status_class }}">{{ ticket.due_status }}</span></td>
         <td>
           <strong>{{ ticket.handler_note or '待更新处理进度' }}</strong>
           <small>{{ ticket.description_summary }}</small>

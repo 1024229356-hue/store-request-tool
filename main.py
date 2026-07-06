@@ -62,6 +62,10 @@ ADMIN_PERMISSION_KEYS = [
     "ticket.hard_delete",
     "ticket.export",
     "ticket.view_trash",
+    "ticket.assignment_rule.view",
+    "ticket.assignment_rule.update",
+    "ticket.sla_rule.view",
+    "ticket.sla_rule.update",
     "schedule.view",
     "schedule.create",
     "schedule.update",
@@ -2325,11 +2329,468 @@ def record_operation_log(
     audit_service.record_operation(username, action, target_type, target_id, detail, request)
 
 
+def normalize_rule_text(value: object) -> str:
+    return str(value or "").strip()
+
+
+def fetch_assignment_rules(include_disabled: bool = True) -> List[Dict[str, object]]:
+    enabled_clause = "" if include_disabled else "WHERE rules.enabled = 1"
+    with get_connection() as connection:
+        rows = connection.execute(
+            f"""
+            SELECT rules.*, roles.role_name AS default_role_name
+            FROM ticket_assignment_rules AS rules
+            LEFT JOIN admin_roles AS roles ON roles.id = rules.default_role_id
+            {enabled_clause}
+            ORDER BY rules.priority ASC, rules.id ASC
+            """
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def fetch_sla_rules(include_disabled: bool = True) -> List[Dict[str, object]]:
+    enabled_clause = "" if include_disabled else "WHERE enabled = 1"
+    with get_connection() as connection:
+        rows = connection.execute(
+            f"""
+            SELECT *
+            FROM ticket_sla_rules
+            {enabled_clause}
+            ORDER BY id ASC
+            """
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def fetch_assignment_rule(rule_id: int) -> Optional[Dict[str, object]]:
+    with get_connection() as connection:
+        row = connection.execute("SELECT * FROM ticket_assignment_rules WHERE id = ?", (int(rule_id),)).fetchone()
+    return dict(row) if row else None
+
+
+def fetch_sla_rule(rule_id: int) -> Optional[Dict[str, object]]:
+    with get_connection() as connection:
+        row = connection.execute("SELECT * FROM ticket_sla_rules WHERE id = ?", (int(rule_id),)).fetchone()
+    return dict(row) if row else None
+
+
+def assignment_rule_rank(rule: Dict[str, object]) -> int:
+    has_store = bool(normalize_rule_text(rule.get("store_name")))
+    has_type = bool(normalize_rule_text(rule.get("request_type")))
+    has_brand = bool(normalize_rule_text(rule.get("brand")))
+    if has_store and has_type and has_brand:
+        return 1
+    if has_store and has_type and not has_brand:
+        return 2
+    if not has_store and has_type and has_brand:
+        return 3
+    if not has_store and has_type and not has_brand:
+        return 4
+    if not has_store and not has_type and not has_brand:
+        return 5
+    return 50
+
+
+def assignment_rule_matches(rule: Dict[str, object], store_names: List[str], request_type: str, brands: List[str]) -> bool:
+    rule_store = normalize_rule_text(rule.get("store_name"))
+    rule_type = normalize_rule_text(rule.get("request_type"))
+    rule_brand = normalize_rule_text(rule.get("brand"))
+    if rule_store and rule_store not in store_names:
+        return False
+    if rule_type and rule_type != request_type:
+        return False
+    if rule_brand and rule_brand not in brands:
+        return False
+    return True
+
+
+def match_assignment_rule(
+    store_names: Iterable[object],
+    request_type: object,
+    brands: Iterable[object],
+    include_disabled: bool = False,
+) -> Optional[Dict[str, object]]:
+    candidates = matching_assignment_rules(store_names, request_type, brands, include_disabled=include_disabled)
+    return candidates[0] if candidates else None
+
+
+def matching_assignment_rules(
+    store_names: Iterable[object],
+    request_type: object,
+    brands: Iterable[object],
+    include_disabled: bool = False,
+) -> List[Dict[str, object]]:
+    clean_stores = unique_clean_values(store_names)
+    clean_brands = unique_clean_values(brands)
+    clean_type = normalize_rule_text(request_type)
+    candidates = [
+        rule
+        for rule in fetch_assignment_rules(include_disabled=include_disabled)
+        if int(rule.get("enabled") or 0) == 1
+        and assignment_rule_matches(rule, clean_stores, clean_type, clean_brands)
+    ]
+    candidates.sort(key=lambda rule: (assignment_rule_rank(rule), int(rule.get("priority") or 100), int(rule.get("id") or 0)))
+    return candidates
+
+
+def assignable_admin_user(username: object) -> Optional[Dict[str, object]]:
+    clean_username = normalize_rule_text(username)
+    if not clean_username:
+        return None
+    with get_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT admin_users.*, admin_roles.role_name
+            FROM admin_users
+            LEFT JOIN admin_roles ON admin_roles.id = admin_users.role_id
+            WHERE admin_users.username = ?
+              AND admin_users.is_active = 1
+              AND admin_users.allow_login = 1
+              AND admin_users.is_assignable = 1
+            """,
+            (clean_username,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def first_assignable_user_for_role(role_id: object) -> Optional[Dict[str, object]]:
+    try:
+        clean_role_id = int(role_id or 0)
+    except (TypeError, ValueError):
+        return None
+    if clean_role_id <= 0:
+        return None
+    with get_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT admin_users.*, admin_roles.role_name
+            FROM admin_users
+            LEFT JOIN admin_roles ON admin_roles.id = admin_users.role_id
+            WHERE admin_users.role_id = ?
+              AND admin_users.is_active = 1
+              AND admin_users.allow_login = 1
+              AND admin_users.is_assignable = 1
+            ORDER BY admin_users.id ASC
+            LIMIT 1
+            """,
+            (clean_role_id,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def resolve_assignment_handler(rule: Dict[str, object]) -> Optional[Dict[str, object]]:
+    handler_user = assignable_admin_user(rule.get("default_handler"))
+    if handler_user:
+        return handler_user
+    return first_assignable_user_for_role(rule.get("default_role_id"))
+
+
+def sla_rule_rank(rule: Dict[str, object]) -> int:
+    has_type = bool(normalize_rule_text(rule.get("request_type")))
+    has_urgency = bool(normalize_rule_text(rule.get("urgency_level")))
+    if has_type and has_urgency:
+        return 1
+    if not has_type and has_urgency:
+        return 2
+    if has_type and not has_urgency:
+        return 3
+    return 4
+
+
+def sla_rule_matches(rule: Dict[str, object], request_type: str, urgency_level: str) -> bool:
+    rule_type = normalize_rule_text(rule.get("request_type"))
+    rule_urgency = normalize_rule_text(rule.get("urgency_level"))
+    if rule_type and rule_type != request_type:
+        return False
+    if rule_urgency and rule_urgency != urgency_level:
+        return False
+    return True
+
+
+def match_sla_rule(request_type: object, urgency_level: object, include_disabled: bool = False) -> Optional[Dict[str, object]]:
+    clean_type = normalize_rule_text(request_type)
+    clean_urgency = normalize_rule_text(urgency_level)
+    candidates = [
+        rule
+        for rule in fetch_sla_rules(include_disabled=include_disabled)
+        if int(rule.get("enabled") or 0) == 1 and sla_rule_matches(rule, clean_type, clean_urgency)
+    ]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda rule: (sla_rule_rank(rule), int(rule.get("id") or 0)))
+    return candidates[0]
+
+
+def calculate_sla_deadline(base_timestamp: str, due_hours: object) -> str:
+    try:
+        hours = int(due_hours or 0)
+    except (TypeError, ValueError):
+        hours = 0
+    base_time = datetime.strptime(base_timestamp, "%Y-%m-%d %H:%M:%S")
+    return (base_time + timedelta(hours=max(hours, 0))).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def apply_sla_on_ticket_create(
+    ticket_data: Dict[str, object],
+    timestamp: str,
+) -> Tuple[str, Optional[Dict[str, object]]]:
+    manual_expected = normalize_rule_text(ticket_data.get("expected_finish_date"))
+    if manual_expected:
+        return manual_expected, None
+    rule = match_sla_rule(ticket_data.get("request_type"), ticket_data.get("urgency"))
+    if not rule:
+        return "", None
+    deadline = calculate_sla_deadline(timestamp, rule.get("due_hours"))
+    return deadline, {
+        "rule_id": int(rule.get("id") or 0),
+        "request_type": normalize_rule_text(rule.get("request_type")),
+        "urgency_level": normalize_rule_text(rule.get("urgency_level")),
+        "due_hours": int(rule.get("due_hours") or 0),
+        "deadline": deadline,
+    }
+
+
+def apply_assignment_on_ticket_create(
+    connection: sqlite3.Connection,
+    ticket_id: int,
+    ticket_data: Dict[str, object],
+    timestamp: str,
+) -> Optional[Dict[str, object]]:
+    rules = matching_assignment_rules(
+        ticket_data.get("store_names") or split_multi_value_text(ticket_data.get("store_name")),
+        ticket_data.get("request_type"),
+        ticket_data.get("brands") or split_multi_value_text(ticket_data.get("brand")),
+    )
+    rule: Optional[Dict[str, object]] = None
+    handler: Optional[Dict[str, object]] = None
+    for candidate_rule in rules:
+        candidate_handler = resolve_assignment_handler(candidate_rule)
+        if candidate_handler:
+            rule = candidate_rule
+            handler = candidate_handler
+            break
+    if not rule or not handler:
+        return None
+    assigned_to = str(handler.get("username") or "").strip()
+    if not assigned_to:
+        return None
+    connection.execute(
+        "UPDATE tickets SET assigned_to = ?, updated_at = ? WHERE id = ?",
+        (assigned_to, timestamp, int(ticket_id)),
+    )
+    note = f"按规则 #{int(rule.get('id') or 0)} 自动分派给 {assigned_to}"
+    insert_ticket_log(
+        connection,
+        int(ticket_id),
+        "自动分派",
+        note,
+        "system",
+        timestamp,
+        old_assigned_to="",
+        new_assigned_to=assigned_to,
+    )
+    return {
+        "rule_id": int(rule.get("id") or 0),
+        "assigned_to": assigned_to,
+        "role_id": int(rule.get("default_role_id") or 0) if rule.get("default_role_id") else "",
+        "request_type": normalize_rule_text(rule.get("request_type")),
+        "brand": normalize_rule_text(rule.get("brand")),
+        "store_name": normalize_rule_text(rule.get("store_name")),
+    }
+
+
+def save_assignment_rule(
+    rule_id: int,
+    data: Dict[str, object],
+    admin: str,
+) -> Dict[str, object]:
+    default_role_id = parse_optional_positive_int(data.get("default_role_id"))
+    priority = int(data.get("priority") or 100)
+    timestamp = now_text()
+    values = {
+        "request_type": normalize_rule_text(data.get("request_type")),
+        "brand": normalize_rule_text(data.get("brand")),
+        "store_name": normalize_rule_text(data.get("store_name")),
+        "default_handler": normalize_rule_text(data.get("default_handler")),
+        "default_role_id": default_role_id,
+        "priority": max(priority, 1),
+        "enabled": 1 if str(data.get("enabled") or "").strip() in {"1", "true", "on", "yes"} else 0,
+        "note": normalize_rule_text(data.get("note")),
+    }
+    if not values["default_handler"] and not values["default_role_id"]:
+        raise ValueError("请至少设置具体处理人或兜底角色。")
+    with get_connection() as connection:
+        if rule_id > 0:
+            rule = connection.execute("SELECT id FROM ticket_assignment_rules WHERE id = ?", (int(rule_id),)).fetchone()
+            if not rule:
+                raise ValueError("自动分派规则不存在。")
+            connection.execute(
+                """
+                UPDATE ticket_assignment_rules
+                SET request_type = ?, brand = ?, store_name = ?, default_handler = ?,
+                    default_role_id = ?, priority = ?, enabled = ?, note = ?,
+                    updated_at = ?, updated_by = ?
+                WHERE id = ?
+                """,
+                (
+                    values["request_type"],
+                    values["brand"],
+                    values["store_name"],
+                    values["default_handler"],
+                    values["default_role_id"],
+                    values["priority"],
+                    values["enabled"],
+                    values["note"],
+                    timestamp,
+                    admin,
+                    int(rule_id),
+                ),
+            )
+            values["id"] = int(rule_id)
+            values["action"] = "ticket.assignment_rule.update"
+        else:
+            cursor = connection.execute(
+                """
+                INSERT INTO ticket_assignment_rules (
+                    request_type, brand, store_name, default_handler, default_role_id,
+                    priority, enabled, note, created_at, updated_at, created_by, updated_by
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    values["request_type"],
+                    values["brand"],
+                    values["store_name"],
+                    values["default_handler"],
+                    values["default_role_id"],
+                    values["priority"],
+                    values["enabled"],
+                    values["note"],
+                    timestamp,
+                    timestamp,
+                    admin,
+                    admin,
+                ),
+            )
+            values["id"] = int(cursor.lastrowid)
+            values["action"] = "ticket.assignment_rule.create"
+    return values
+
+
+def set_assignment_rule_enabled(rule_id: int, enabled: bool, admin: str) -> Dict[str, object]:
+    timestamp = now_text()
+    with get_connection() as connection:
+        rule = connection.execute("SELECT * FROM ticket_assignment_rules WHERE id = ?", (int(rule_id),)).fetchone()
+        if not rule:
+            raise ValueError("自动分派规则不存在。")
+        connection.execute(
+            "UPDATE ticket_assignment_rules SET enabled = ?, updated_at = ?, updated_by = ? WHERE id = ?",
+            (1 if enabled else 0, timestamp, admin, int(rule_id)),
+        )
+    return {"id": int(rule_id), "enabled": 1 if enabled else 0}
+
+
+def save_sla_rule(rule_id: int, data: Dict[str, object], admin: str) -> Dict[str, object]:
+    try:
+        due_hours = int(data.get("due_hours") or 0)
+    except (TypeError, ValueError):
+        due_hours = 0
+    if due_hours <= 0:
+        raise ValueError("SLA 小时数必须大于 0。")
+    timestamp = now_text()
+    values = {
+        "request_type": normalize_rule_text(data.get("request_type")),
+        "urgency_level": normalize_rule_text(data.get("urgency_level")),
+        "due_hours": due_hours,
+        "enabled": 1 if str(data.get("enabled") or "").strip() in {"1", "true", "on", "yes"} else 0,
+        "note": normalize_rule_text(data.get("note")),
+    }
+    with get_connection() as connection:
+        if rule_id > 0:
+            rule = connection.execute("SELECT id FROM ticket_sla_rules WHERE id = ?", (int(rule_id),)).fetchone()
+            if not rule:
+                raise ValueError("SLA 规则不存在。")
+            connection.execute(
+                """
+                UPDATE ticket_sla_rules
+                SET request_type = ?, urgency_level = ?, due_hours = ?, enabled = ?,
+                    note = ?, updated_at = ?, updated_by = ?
+                WHERE id = ?
+                """,
+                (
+                    values["request_type"],
+                    values["urgency_level"],
+                    values["due_hours"],
+                    values["enabled"],
+                    values["note"],
+                    timestamp,
+                    admin,
+                    int(rule_id),
+                ),
+            )
+            values["id"] = int(rule_id)
+            values["action"] = "ticket.sla_rule.update"
+        else:
+            cursor = connection.execute(
+                """
+                INSERT INTO ticket_sla_rules (
+                    request_type, urgency_level, due_hours, enabled, note,
+                    created_at, updated_at, created_by, updated_by
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    values["request_type"],
+                    values["urgency_level"],
+                    values["due_hours"],
+                    values["enabled"],
+                    values["note"],
+                    timestamp,
+                    timestamp,
+                    admin,
+                    admin,
+                ),
+            )
+            values["id"] = int(cursor.lastrowid)
+            values["action"] = "ticket.sla_rule.create"
+    return values
+
+
+def set_sla_rule_enabled(rule_id: int, enabled: bool, admin: str) -> Dict[str, object]:
+    timestamp = now_text()
+    with get_connection() as connection:
+        rule = connection.execute("SELECT * FROM ticket_sla_rules WHERE id = ?", (int(rule_id),)).fetchone()
+        if not rule:
+            raise ValueError("SLA 规则不存在。")
+        connection.execute(
+            "UPDATE ticket_sla_rules SET enabled = ?, updated_at = ?, updated_by = ? WHERE id = ?",
+            (1 if enabled else 0, timestamp, admin, int(rule_id)),
+        )
+    return {"id": int(rule_id), "enabled": 1 if enabled else 0}
+
+
+def ticket_rule_match_preview(store_name: str, request_type: str, brand: str, urgency_level: str) -> Dict[str, object]:
+    assignment_rule = match_assignment_rule([store_name], request_type, [brand])
+    assigned_user = resolve_assignment_handler(assignment_rule) if assignment_rule else None
+    sla_rule = match_sla_rule(request_type, urgency_level)
+    deadline = calculate_sla_deadline(now_text(), sla_rule.get("due_hours")) if sla_rule else ""
+    return {
+        "assignment_rule": assignment_rule,
+        "assigned_to": str((assigned_user or {}).get("username") or ""),
+        "sla_rule": sla_rule,
+        "deadline": deadline,
+    }
+
+
 def admin_permission_groups() -> List[Dict[str, object]]:
     labels = {
         "ticket.view": "查看工单",
         "ticket.update": "处理工单",
         "ticket.export": "导出工单",
+        "ticket.assignment_rule.view": "查看分派规则",
+        "ticket.assignment_rule.update": "维护分派规则",
+        "ticket.sla_rule.view": "查看 SLA 规则",
+        "ticket.sla_rule.update": "维护 SLA 规则",
         "schedule.view": "查看排班",
         "schedule.create": "新增排班",
         "schedule.export": "导出排班",
@@ -2429,6 +2890,14 @@ PERMISSION_ROUTE_RULES: List[Dict[str, str]] = [
     {"method": "GET", "path": "/admin/embed-content/{page_key}", "permission": "embedded.view", "module": "嵌入页", "label": "嵌入页内容"},
     {"method": "GET", "path": "/admin/embed-content/{page_key}/{resource_path:path}", "permission": "embedded.view", "module": "嵌入页", "label": "嵌入页资源"},
     {"method": "GET", "path": "/admin/settings", "permission": "config.view", "module": "配置", "label": "配置中心"},
+    {"method": "GET", "path": "/admin/ticket-rules", "permission": "ticket.assignment_rule.view", "module": "工单规则", "label": "工单规则配置"},
+    {"method": "POST", "path": "/admin/ticket-rules/assignment", "permission": "ticket.assignment_rule.update", "module": "工单规则", "label": "保存自动分派规则"},
+    {"method": "POST", "path": "/admin/ticket-rules/assignment/{rule_id}/toggle", "permission": "ticket.assignment_rule.update", "module": "工单规则", "label": "启停自动分派规则"},
+    {"method": "POST", "path": "/admin/ticket-rules/assignment/{rule_id}/delete", "permission": "ticket.assignment_rule.update", "module": "工单规则", "label": "停用自动分派规则"},
+    {"method": "POST", "path": "/admin/ticket-rules/sla", "permission": "ticket.sla_rule.update", "module": "工单规则", "label": "保存 SLA 规则"},
+    {"method": "POST", "path": "/admin/ticket-rules/sla/{rule_id}/toggle", "permission": "ticket.sla_rule.update", "module": "工单规则", "label": "启停 SLA 规则"},
+    {"method": "POST", "path": "/admin/ticket-rules/sla/{rule_id}/delete", "permission": "ticket.sla_rule.update", "module": "工单规则", "label": "停用 SLA 规则"},
+    {"method": "POST", "path": "/admin/ticket-rules/test", "permission": "ticket.assignment_rule.view", "module": "工单规则", "label": "测试工单规则"},
     {"method": "GET", "path": "/admin/trash", "permission": "ticket.view_trash", "module": "回收站", "label": "工单回收站"},
     {"method": "GET", "path": "/admin/cleanup", "permission": "ticket.delete", "module": "回收站", "label": "测试数据清理"},
     {"method": "POST", "path": "/admin/cleanup/preview", "permission": "ticket.delete", "module": "回收站", "label": "清理预览"},
@@ -3261,6 +3730,41 @@ def init_db() -> None:
         )
         connection.execute(
             """
+            CREATE TABLE IF NOT EXISTS ticket_assignment_rules (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                request_type TEXT,
+                brand TEXT,
+                store_name TEXT,
+                default_handler TEXT,
+                default_role_id INTEGER,
+                priority INTEGER NOT NULL DEFAULT 100,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                note TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                created_by TEXT,
+                updated_by TEXT
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ticket_sla_rules (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                request_type TEXT,
+                urgency_level TEXT,
+                due_hours INTEGER NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                note TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                created_by TEXT,
+                updated_by TEXT
+            )
+            """
+        )
+        connection.execute(
+            """
             CREATE TABLE IF NOT EXISTS notification_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 event_type TEXT NOT NULL,
@@ -3431,6 +3935,9 @@ def init_db() -> None:
         connection.execute("CREATE INDEX IF NOT EXISTS idx_ticket_images_ticket_id ON ticket_images(ticket_id)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_ticket_files_ticket_id ON ticket_files(ticket_id)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_ticket_logs_ticket_id ON ticket_logs(ticket_id)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_ticket_assignment_rules_enabled ON ticket_assignment_rules(enabled)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_ticket_assignment_rules_priority ON ticket_assignment_rules(priority)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_ticket_sla_rules_enabled ON ticket_sla_rules(enabled)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_ticket_supplements_ticket_id ON ticket_supplements(ticket_id)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_ticket_participants_ticket_id ON ticket_participants(ticket_id)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_ticket_comments_ticket_id ON ticket_comments(ticket_id)")
@@ -4201,10 +4708,12 @@ def create_ticket_with_images(
     prepared_files = prepared_files or []
     for _attempt in range(3):
         saved_files: List[Path] = []
+        audit_events: List[Tuple[str, int, Dict[str, object]]] = []
         timestamp = now_text()
         try:
             with get_connection() as connection:
                 ticket_no = generate_ticket_no(connection)
+                expected_finish_date, sla_detail = apply_sla_on_ticket_create(ticket_data, timestamp)
                 try:
                     cursor = connection.execute(
                         """
@@ -4229,7 +4738,7 @@ def create_ticket_with_images(
                             ticket_data["sku_barcode"],
                             ticket_data["quantity"],
                             ticket_data["description"],
-                            ticket_data["expected_finish_date"],
+                            expected_finish_date,
                             config.default_status,
                             "",
                             "",
@@ -4242,6 +4751,16 @@ def create_ticket_with_images(
                     raise
 
                 ticket_id = int(cursor.lastrowid)
+                if sla_detail:
+                    insert_ticket_log(
+                        connection,
+                        ticket_id,
+                        "自动计算SLA",
+                        f"按 SLA 规则 #{sla_detail['rule_id']} 设置截止时间 {sla_detail['deadline']}",
+                        "system",
+                        timestamp,
+                    )
+                    audit_events.append(("ticket.sla_deadline.auto", ticket_id, sla_detail))
                 for store_name in ticket_data.get("store_names", []):
                     connection.execute(
                         """
@@ -4292,6 +4811,11 @@ def create_ticket_with_images(
                             None,
                         ),
                     )
+                assignment_detail = apply_assignment_on_ticket_create(connection, ticket_id, ticket_data, timestamp)
+                if assignment_detail:
+                    audit_events.append(("ticket.auto_assign", ticket_id, assignment_detail))
+            for action, target_id, detail in audit_events:
+                record_operation_log("system", action, "ticket", target_id, detail)
             return ticket_id, ticket_no
         except sqlite3.IntegrityError as exc:
             cleanup_saved_files(saved_files)
@@ -8574,6 +9098,31 @@ def fetch_dashboard_stats(filters: Dict[str, str]) -> Dict[str, object]:
     today_new_count = sum(1 for ticket in tickets if str(ticket.get("created_at") or "").startswith(today_prefix))
     overdue_count = sum(1 for ticket in tickets if ticket.get("due_status") == "已超时")
     due_today_count = sum(1 for ticket in tickets if ticket.get("due_status") == "今日到期")
+    completed_sla_count = sum(1 for ticket in tickets if ticket.get("due_status") in {"按时完成", "超时完成"})
+    on_time_completed_count = sum(1 for ticket in tickets if ticket.get("due_status") == "按时完成")
+    sla_completion_rate = percent_value(on_time_completed_count, completed_sla_count)
+    handling_hours = [
+        float(value)
+        for value in (processing_hours(ticket) for ticket in tickets if str(ticket.get("status") or "") == COMPLETED_STATUS)
+        if value != ""
+    ]
+    average_processing_hours = round(sum(handling_hours) / len(handling_hours), 2) if handling_hours else 0
+    auto_assigned_count = 0
+    if tickets:
+        ticket_ids_for_assignment = [int(ticket["id"]) for ticket in tickets]
+        placeholders = ",".join("?" for _ in ticket_ids_for_assignment)
+        with get_connection() as connection:
+            auto_assigned_count = int(
+                connection.execute(
+                    f"""
+                    SELECT COUNT(DISTINCT ticket_id) AS total
+                    FROM ticket_logs
+                    WHERE ticket_id IN ({placeholders}) AND action = '自动分派'
+                    """,
+                    ticket_ids_for_assignment,
+                ).fetchone()["total"]
+                or 0
+            )
     image_ticket_count = sum(1 for ticket in tickets if int(ticket.get("image_count") or 0) > 0)
     file_ticket_count = sum(1 for ticket in tickets if int(ticket.get("file_count") or 0) > 0)
     attachment_ticket_count = sum(
@@ -8620,6 +9169,8 @@ def fetch_dashboard_stats(filters: Dict[str, str]) -> Dict[str, object]:
         {"label": "已驳回数", "count": status_counter.get("已驳回", 0), "percent": percent_value(status_counter.get("已驳回", 0), total)},
         {"label": "超时工单数", "count": overdue_count, "percent": percent_value(overdue_count, total)},
         {"label": "今日到期数", "count": due_today_count, "percent": percent_value(due_today_count, total)},
+        {"label": "SLA 完成率", "count": f"{sla_completion_rate}%", "percent": sla_completion_rate},
+        {"label": "平均处理时长", "count": average_processing_hours, "percent": 0},
     ]
     attachment_rows = [
         {"label": "有图片工单数", "count": image_ticket_count, "percent": percent_value(image_ticket_count, total)},
@@ -8639,6 +9190,9 @@ def fetch_dashboard_stats(filters: Dict[str, str]) -> Dict[str, object]:
         "completed_count": status_counter.get("已完成", 0),
         "overdue_count": overdue_count,
         "due_today_count": due_today_count,
+        "sla_completion_rate": sla_completion_rate,
+        "average_processing_hours": average_processing_hours,
+        "auto_assigned_count": auto_assigned_count,
         "today_urgent_count": urgency_counter.get("当天必须处理", 0),
         "attachment_ticket_count": attachment_ticket_count,
         "store_supplement_count": supplement_count,
@@ -10964,6 +11518,211 @@ def create_app() -> FastAPI:
                 ],
             },
         )
+
+    def render_ticket_rules_page(
+        request: Request,
+        current_user: Dict[str, object],
+        success: str = "",
+        error: str = "",
+        match_result: Optional[Dict[str, object]] = None,
+        status_code: int = 200,
+    ) -> HTMLResponse:
+        config = load_app_config()
+        return templates.TemplateResponse(
+            request,
+            "ticket_rules.html",
+            {
+                "request": request,
+                "admin_user": str(current_user.get("username") or ""),
+                "csrf_token": current_csrf_token(request),
+                "assignment_rules": fetch_assignment_rules(),
+                "sla_rules": fetch_sla_rules(),
+                "roles": fetch_admin_roles(),
+                "handlers": config.handlers,
+                "stores": config.stores,
+                "request_types": config.request_types,
+                "brands": config.brands,
+                "urgency_levels": config.urgency_levels,
+                "success": success,
+                "error": error,
+                "match_result": match_result,
+            },
+            status_code=status_code,
+        )
+
+    @app.get("/admin/ticket-rules", response_class=HTMLResponse)
+    def admin_ticket_rules(
+        request: Request,
+        current_user: Dict[str, object] = Depends(
+            require_any_permission(["ticket.assignment_rule.view", "ticket.sla_rule.view"])
+        ),
+        success: str = Query(""),
+    ) -> HTMLResponse:
+        success_messages = {
+            "assignment_saved": "自动分派规则已保存。",
+            "assignment_enabled": "自动分派规则已启用。",
+            "assignment_disabled": "自动分派规则已停用。",
+            "sla_saved": "SLA 规则已保存。",
+            "sla_enabled": "SLA 规则已启用。",
+            "sla_disabled": "SLA 规则已停用。",
+        }
+        return render_ticket_rules_page(request, current_user, success=success_messages.get(success, ""))
+
+    @app.post("/admin/ticket-rules/assignment", response_class=HTMLResponse)
+    def save_assignment_rule_route(
+        request: Request,
+        current_user: Dict[str, object] = Depends(require_permission("ticket.assignment_rule.update")),
+        csrf_token: str = Form(""),
+        rule_id: int = Form(0),
+        request_type: str = Form(""),
+        brand: str = Form(""),
+        store_name: str = Form(""),
+        default_handler: str = Form(""),
+        default_role_id: str = Form(""),
+        priority: str = Form("100"),
+        enabled: str = Form(""),
+        note: str = Form(""),
+    ) -> HTMLResponse:
+        admin = str(current_user.get("username") or "")
+        require_admin_csrf(request, csrf_token)
+        try:
+            result = save_assignment_rule(
+                int(rule_id or 0),
+                {
+                    "request_type": request_type,
+                    "brand": brand,
+                    "store_name": store_name,
+                    "default_handler": default_handler,
+                    "default_role_id": default_role_id,
+                    "priority": priority,
+                    "enabled": enabled,
+                    "note": note,
+                },
+                admin,
+            )
+        except (ValueError, sqlite3.Error) as exc:
+            return render_ticket_rules_page(request, current_user, error=form_error_message(exc), status_code=400)
+        record_operation_log(admin, str(result.pop("action")), "ticket_assignment_rule", result["id"], result, request)
+        return RedirectResponse(url="/admin/ticket-rules?success=assignment_saved", status_code=303)
+
+    @app.post("/admin/ticket-rules/assignment/{rule_id}/toggle", response_class=HTMLResponse)
+    def toggle_assignment_rule_route(
+        request: Request,
+        rule_id: int,
+        current_user: Dict[str, object] = Depends(require_permission("ticket.assignment_rule.update")),
+        csrf_token: str = Form(""),
+        enabled: str = Form(""),
+    ) -> HTMLResponse:
+        admin = str(current_user.get("username") or "")
+        require_admin_csrf(request, csrf_token)
+        try:
+            result = set_assignment_rule_enabled(rule_id, enabled == "1", admin)
+        except (ValueError, sqlite3.Error) as exc:
+            return render_ticket_rules_page(request, current_user, error=form_error_message(exc), status_code=400)
+        record_operation_log(admin, "ticket.assignment_rule.toggle", "ticket_assignment_rule", rule_id, result, request)
+        return RedirectResponse(
+            url=f"/admin/ticket-rules?success={'assignment_enabled' if enabled == '1' else 'assignment_disabled'}",
+            status_code=303,
+        )
+
+    @app.post("/admin/ticket-rules/assignment/{rule_id}/delete", response_class=HTMLResponse)
+    def delete_assignment_rule_route(
+        request: Request,
+        rule_id: int,
+        current_user: Dict[str, object] = Depends(require_permission("ticket.assignment_rule.update")),
+        csrf_token: str = Form(""),
+    ) -> HTMLResponse:
+        admin = str(current_user.get("username") or "")
+        require_admin_csrf(request, csrf_token)
+        try:
+            result = set_assignment_rule_enabled(rule_id, False, admin)
+        except (ValueError, sqlite3.Error) as exc:
+            return render_ticket_rules_page(request, current_user, error=form_error_message(exc), status_code=400)
+        record_operation_log(admin, "ticket.assignment_rule.delete", "ticket_assignment_rule", rule_id, result, request)
+        return RedirectResponse(url="/admin/ticket-rules?success=assignment_disabled", status_code=303)
+
+    @app.post("/admin/ticket-rules/sla", response_class=HTMLResponse)
+    def save_sla_rule_route(
+        request: Request,
+        current_user: Dict[str, object] = Depends(require_permission("ticket.sla_rule.update")),
+        csrf_token: str = Form(""),
+        rule_id: int = Form(0),
+        request_type: str = Form(""),
+        urgency_level: str = Form(""),
+        due_hours: str = Form(""),
+        enabled: str = Form(""),
+        note: str = Form(""),
+    ) -> HTMLResponse:
+        admin = str(current_user.get("username") or "")
+        require_admin_csrf(request, csrf_token)
+        try:
+            result = save_sla_rule(
+                int(rule_id or 0),
+                {
+                    "request_type": request_type,
+                    "urgency_level": urgency_level,
+                    "due_hours": due_hours,
+                    "enabled": enabled,
+                    "note": note,
+                },
+                admin,
+            )
+        except (ValueError, sqlite3.Error) as exc:
+            return render_ticket_rules_page(request, current_user, error=form_error_message(exc), status_code=400)
+        record_operation_log(admin, str(result.pop("action")), "ticket_sla_rule", result["id"], result, request)
+        return RedirectResponse(url="/admin/ticket-rules?success=sla_saved", status_code=303)
+
+    @app.post("/admin/ticket-rules/sla/{rule_id}/toggle", response_class=HTMLResponse)
+    def toggle_sla_rule_route(
+        request: Request,
+        rule_id: int,
+        current_user: Dict[str, object] = Depends(require_permission("ticket.sla_rule.update")),
+        csrf_token: str = Form(""),
+        enabled: str = Form(""),
+    ) -> HTMLResponse:
+        admin = str(current_user.get("username") or "")
+        require_admin_csrf(request, csrf_token)
+        try:
+            result = set_sla_rule_enabled(rule_id, enabled == "1", admin)
+        except (ValueError, sqlite3.Error) as exc:
+            return render_ticket_rules_page(request, current_user, error=form_error_message(exc), status_code=400)
+        record_operation_log(admin, "ticket.sla_rule.toggle", "ticket_sla_rule", rule_id, result, request)
+        return RedirectResponse(
+            url=f"/admin/ticket-rules?success={'sla_enabled' if enabled == '1' else 'sla_disabled'}",
+            status_code=303,
+        )
+
+    @app.post("/admin/ticket-rules/sla/{rule_id}/delete", response_class=HTMLResponse)
+    def delete_sla_rule_route(
+        request: Request,
+        rule_id: int,
+        current_user: Dict[str, object] = Depends(require_permission("ticket.sla_rule.update")),
+        csrf_token: str = Form(""),
+    ) -> HTMLResponse:
+        admin = str(current_user.get("username") or "")
+        require_admin_csrf(request, csrf_token)
+        try:
+            result = set_sla_rule_enabled(rule_id, False, admin)
+        except (ValueError, sqlite3.Error) as exc:
+            return render_ticket_rules_page(request, current_user, error=form_error_message(exc), status_code=400)
+        record_operation_log(admin, "ticket.sla_rule.delete", "ticket_sla_rule", rule_id, result, request)
+        return RedirectResponse(url="/admin/ticket-rules?success=sla_disabled", status_code=303)
+
+    @app.post("/admin/ticket-rules/test", response_class=HTMLResponse)
+    def test_ticket_rules_route(
+        request: Request,
+        current_user: Dict[str, object] = Depends(
+            require_any_permission(["ticket.assignment_rule.view", "ticket.sla_rule.view"])
+        ),
+        csrf_token: str = Form(""),
+        store_name: str = Form(""),
+        request_type: str = Form(""),
+        brand: str = Form(""),
+        urgency_level: str = Form(""),
+    ) -> HTMLResponse:
+        require_admin_csrf(request, csrf_token)
+        match_result = ticket_rule_match_preview(store_name, request_type, brand, urgency_level)
+        return render_ticket_rules_page(request, current_user, match_result=match_result)
 
     @app.get("/admin/account", response_class=HTMLResponse)
     def admin_account(

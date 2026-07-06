@@ -151,6 +151,7 @@
         <th>提报人</th>
         <th>需求类型</th>
         <th>状态</th>
+        <th>时效</th>
         <th>处理人</th>
         <th>归档时间</th>
         <th>归档人</th>
@@ -170,6 +171,7 @@
         <td>{{ ticket.submitter }}</td>
         <td>{{ ticket.request_type }}</td>
         <td><span class="badge status-badge status-{{ ticket.status }}">{{ ticket.status }}</span></td>
+        <td><span class="badge status-badge due-{{ ticket.due_status_class }}">{{ ticket.due_status }}</span></td>
         <td>{{ ticket.assigned_to or '' }}</td>
         <td>{{ ticket.archived_at }}</td>
         <td>{{ ticket.archived_by or '' }}</td>

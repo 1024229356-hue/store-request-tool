@@ -72,12 +72,30 @@
     </article>
     <article class="stat-card metric-card neumorphic-stat-card">
       <span class="metric-icon">07</span>
+      <span>SLA 完成率</span>
+      <strong>{{ stats.sla_completion_rate }}%</strong>
+      <small>按时完成 / 已设置 SLA 完成</small>
+    </article>
+    <article class="stat-card metric-card neumorphic-stat-card">
+      <span class="metric-icon">08</span>
+      <span>平均处理时长</span>
+      <strong>{{ stats.average_processing_hours }}</strong>
+      <small>小时</small>
+    </article>
+    <article class="stat-card metric-card neumorphic-stat-card">
+      <span class="metric-icon">09</span>
+      <span>自动分派工单</span>
+      <strong>{{ stats.auto_assigned_count }}</strong>
+      <small>规则自动命中</small>
+    </article>
+    <article class="stat-card metric-card neumorphic-stat-card">
+      <span class="metric-icon">10</span>
       <span>本月排班人数</span>
       <strong>{{ stats.schedule_employee_count }}</strong>
       <small>本月已出现的排班员工</small>
     </article>
     <article class="stat-card metric-card neumorphic-stat-card">
-      <span class="metric-icon">08</span>
+      <span class="metric-icon">11</span>
       <span>本月排班工时</span>
       <strong>{{ stats.schedule_total_hours }}</strong>
       <small>计划工时合计</small>

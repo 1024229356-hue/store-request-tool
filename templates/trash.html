@@ -139,6 +139,7 @@
           <th>门店</th>
           <th>提报人</th>
           <th>状态</th>
+          <th>时效</th>
           <th>原状态</th>
           <th>删除时间</th>
           <th>删除人</th>
@@ -157,6 +158,7 @@
           <td>{{ ticket.store_name }}</td>
           <td>{{ ticket.submitter }}</td>
           <td><span class="badge status-badge status-{{ ticket.status }}">{{ ticket.status }}</span></td>
+          <td><span class="badge status-badge due-{{ ticket.due_status_class }}">{{ ticket.due_status }}</span></td>
           <td>
             {% if ticket.archived_at %}
             <span class="badge archive-badge">已归档</span>

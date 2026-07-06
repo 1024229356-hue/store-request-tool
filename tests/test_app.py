@@ -912,6 +912,74 @@ def set_ticket_assignment(tmp_path, ticket_id, assigned_to):
         )
 
 
+def insert_assignment_rule(
+    tmp_path,
+    request_type="",
+    brand="",
+    store_name="",
+    default_handler="",
+    default_role_id=None,
+    priority=100,
+    enabled=1,
+    note="pytest",
+):
+    timestamp = "2026-07-06 10:00:00"
+    with sqlite3.connect(tmp_path / "tickets.db") as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO ticket_assignment_rules (
+                request_type, brand, store_name, default_handler, default_role_id,
+                priority, enabled, note, created_at, updated_at, created_by, updated_by
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pytest', 'pytest')
+            """,
+            (
+                request_type,
+                brand,
+                store_name,
+                default_handler,
+                default_role_id,
+                int(priority),
+                int(enabled),
+                note,
+                timestamp,
+                timestamp,
+            ),
+        )
+    return int(cursor.lastrowid)
+
+
+def insert_sla_rule(
+    tmp_path,
+    request_type="",
+    urgency_level="",
+    due_hours=24,
+    enabled=1,
+    note="pytest",
+):
+    timestamp = "2026-07-06 10:00:00"
+    with sqlite3.connect(tmp_path / "tickets.db") as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO ticket_sla_rules (
+                request_type, urgency_level, due_hours, enabled, note,
+                created_at, updated_at, created_by, updated_by
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'pytest', 'pytest')
+            """,
+            (
+                request_type,
+                urgency_level,
+                int(due_hours),
+                int(enabled),
+                note,
+                timestamp,
+                timestamp,
+            ),
+        )
+    return int(cursor.lastrowid)
+
+
 def test_rbac_tables_env_migration_password_hashes_and_login_logs(tmp_path, monkeypatch):
     client, _ = build_client(
         tmp_path,
@@ -2141,6 +2209,213 @@ def test_phase4_permission_overview_has_no_high_risk_uncontrolled_posts(tmp_path
     assert "登录保护 API" in overview.text
 
 
+def test_p1a_ticket_rule_tables_auto_assignment_priority_and_audit(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch, admin_users="admin:123456")
+    active_user_id = create_test_admin_user(tmp_path, "buyer_active", "采购可指派", is_assignable=1)
+    create_test_admin_user(tmp_path, "buyer_disabled", "停用采购", is_active=0, is_assignable=1)
+    create_test_admin_user(tmp_path, "buyer_no_login", "无登录采购", allow_login=0, is_assignable=1)
+    create_test_admin_user(tmp_path, "buyer_not_assignable", "不可指派采购", is_assignable=0)
+    role_id = role_id_by_name(tmp_path, "运营管理")
+
+    with sqlite3.connect(tmp_path / "tickets.db") as connection:
+        tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        assignment_columns = {row[1] for row in connection.execute("PRAGMA table_info(ticket_assignment_rules)")}
+    assert "ticket_assignment_rules" in tables
+    assert {
+        "request_type",
+        "brand",
+        "store_name",
+        "default_handler",
+        "default_role_id",
+        "priority",
+        "enabled",
+        "note",
+    }.issubset(assignment_columns)
+
+    insert_assignment_rule(tmp_path, request_type="建单需求", default_handler="buyer_disabled", priority=1)
+    insert_assignment_rule(tmp_path, request_type="建单需求", default_handler="buyer_no_login", priority=2)
+    insert_assignment_rule(tmp_path, request_type="建单需求", default_handler="buyer_not_assignable", priority=3)
+    insert_assignment_rule(tmp_path, request_type="建单需求", default_role_id=role_id, priority=4)
+    insert_assignment_rule(
+        tmp_path,
+        request_type="建单需求",
+        brand="测试品牌",
+        store_name="南京门东店",
+        default_handler="buyer_active",
+        priority=100,
+    )
+    insert_assignment_rule(tmp_path, request_type="系统问题", default_handler="buyer_active", enabled=0)
+
+    response = submit_ticket(client, request_type="建单需求", brand="测试品牌", description="门店类型品牌最高优先级")
+    assert response.status_code == 200
+    first_ticket = rows_for(tmp_path, "tickets")[-1]
+    assert first_ticket["assigned_to"] == "buyer_active"
+    logs = ticket_action_logs(tmp_path, first_ticket["id"])
+    assert any(row["action"] == "自动分派" and row["new_assigned_to"] == "buyer_active" for row in logs)
+    operations = rows_for(tmp_path, "admin_operation_logs")
+    assert any(row["action"] == "ticket.auto_assign" and str(first_ticket["id"]) == str(row["target_id"]) for row in operations)
+
+    response = submit_ticket(client, request_type="建单需求", brand="其他品牌", description="类型规则角色兜底")
+    assert response.status_code == 200
+    second_ticket = rows_for(tmp_path, "tickets")[-1]
+    assert second_ticket["assigned_to"] == "buyer_active"
+
+    response = submit_ticket(client, request_type="系统问题", description="停用规则不生效")
+    assert response.status_code == 200
+    disabled_rule_ticket = rows_for(tmp_path, "tickets")[-1]
+    assert disabled_rule_ticket["assigned_to"] in ("", None)
+    assert active_user_id > 0
+
+
+def test_p1a_sla_rules_deadlines_statuses_export_and_dashboard_scope(tmp_path, monkeypatch):
+    client, main = build_client(tmp_path, monkeypatch, admin_users="admin:123456")
+    fixed_now = "2026-07-06 10:00:00"
+    monkeypatch.setattr(main, "now_text", lambda: fixed_now)
+    insert_sla_rule(tmp_path, urgency_level="加急", due_hours=24)
+    insert_sla_rule(tmp_path, request_type="系统问题", due_hours=72)
+
+    assert "ticket_sla_rules" in {
+        row[0]
+        for row in sqlite3.connect(tmp_path / "tickets.db")
+        .execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        .fetchall()
+    }
+
+    response = submit_ticket(client, expected_finish_date="", urgency="加急", description="SLA 自动截止")
+    assert response.status_code == 200
+    auto_sla_ticket = rows_for(tmp_path, "tickets")[-1]
+    assert auto_sla_ticket["expected_finish_date"] == "2026-07-07 10:00:00"
+
+    response = submit_ticket(
+        client,
+        expected_finish_date="2026-07-10",
+        urgency="加急",
+        description="手动期望时间优先",
+    )
+    assert response.status_code == 200
+    manual_ticket = rows_for(tmp_path, "tickets")[-1]
+    assert manual_ticket["expected_finish_date"] == "2026-07-10"
+
+    operations = rows_for(tmp_path, "admin_operation_logs")
+    assert any(row["action"] == "ticket.sla_deadline.auto" for row in operations)
+    assert main.due_status_label({"expected_finish_date": "", "status": "待处理"}) == "未设置"
+    assert main.due_status_label({"expected_finish_date": date.today().isoformat(), "status": "待处理"}) == "今日到期"
+    assert main.due_status_label({"expected_finish_date": (date.today() - timedelta(days=1)).isoformat(), "status": "待处理"}) == "已超时"
+    assert (
+        main.due_status_label(
+            {"expected_finish_date": "2026-07-07", "status": "已完成", "closed_at": "2026-07-07 09:00:00"}
+        )
+        == "按时完成"
+    )
+    assert (
+        main.due_status_label(
+            {"expected_finish_date": "2026-07-07", "status": "已完成", "closed_at": "2026-07-08 09:00:00"}
+        )
+        == "超时完成"
+    )
+
+    with sqlite3.connect(tmp_path / "tickets.db") as connection:
+        connection.execute(
+            "UPDATE tickets SET store_name = ?, expected_finish_date = ?, status = ?, closed_at = ? WHERE id = ?",
+            ("南京门东店", date.today().isoformat(), "已完成", date.today().isoformat(), int(auto_sla_ticket["id"])),
+        )
+        connection.execute(
+            "UPDATE ticket_stores SET store_name = ? WHERE ticket_id = ?",
+            ("南京门东店", int(auto_sla_ticket["id"])),
+        )
+        connection.execute(
+            "UPDATE tickets SET store_name = ?, expected_finish_date = ?, status = ? WHERE id = ?",
+            ("南昌万寿宫店", (date.today() - timedelta(days=1)).isoformat(), "待处理", int(manual_ticket["id"])),
+        )
+        connection.execute(
+            "UPDATE ticket_stores SET store_name = ? WHERE ticket_id = ?",
+            ("南昌万寿宫店", int(manual_ticket["id"])),
+        )
+
+    store_role = create_role_with_permissions(tmp_path, "p1a-store-viewer", ["ticket.view", "ticket.export"])
+    create_test_admin_user(tmp_path, "storeviewer", "门店范围账号", password="scope123")
+    update_admin_user_access(tmp_path, "storeviewer", store_role, data_scope="stores", store_names="南京门东店")
+    assert_login_success(login_admin(client, "storeviewer", "scope123"))
+
+    dashboard = client.get("/admin/dashboard")
+    assert dashboard.status_code == 200
+    assert "SLA 完成率" in dashboard.text
+    assert "平均处理时长" in dashboard.text
+    assert "SLA 自动截止" in dashboard.text
+    assert "手动期望时间优先" not in dashboard.text
+
+    workbook = load_workbook(BytesIO(client.get("/admin/export").content))
+    headers = [cell.value for cell in workbook.active[1]]
+    assert "时效状态" in headers
+    exported_descriptions = {row[10].value for row in workbook.active.iter_rows(min_row=2)}
+    assert exported_descriptions == {"SLA 自动截止"}
+
+
+def test_p1a_ticket_rules_page_permissions_and_overview(tmp_path, monkeypatch):
+    client, main = build_client(tmp_path, monkeypatch, admin_users="admin:123456")
+    logged_in_client(client, "admin", "123456")
+    page = client.get("/admin/ticket-rules")
+    assert page.status_code == 200
+    assert "自动分派规则" in page.text
+    assert "SLA 规则" in page.text
+    assert "测试匹配" in page.text
+
+    response = admin_post(
+        client,
+        "/admin/ticket-rules/assignment",
+        data={
+            "request_type": "缺货需求",
+            "default_handler": "admin",
+            "priority": "20",
+            "enabled": "1",
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert rows_for(tmp_path, "ticket_assignment_rules")[-1]["request_type"] == "缺货需求"
+
+    response = admin_post(
+        client,
+        "/admin/ticket-rules/sla",
+        data={"urgency_level": "加急", "due_hours": "24", "enabled": "1"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert rows_for(tmp_path, "ticket_sla_rules")[-1]["due_hours"] == 24
+    assert {"ticket.assignment_rule.update", "ticket.sla_rule.update"}.issubset(
+        {row["action"].replace(".create", ".update") for row in rows_for(tmp_path, "admin_operation_logs")}
+    )
+
+    readonly_role = create_role_with_permissions(
+        tmp_path,
+        "p1a-rule-readonly",
+        ["ticket.assignment_rule.view", "ticket.sla_rule.view"],
+    )
+    create_test_admin_user(tmp_path, "ruleviewer", "规则只读", password="readonly123")
+    update_admin_user_access(tmp_path, "ruleviewer", readonly_role)
+    assert_login_success(login_admin(client, "ruleviewer", "readonly123"))
+    readonly_page = client.get("/admin/ticket-rules")
+    assert readonly_page.status_code == 200
+    token = csrf_token_for(client, "/admin/ticket-rules")
+    denied_assignment = client.post(
+        "/admin/ticket-rules/assignment",
+        data={"csrf_token": token, "request_type": "缺货需求", "priority": "1"},
+    )
+    assert_html_forbidden(denied_assignment)
+    denied_sla = client.post(
+        "/admin/ticket-rules/sla",
+        data={"csrf_token": token, "urgency_level": "加急", "due_hours": "12"},
+    )
+    assert_html_forbidden(denied_sla)
+
+    context = main.permission_overview_context(main.app)
+    assert context["high_risk_uncontrolled_count"] == 0
+    route_paths = {(row["method"], row["path"]) for row in context["route_items"]}
+    assert ("GET", "/admin/ticket-rules") in route_paths
+    assert ("POST", "/admin/ticket-rules/assignment") in route_paths
+    assert ("POST", "/admin/ticket-rules/sla") in route_paths
+
+
 def test_phase4_templates_use_has_perm_for_privileged_controls():
     expectations = {
         "templates/base_admin.html": ["account.view", "role.view", "system.route_health", "ticket.view_trash", "ticket.delete"],
@@ -3217,9 +3492,10 @@ def test_base_admin_navigation_uses_only_canonical_admin_paths():
         "/admin/cleanup",
         "/admin/employees",
         "/admin/shift-types",
-        "/admin/schedules",
-        "/admin/settings",
-        "/admin/account",
+            "/admin/schedules",
+            "/admin/settings",
+            "/admin/ticket-rules",
+            "/admin/account",
         "/admin/personnel-governance",
         "/admin/roles",
         "/admin/route-health",
