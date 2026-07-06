@@ -25,6 +25,7 @@ from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request,
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from jinja2 import pass_context
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
@@ -94,6 +95,8 @@ ADMIN_PERMISSION_KEYS = [
     "role.create",
     "role.update",
     "role.delete",
+    "notification.view",
+    "notification.update",
     "system.view",
     "system.health",
     "system.route_health",
@@ -712,7 +715,7 @@ class PermissionService:
                     raise HTTPException(status_code=303, detail="Login required.", headers={"Location": login_redirect_location(request)})
                 raise HTTPException(status_code=http_status.HTTP_401_UNAUTHORIZED, detail="Login required.")
             if not self.has_permission(user, key):
-                raise HTTPException(status_code=http_status.HTTP_403_FORBIDDEN, detail="权限不足")
+                raise HTTPException(status_code=http_status.HTTP_403_FORBIDDEN, detail=f"缺少权限：{key}")
             return user
 
         return dependency
@@ -725,7 +728,7 @@ class PermissionService:
                     raise HTTPException(status_code=303, detail="Login required.", headers={"Location": login_redirect_location(request)})
                 raise HTTPException(status_code=http_status.HTTP_401_UNAUTHORIZED, detail="Login required.")
             if not any(self.has_permission(user, key) for key in keys):
-                raise HTTPException(status_code=http_status.HTTP_403_FORBIDDEN, detail="权限不足")
+                raise HTTPException(status_code=http_status.HTTP_403_FORBIDDEN, detail=f"缺少任一权限：{', '.join(keys)}")
             return user
 
         return dependency
@@ -1588,6 +1591,8 @@ def admin_permission_groups() -> List[Dict[str, object]]:
         "employee.view": "查看员工",
         "role.view": "查看角色",
         "role.update": "编辑角色权限",
+        "notification.view": "查看通知",
+        "notification.update": "更新通知",
     }
     grouped_prefixes = [
         ("工单", "ticket."),
@@ -1596,6 +1601,7 @@ def admin_permission_groups() -> List[Dict[str, object]]:
         ("班次", "shift."),
         ("嵌入页", "embedded."),
         ("配置", "config."),
+        ("通知", "notification."),
         ("账号与角色", ("account.", "role.")),
         ("系统", "system."),
     ]
@@ -1617,15 +1623,47 @@ PERMISSION_ROUTE_RULES: List[Dict[str, str]] = [
     {"method": "GET", "path": "/admin/dashboard", "permission": "ticket.view", "module": "工单", "label": "经营看板"},
     {"method": "GET", "path": "/admin/my-work", "permission": "ticket.view", "module": "工单", "label": "我的工作台"},
     {"method": "GET", "path": "/admin/ticket/{ticket_id}", "permission": "ticket.view", "module": "工单", "label": "工单详情"},
+    {"method": "POST", "path": "/admin/tickets/create", "permission": "ticket.create", "module": "工单", "label": "后台新建工单"},
+    {"method": "POST", "path": "/admin/ticket/{ticket_id}/accept", "permission": "ticket.update", "module": "工单", "label": "接手工单"},
     {"method": "POST", "path": "/admin/ticket/{ticket_id}", "permission": "ticket.update", "module": "工单", "label": "更新工单"},
-    {"method": "POST", "path": "/admin/ticket/{ticket_id}/delete", "permission": "ticket.update", "module": "工单", "label": "删除工单"},
-    {"method": "POST", "path": "/admin/ticket/{ticket_id}/hard-delete", "permission": "ticket.update", "module": "工单", "label": "永久删除工单"},
+    {"method": "POST", "path": "/admin/ticket/{ticket_id}/archive", "permission": "ticket.archive", "module": "工单", "label": "归档工单"},
+    {"method": "POST", "path": "/admin/ticket/{ticket_id}/unarchive", "permission": "ticket.restore", "module": "工单", "label": "取消归档"},
+    {"method": "POST", "path": "/admin/ticket/{ticket_id}/delete", "permission": "ticket.delete", "module": "工单", "label": "删除工单"},
+    {"method": "POST", "path": "/admin/ticket/{ticket_id}/restore", "permission": "ticket.restore", "module": "工单", "label": "恢复工单"},
+    {"method": "POST", "path": "/admin/ticket/{ticket_id}/hard-delete", "permission": "ticket.hard_delete", "module": "工单", "label": "永久删除工单"},
+    {"method": "POST", "path": "/admin/tickets/bulk-archive", "permission": "ticket.archive", "module": "工单", "label": "批量归档"},
+    {"method": "POST", "path": "/admin/tickets/bulk-delete", "permission": "ticket.delete", "module": "工单", "label": "批量删除"},
+    {"method": "POST", "path": "/admin/tickets/bulk-unarchive", "permission": "ticket.restore", "module": "工单", "label": "批量取消归档"},
+    {"method": "POST", "path": "/admin/tickets/bulk-restore", "permission": "ticket.restore", "module": "工单", "label": "批量恢复"},
+    {"method": "POST", "path": "/admin/tickets/bulk-hard-delete", "permission": "ticket.hard_delete", "module": "工单", "label": "批量永久删除"},
+    {"method": "POST", "path": "/admin/ticket/{ticket_id}/comments", "permission": "ticket.comment", "module": "工单协作", "label": "新增评论"},
+    {"method": "POST", "path": "/admin/ticket/{ticket_id}/comment/{comment_id}/delete", "permission": "ticket.comment", "module": "工单协作", "label": "删除评论"},
+    {"method": "POST", "path": "/admin/ticket/{ticket_id}/participants", "permission": "ticket.assign", "module": "工单协作", "label": "新增协作人"},
+    {"method": "POST", "path": "/admin/ticket/{ticket_id}/participant/{participant_id}/delete", "permission": "ticket.assign", "module": "工单协作", "label": "移除协作人"},
+    {"method": "POST", "path": "/admin/ticket/{ticket_id}/tasks", "permission": "ticket.update", "module": "工单协作", "label": "新增子任务"},
+    {"method": "POST", "path": "/admin/ticket/{ticket_id}/tasks/{task_id}", "permission": "ticket.update", "module": "工单协作", "label": "更新子任务"},
+    {"method": "POST", "path": "/admin/ticket/{ticket_id}/task/{task_id}/delete", "permission": "ticket.update", "module": "工单协作", "label": "删除子任务"},
+    {"method": "POST", "path": "/admin/ticket/{ticket_id}/supplement/{supplement_id}/delete", "permission": "ticket.update", "module": "工单协作", "label": "隐藏补充记录"},
+    {"method": "POST", "path": "/admin/ticket/{ticket_id}/attachments", "permission": "ticket.update", "module": "工单协作", "label": "补充附件"},
+    {"method": "POST", "path": "/admin/ticket/{ticket_id}/image/{image_id}/delete", "permission": "ticket.delete", "module": "工单协作", "label": "删除图片"},
+    {"method": "POST", "path": "/admin/ticket/{ticket_id}/file/{file_id}/delete", "permission": "ticket.delete", "module": "工单协作", "label": "删除文件"},
     {"method": "GET", "path": "/admin/export", "permission": "ticket.export", "module": "工单", "label": "导出工单"},
     {"method": "GET", "path": "/admin/archive/export", "permission": "ticket.export", "module": "工单", "label": "导出归档工单"},
     {"method": "GET", "path": "/admin/schedules", "permission": "schedule.view", "module": "排班", "label": "排班列表"},
     {"method": "POST", "path": "/admin/schedules", "permission": "schedule.create", "module": "排班", "label": "新增排班"},
+    {"method": "POST", "path": "/admin/schedules/copy-day", "permission": "schedule.create", "module": "排班", "label": "复制排班"},
+    {"method": "POST", "path": "/admin/schedules/clear-employee", "permission": "schedule.delete", "module": "排班", "label": "清空员工排班"},
+    {"method": "POST", "path": "/admin/schedules/{schedule_id}/delete", "permission": "schedule.delete", "module": "排班", "label": "删除排班"},
     {"method": "GET", "path": "/admin/schedules/export", "permission": "schedule.export", "module": "排班", "label": "导出排班"},
     {"method": "GET", "path": "/admin/employees", "permission": "employee.view", "module": "员工", "label": "员工列表"},
+    {"method": "POST", "path": "/admin/employees", "permission": "employee.create", "module": "员工", "label": "新增员工"},
+    {"method": "POST", "path": "/admin/employees/{employee_id}/update", "permission": "employee.update", "module": "员工", "label": "编辑员工"},
+    {"method": "POST", "path": "/admin/employees/{employee_id}/disable", "permission": "employee.update", "module": "员工", "label": "停用员工"},
+    {"method": "POST", "path": "/admin/employees/{employee_id}/archive", "permission": "employee.archive", "module": "员工", "label": "归档员工"},
+    {"method": "POST", "path": "/admin/employees/{employee_id}/unarchive", "permission": "employee.archive", "module": "员工", "label": "取消归档员工"},
+    {"method": "POST", "path": "/admin/employees/{employee_id}/delete", "permission": "employee.delete", "module": "员工", "label": "删除员工"},
+    {"method": "POST", "path": "/admin/employees/{employee_id}/restore", "permission": "employee.delete", "module": "员工", "label": "恢复员工"},
+    {"method": "POST", "path": "/admin/employees/{employee_id}/hard-delete", "permission": "employee.hard_delete", "module": "员工", "label": "永久删除员工"},
     {"method": "GET", "path": "/admin/shift-types", "permission": "shift.view", "module": "班次", "label": "班次列表"},
     {"method": "POST", "path": "/admin/shift-types", "permission": "shift.create", "module": "班次", "label": "新增班次"},
     {"method": "POST", "path": "/admin/shift-types/{shift_type_id}/update", "permission": "shift.update", "module": "班次", "label": "编辑班次"},
@@ -1646,6 +1684,10 @@ PERMISSION_ROUTE_RULES: List[Dict[str, str]] = [
     {"method": "GET", "path": "/admin/embed-content/{page_key}", "permission": "embedded.view", "module": "嵌入页", "label": "嵌入页内容"},
     {"method": "GET", "path": "/admin/embed-content/{page_key}/{resource_path:path}", "permission": "embedded.view", "module": "嵌入页", "label": "嵌入页资源"},
     {"method": "GET", "path": "/admin/settings", "permission": "config.view", "module": "配置", "label": "配置中心"},
+    {"method": "GET", "path": "/admin/trash", "permission": "ticket.view_trash", "module": "回收站", "label": "工单回收站"},
+    {"method": "GET", "path": "/admin/cleanup", "permission": "ticket.delete", "module": "回收站", "label": "测试数据清理"},
+    {"method": "POST", "path": "/admin/cleanup/preview", "permission": "ticket.delete", "module": "回收站", "label": "清理预览"},
+    {"method": "POST", "path": "/admin/cleanup/delete", "permission": "ticket.delete", "module": "回收站", "label": "执行清理"},
     {"method": "GET", "path": "/admin/account", "permission": "account.view", "module": "账号", "label": "账号管理"},
     {"method": "POST", "path": "/admin/account/users", "permission": "account.create", "module": "账号", "label": "新增账号"},
     {"method": "POST", "path": "/admin/account/users/{user_id}/update", "permission": "account.update", "module": "账号", "label": "编辑账号"},
@@ -1672,35 +1714,104 @@ def permission_route_items(app: FastAPI) -> List[Dict[str, object]]:
     ]
 
 
+LOGIN_PROTECTED_ADMIN_ROUTE_RULES: List[Dict[str, str]] = [
+    {"method": "POST", "path": "/admin/logout", "module": "会话", "label": "退出登录"},
+    {"method": "GET", "path": "/admin/api/notifications", "module": "通知", "label": "登录保护 API"},
+    {"method": "POST", "path": "/admin/api/notifications/{event_id}/read", "module": "通知", "label": "登录保护 API"},
+    {"method": "POST", "path": "/admin/api/notifications/read-all", "module": "通知", "label": "登录保护 API"},
+]
+
+
+def matched_permission_route(method: str, path: str) -> Optional[Dict[str, str]]:
+    for rule in PERMISSION_ROUTE_RULES:
+        if method == rule["method"] and route_pattern(rule["path"]).match(path):
+            return rule
+    return None
+
+
+def matched_login_protected_route(method: str, path: str) -> Optional[Dict[str, str]]:
+    for rule in LOGIN_PROTECTED_ADMIN_ROUTE_RULES:
+        if method == rule["method"] and route_pattern(rule["path"]).match(path):
+            return rule
+    return None
+
+
 def is_permission_controlled_route(method: str, path: str) -> bool:
-    return any(
-        method == rule["method"] and route_pattern(rule["path"]).match(path)
-        for rule in PERMISSION_ROUTE_RULES
-    )
+    return matched_permission_route(method, path) is not None
 
 
 def is_permission_overview_exempt_route(method: str, path: str) -> bool:
     return (
-        path in {"/admin/login", "/admin/logout", "/admin/api/notifications", "/admin/api/notifications/{event_id}/read", "/admin/api/notifications/read-all"}
+        path in {"/admin/login"}
         or path.startswith("/admin/uploads")
         or path.startswith("/admin/files")
     )
 
 
-def uncontrolled_admin_routes(app: FastAPI) -> List[Dict[str, str]]:
-    results: List[Dict[str, str]] = []
+def admin_route_coverage_items(app: FastAPI) -> List[Dict[str, object]]:
+    items: List[Dict[str, object]] = []
     for method, path in registered_route_pairs(app):
         if not path.startswith("/admin") or is_permission_overview_exempt_route(method, path):
             continue
-        if not is_permission_controlled_route(method, path):
-            results.append({"method": method, "path": path})
-    return results
+        permission_rule = matched_permission_route(method, path)
+        login_rule = matched_login_protected_route(method, path)
+        if permission_rule:
+            items.append(
+                {
+                    "method": method,
+                    "path": path,
+                    "module": permission_rule["module"],
+                    "label": permission_rule["label"],
+                    "permission": permission_rule["permission"],
+                    "coverage_status": "permission",
+                    "coverage_label": "已接入 require_permission",
+                    "is_high_risk": method == "POST",
+                }
+            )
+        elif login_rule or method == "GET":
+            items.append(
+                {
+                    "method": method,
+                    "path": path,
+                    "module": (login_rule or {}).get("module", "后台页面"),
+                    "label": (login_rule or {}).get("label", "登录保护页面"),
+                    "permission": "",
+                    "coverage_status": "login_protected",
+                    "coverage_label": "登录保护 API" if login_rule else "仅登录保护",
+                    "is_high_risk": method == "POST",
+                }
+            )
+        else:
+            items.append(
+                {
+                    "method": method,
+                    "path": path,
+                    "module": "未归类",
+                    "label": path,
+                    "permission": "",
+                    "coverage_status": "uncontrolled",
+                    "coverage_label": "未接入",
+                    "is_high_risk": method == "POST",
+                }
+            )
+    return items
+
+
+def uncontrolled_admin_routes(app: FastAPI) -> List[Dict[str, str]]:
+    return [
+        {"method": str(item["method"]), "path": str(item["path"])}
+        for item in admin_route_coverage_items(app)
+        if item["coverage_status"] == "uncontrolled"
+    ]
 
 
 def permission_overview_context(app: FastAPI) -> Dict[str, object]:
     roles = fetch_admin_roles()
     groups = admin_permission_groups()
     route_items = permission_route_items(app)
+    admin_route_items = admin_route_coverage_items(app)
+    uncontrolled_routes = [item for item in admin_route_items if item["coverage_status"] == "uncontrolled"]
+    high_risk_uncontrolled_routes = [item for item in uncontrolled_routes if item["method"] == "POST"]
     permission_route_map = {
         permission_key: [route for route in route_items if route["permission"] == permission_key]
         for permission_key in ADMIN_PERMISSION_KEYS
@@ -1710,7 +1821,10 @@ def permission_overview_context(app: FastAPI) -> Dict[str, object]:
         "permission_groups": groups,
         "route_items": route_items,
         "permission_route_map": permission_route_map,
-        "uncontrolled_routes": uncontrolled_admin_routes(app),
+        "admin_route_items": admin_route_items,
+        "uncontrolled_routes": uncontrolled_routes,
+        "remaining_uncontrolled_count": len(uncontrolled_routes),
+        "high_risk_uncontrolled_count": len(high_risk_uncontrolled_routes),
         "data_scope_rules": [
             {"key": "all", "label": "全部数据", "description": "不追加业务数据过滤。"},
             {"key": "stores", "label": "指定门店", "description": "按账号 store_names 限制门店数据。"},
@@ -7808,6 +7922,18 @@ def create_app() -> FastAPI:
     templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
     templates.env.globals["embedded_nav_pages"] = fetch_enabled_embedded_pages
     templates.env.globals["asset_version"] = current_asset_version()
+
+    @pass_context
+    def template_current_admin(context) -> Optional[Dict[str, object]]:
+        request = context.get("request")
+        return current_admin_user(request) if isinstance(request, Request) else None
+
+    @pass_context
+    def template_has_perm(context, permission_key: str) -> bool:
+        return permission_service.has_permission(template_current_admin(context), permission_key)
+
+    templates.env.globals["current_admin"] = template_current_admin
+    templates.env.globals["has_perm"] = template_has_perm
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
     @app.get("/__version")
@@ -7885,33 +8011,21 @@ def create_app() -> FastAPI:
         if not request.url.path.startswith("/admin"):
             return JSONResponse({"detail": str(getattr(exc, "detail", "") or "Forbidden")}, status_code=403)
         admin = current_admin_username(request) or ""
-        detail = html.escape(str(getattr(exc, "detail", "") or "权限不足"))
-        content = f"""
-        <!doctype html>
-        <html lang="zh-CN">
-        <head>
-          <meta charset="utf-8">
-          <meta name="viewport" content="width=device-width, initial-scale=1">
-          <title>权限不足</title>
-          <link rel="stylesheet" href="/static/style.css?v={current_asset_version()}">
-        </head>
-        <body class="admin-forbidden-page">
-          <main class="admin-layout">
-            <section class="work-card account-denied-card">
-              <p class="eyebrow">403</p>
-              <h1>权限不足</h1>
-              <p>{detail}</p>
-              <p>当前账号：{html.escape(admin or "-")}</p>
-              <div class="form-actions">
-                <a class="ghost-button" href="/admin/dashboard">返回后台</a>
-                <a class="primary-button" href="/admin/account">查看账号</a>
-              </div>
-            </section>
-          </main>
-        </body>
-        </html>
-        """
-        return HTMLResponse(content, status_code=403)
+        detail = str(getattr(exc, "detail", "") or "权限不足")
+        missing_permission = detail.replace("缺少任一权限：", "").replace("缺少权限：", "")
+        return templates.TemplateResponse(
+            request,
+            "forbidden.html",
+            {
+                "request": request,
+                "asset_version": current_asset_version(),
+                "admin_user": admin,
+                "csrf_token": current_csrf_token(request),
+                "error_detail": detail,
+                "missing_permission": missing_permission,
+            },
+            status_code=403,
+        )
 
     def make_legacy_admin_redirect(target_path: str):
         def legacy_admin_redirect(_admin: str = Depends(require_admin)) -> RedirectResponse:
@@ -8810,7 +8924,7 @@ def create_app() -> FastAPI:
     @app.post("/admin/tickets/create")
     async def admin_create_ticket(
         request: Request,
-        admin: str = Depends(require_admin),
+        current_user: Dict[str, object] = Depends(require_permission("ticket.create")),
         store_names: Optional[List[str]] = Form(None),
         brands: Optional[List[str]] = Form(None),
         brand_extra: str = Form(""),
@@ -8828,6 +8942,7 @@ def create_app() -> FastAPI:
         files: Optional[List[UploadFile]] = File(None),
         csrf_token: str = Form(""),
     ) -> JSONResponse:
+        admin = str(current_user.get("username") or "")
         require_admin_csrf(request, csrf_token)
         config = load_app_config()
         result = await create_ticket_from_submission(
@@ -9192,7 +9307,7 @@ def create_app() -> FastAPI:
     @app.post("/admin/employees")
     def create_employee_route(
         request: Request,
-        admin: str = Depends(require_admin),
+        current_user: Dict[str, object] = Depends(require_permission("employee.create")),
         employee_name: str = Form(""),
         store_name: str = Form(""),
         primary_store_name: str = Form(""),
@@ -9202,9 +9317,10 @@ def create_app() -> FastAPI:
         status: str = Form("在职"),
         csrf_token: str = Form(""),
     ) -> RedirectResponse:
+        admin = str(current_user.get("username") or "")
         require_admin_csrf(request, csrf_token)
         try:
-            create_employee(
+            employee_id = create_employee(
                 employee_name,
                 store_name,
                 role,
@@ -9216,13 +9332,21 @@ def create_app() -> FastAPI:
             )
         except (ValueError, HTTPException) as exc:
             return RedirectResponse(url="/admin/employees?" + urlencode({"error": form_error_message(exc)}), status_code=303)
+        record_operation_log(
+            admin,
+            "employee.create",
+            "employee",
+            employee_id,
+            {"employee_name": employee_name.strip(), "store_names": store_names or [store_name]},
+            request,
+        )
         return RedirectResponse(url="/admin/employees?" + urlencode({"success": "已新增员工。"}), status_code=303)
 
     @app.post("/admin/employees/{employee_id}/update")
     def update_employee_route(
         request: Request,
         employee_id: int,
-        admin: str = Depends(require_admin),
+        current_user: Dict[str, object] = Depends(require_permission("employee.update")),
         employee_name: str = Form(""),
         store_name: str = Form(""),
         primary_store_name: str = Form(""),
@@ -9232,6 +9356,7 @@ def create_app() -> FastAPI:
         status: str = Form("在职"),
         csrf_token: str = Form(""),
     ) -> RedirectResponse:
+        admin = str(current_user.get("username") or "")
         require_admin_csrf(request, csrf_token)
         try:
             update_employee(
@@ -9247,88 +9372,107 @@ def create_app() -> FastAPI:
             )
         except (ValueError, HTTPException) as exc:
             return RedirectResponse(url="/admin/employees?" + urlencode({"error": form_error_message(exc)}), status_code=303)
+        record_operation_log(
+            admin,
+            "employee.update",
+            "employee",
+            employee_id,
+            {"employee_name": employee_name.strip(), "store_names": store_names or [store_name], "status": status},
+            request,
+        )
         return RedirectResponse(url="/admin/employees?" + urlencode({"success": "员工信息已保存。"}), status_code=303)
 
     @app.post("/admin/employees/{employee_id}/disable")
     def disable_employee_route(
         request: Request,
         employee_id: int,
-        _admin: str = Depends(require_admin),
+        current_user: Dict[str, object] = Depends(require_permission("employee.update")),
         csrf_token: str = Form(""),
     ) -> RedirectResponse:
+        admin = str(current_user.get("username") or "")
         require_admin_csrf(request, csrf_token)
         try:
             disable_employee(employee_id)
         except HTTPException as exc:
             return RedirectResponse(url="/admin/employees?" + urlencode({"error": form_error_message(exc)}), status_code=303)
+        record_operation_log(admin, "employee.update", "employee", employee_id, {"status": "离职"}, request)
         return RedirectResponse(url="/admin/employees?" + urlencode({"success": "员工已标记为离职。"}), status_code=303)
 
     @app.post("/admin/employees/{employee_id}/archive")
     def archive_employee_route(
         request: Request,
         employee_id: int,
-        admin: str = Depends(require_admin),
+        current_user: Dict[str, object] = Depends(require_permission("employee.archive")),
         archive_reason: str = Form(""),
         csrf_token: str = Form(""),
     ) -> RedirectResponse:
+        admin = str(current_user.get("username") or "")
         require_admin_csrf(request, csrf_token)
         try:
             archive_employee(employee_id, admin, archive_reason)
         except (ValueError, HTTPException) as exc:
             return RedirectResponse(url="/admin/employees?" + urlencode({"error": form_error_message(exc)}), status_code=303)
+        record_operation_log(admin, "employee.archive", "employee", employee_id, {"reason": archive_reason.strip()}, request)
         return RedirectResponse(url="/admin/employees?" + urlencode({"success": "员工已归档。"}), status_code=303)
 
     @app.post("/admin/employees/{employee_id}/unarchive")
     def unarchive_employee_route(
         request: Request,
         employee_id: int,
-        _admin: str = Depends(require_admin),
+        current_user: Dict[str, object] = Depends(require_permission("employee.archive")),
         csrf_token: str = Form(""),
     ) -> RedirectResponse:
+        admin = str(current_user.get("username") or "")
         require_admin_csrf(request, csrf_token)
         try:
             unarchive_employee(employee_id)
         except (ValueError, HTTPException) as exc:
             return RedirectResponse(url="/admin/employees?scope=archive&" + urlencode({"error": form_error_message(exc)}), status_code=303)
+        record_operation_log(admin, "employee.unarchive", "employee", employee_id, {}, request)
         return RedirectResponse(url="/admin/employees?" + urlencode({"success": "员工已取消归档。"}), status_code=303)
 
     @app.post("/admin/employees/{employee_id}/delete")
     def delete_employee_route(
         request: Request,
         employee_id: int,
-        admin: str = Depends(require_admin),
+        current_user: Dict[str, object] = Depends(require_permission("employee.delete")),
         delete_reason: str = Form(""),
         csrf_token: str = Form(""),
     ) -> RedirectResponse:
+        admin = str(current_user.get("username") or "")
         require_admin_csrf(request, csrf_token)
         try:
             soft_delete_employee(employee_id, admin, delete_reason)
         except (ValueError, HTTPException) as exc:
             return RedirectResponse(url="/admin/employees?" + urlencode({"error": form_error_message(exc)}), status_code=303)
+        record_operation_log(admin, "employee.delete", "employee", employee_id, {"reason": delete_reason.strip()}, request)
         return RedirectResponse(url="/admin/employees?" + urlencode({"success": "员工已移入回收站。"}), status_code=303)
 
     @app.post("/admin/employees/{employee_id}/restore")
     def restore_employee_route(
         request: Request,
         employee_id: int,
-        _admin: str = Depends(require_admin),
+        current_user: Dict[str, object] = Depends(require_permission("employee.delete")),
         csrf_token: str = Form(""),
     ) -> RedirectResponse:
+        admin = str(current_user.get("username") or "")
         require_admin_csrf(request, csrf_token)
         try:
             restore_employee(employee_id)
         except (ValueError, HTTPException) as exc:
             return RedirectResponse(url="/admin/employees?scope=trash&" + urlencode({"error": form_error_message(exc)}), status_code=303)
+        record_operation_log(admin, "employee.restore", "employee", employee_id, {}, request)
         return RedirectResponse(url="/admin/employees?" + urlencode({"success": "员工已恢复。"}), status_code=303)
 
     @app.post("/admin/employees/{employee_id}/hard-delete")
     def hard_delete_employee_route(
         request: Request,
         employee_id: int,
-        _admin: str = Depends(require_admin),
+        current_user: Dict[str, object] = Depends(require_permission("employee.hard_delete")),
         confirm_delete: str = Form(""),
         csrf_token: str = Form(""),
     ) -> RedirectResponse:
+        admin = str(current_user.get("username") or "")
         require_admin_csrf(request, csrf_token)
         if confirm_delete != "1":
             return RedirectResponse(url="/admin/employees?scope=trash&" + urlencode({"error": "请二次确认后再永久删除员工。"}), status_code=303)
@@ -9336,6 +9480,7 @@ def create_app() -> FastAPI:
             hard_delete_employee(employee_id)
         except (ValueError, HTTPException) as exc:
             return RedirectResponse(url="/admin/employees?scope=trash&" + urlencode({"error": form_error_message(exc)}), status_code=303)
+        record_operation_log(admin, "employee.hard_delete", "employee", employee_id, {}, request)
         return RedirectResponse(url="/admin/employees?scope=trash&" + urlencode({"success": "员工已永久删除。"}), status_code=303)
 
     @app.get("/admin/shift-types", response_class=HTMLResponse)
@@ -9690,7 +9835,7 @@ def create_app() -> FastAPI:
     @app.post("/admin/schedules")
     def create_schedule_route(
         request: Request,
-        current_user: Dict[str, object] = Depends(require_permission("schedule.create")),
+        current_user: Dict[str, object] = Depends(require_any_permission(["schedule.create", "schedule.update"])),
         store_name: str = Form(""),
         store_names: Optional[List[str]] = Form(None),
         employee_ids: Optional[List[str]] = Form(None),
@@ -9752,6 +9897,14 @@ def create_app() -> FastAPI:
             )
         except (ValueError, HTTPException) as exc:
             return RedirectResponse(url=schedule_redirect_url(return_store, month_for_return, error=form_error_message(exc)), status_code=303)
+        record_operation_log(
+            admin,
+            "schedule.create",
+            "schedule",
+            "",
+            {"store_name": return_store, "month": month_for_return, **result},
+            request,
+        )
         return RedirectResponse(
             url=schedule_redirect_url(
                 return_store,
@@ -9767,11 +9920,12 @@ def create_app() -> FastAPI:
     @app.post("/admin/schedules/copy-day")
     def copy_schedule_day_route(
         request: Request,
-        admin: str = Depends(require_admin),
+        current_user: Dict[str, object] = Depends(require_permission("schedule.create")),
         store_name: str = Form(""),
         target_date: str = Form(""),
         csrf_token: str = Form(""),
     ) -> RedirectResponse:
+        admin = str(current_user.get("username") or "")
         require_admin_csrf(request, csrf_token)
         month_for_return = datetime.now().strftime("%Y-%m")
         try:
@@ -9779,6 +9933,7 @@ def create_app() -> FastAPI:
             month_for_return = str(result["target_date"])[:7]
         except (ValueError, HTTPException) as exc:
             return RedirectResponse(url=schedule_redirect_url(store_name, month_for_return, error=form_error_message(exc)), status_code=303)
+        record_operation_log(admin, "schedule.copy", "schedule", "", {"store_name": store_name, **result}, request)
         return RedirectResponse(
             url=schedule_redirect_url(store_name, month_for_return, saved_count=int(result["copied_count"] or 0)),
             status_code=303,
@@ -9787,12 +9942,13 @@ def create_app() -> FastAPI:
     @app.post("/admin/schedules/clear-employee")
     def clear_employee_schedule_route(
         request: Request,
-        admin: str = Depends(require_admin),
+        current_user: Dict[str, object] = Depends(require_permission("schedule.delete")),
         store_name: str = Form(""),
         employee_id: str = Form(""),
         month: str = Form(""),
         csrf_token: str = Form(""),
     ) -> RedirectResponse:
+        admin = str(current_user.get("username") or "")
         require_admin_csrf(request, csrf_token)
         month_for_return = month.strip() or datetime.now().strftime("%Y-%m")
         try:
@@ -9802,6 +9958,14 @@ def create_app() -> FastAPI:
             deleted_count = clear_employee_month_schedules(store_name, clean_employee_id, month_for_return, admin)
         except (ValueError, HTTPException) as exc:
             return RedirectResponse(url=schedule_redirect_url(store_name, month_for_return, error=form_error_message(exc)), status_code=303)
+        record_operation_log(
+            admin,
+            "schedule.delete",
+            "schedule",
+            "",
+            {"mode": "clear_employee", "store_name": store_name, "employee_id": employee_id, "month": month_for_return, "count": deleted_count},
+            request,
+        )
         return RedirectResponse(
             url=schedule_redirect_url(store_name, month_for_return, deleted=deleted_count),
             status_code=303,
@@ -9811,14 +9975,23 @@ def create_app() -> FastAPI:
     def delete_schedule_route(
         request: Request,
         schedule_id: int,
-        admin: str = Depends(require_admin),
+        current_user: Dict[str, object] = Depends(require_permission("schedule.delete")),
         csrf_token: str = Form(""),
     ) -> RedirectResponse:
+        admin = str(current_user.get("username") or "")
         require_admin_csrf(request, csrf_token)
         try:
             old_schedule = delete_schedule(schedule_id, admin)
         except HTTPException as exc:
             return RedirectResponse(url=schedule_redirect_url("", datetime.now().strftime("%Y-%m"), error=form_error_message(exc)), status_code=303)
+        record_operation_log(
+            admin,
+            "schedule.delete",
+            "schedule",
+            schedule_id,
+            {"store_name": old_schedule.get("store_name"), "schedule_date": old_schedule.get("schedule_date")},
+            request,
+        )
         return RedirectResponse(
             url=schedule_redirect_url(str(old_schedule.get("store_name") or ""), str(old_schedule.get("schedule_date") or "")[:7], deleted=1),
             status_code=303,
@@ -10266,7 +10439,7 @@ def create_app() -> FastAPI:
     @app.get("/admin/trash", response_class=HTMLResponse)
     def admin_trash(
         request: Request,
-        current_user: Dict[str, object] = Depends(require_permission("ticket.view")),
+        current_user: Dict[str, object] = Depends(require_permission("ticket.view_trash")),
         store_name: str = Query(""),
         request_type: str = Query(""),
         urgency: str = Query(""),
@@ -10309,15 +10482,16 @@ def create_app() -> FastAPI:
     @app.get("/admin/cleanup", response_class=HTMLResponse)
     def admin_cleanup(
         request: Request,
-        admin: str = Depends(require_admin),
+        current_user: Dict[str, object] = Depends(require_any_permission(["ticket.delete", "ticket.hard_delete"])),
         deleted_count: int = Query(0),
     ) -> HTMLResponse:
+        admin = str(current_user.get("username") or "")
         return render_cleanup_page(request, admin, deleted_count=max(deleted_count, 0))
 
     @app.post("/admin/cleanup/preview", response_class=HTMLResponse)
     def admin_cleanup_preview(
         request: Request,
-        admin: str = Depends(require_admin),
+        current_user: Dict[str, object] = Depends(require_permission("ticket.delete")),
         store_name: str = Form(""),
         submitter: str = Form(""),
         keyword: str = Form(""),
@@ -10327,6 +10501,7 @@ def create_app() -> FastAPI:
         only_test: str = Form(""),
         csrf_token: str = Form(""),
     ) -> HTMLResponse:
+        admin = str(current_user.get("username") or "")
         require_admin_csrf(request, csrf_token)
         filters = cleanup_filters_from_form(
             store_name,
@@ -10343,7 +10518,7 @@ def create_app() -> FastAPI:
     @app.post("/admin/cleanup/delete")
     def admin_cleanup_delete(
         request: Request,
-        admin: str = Depends(require_admin),
+        current_user: Dict[str, object] = Depends(require_permission("ticket.delete")),
         store_name: str = Form(""),
         submitter: str = Form(""),
         keyword: str = Form(""),
@@ -10354,6 +10529,7 @@ def create_app() -> FastAPI:
         confirm_cleanup: str = Form(""),
         csrf_token: str = Form(""),
     ) -> RedirectResponse:
+        admin = str(current_user.get("username") or "")
         require_admin_csrf(request, csrf_token)
         if confirm_cleanup not in {"1", "true", "on", "yes"}:
             raise HTTPException(status_code=400, detail="请先确认批量清理。")
@@ -10369,6 +10545,14 @@ def create_app() -> FastAPI:
         candidates = fetch_cleanup_candidates(filters)
         for ticket in candidates:
             soft_delete_ticket(int(ticket["id"]), admin, "批量清理测试数据")
+        record_operation_log(
+            admin,
+            "ticket.cleanup.delete",
+            "ticket",
+            "",
+            {"filters": filters, "count": len(candidates)},
+            request,
+        )
         return RedirectResponse(url=f"/admin/cleanup?deleted_count={len(candidates)}", status_code=303)
 
     @app.get("/admin/embedded-pages", response_class=HTMLResponse)
@@ -10561,6 +10745,7 @@ def create_app() -> FastAPI:
         require_admin_csrf(request, csrf_token)
         if not mark_notification_read(admin, event_id):
             raise HTTPException(status_code=404, detail="消息不存在")
+        record_operation_log(admin, "notification.update", "notification", event_id, {"mode": "read"}, request)
         return {
             "ok": True,
             "unread_count": count_unread_notifications(admin),
@@ -10574,6 +10759,7 @@ def create_app() -> FastAPI:
     ) -> Dict[str, object]:
         require_admin_csrf(request, csrf_token)
         mark_all_notifications_read(admin)
+        record_operation_log(admin, "notification.update", "notification", "", {"mode": "read_all"}, request)
         return {
             "ok": True,
             "unread_count": count_unread_notifications(admin),
@@ -10620,7 +10806,7 @@ def create_app() -> FastAPI:
     @app.post("/admin/tickets/bulk-archive")
     def bulk_archive_tickets_route(
         request: Request,
-        current_user: Dict[str, object] = Depends(require_permission("ticket.update")),
+        current_user: Dict[str, object] = Depends(require_permission("ticket.archive")),
         filters: Dict[str, str] = Depends(admin_ticket_filters_from_form),
         ticket_ids: Optional[List[int]] = Form(None),
         select_scope: str = Form("selected"),
@@ -10637,12 +10823,20 @@ def create_app() -> FastAPI:
         if not ids:
             return RedirectResponse(url=admin_redirect_url(source_view, error=BULK_SELECTION_REQUIRED_MESSAGE), status_code=303)
         archived_count = bulk_archive_tickets(ids, admin, archive_reason)
+        record_operation_log(
+            admin,
+            "ticket.archive",
+            "ticket",
+            "",
+            {"mode": "bulk", "ticket_ids": ids, "count": archived_count, "reason": archive_reason},
+            request,
+        )
         return RedirectResponse(url=admin_redirect_url(source_view, archived_count=archived_count), status_code=303)
 
     @app.post("/admin/tickets/bulk-delete")
     def bulk_delete_tickets_route(
         request: Request,
-        current_user: Dict[str, object] = Depends(require_permission("ticket.update")),
+        current_user: Dict[str, object] = Depends(require_permission("ticket.delete")),
         filters: Dict[str, str] = Depends(admin_ticket_filters_from_form),
         ticket_ids: Optional[List[int]] = Form(None),
         select_scope: str = Form("selected"),
@@ -10674,7 +10868,7 @@ def create_app() -> FastAPI:
     @app.post("/admin/tickets/bulk-unarchive")
     def bulk_unarchive_tickets_route(
         request: Request,
-        current_user: Dict[str, object] = Depends(require_permission("ticket.update")),
+        current_user: Dict[str, object] = Depends(require_permission("ticket.restore")),
         filters: Dict[str, str] = Depends(admin_ticket_filters_from_form),
         ticket_ids: Optional[List[int]] = Form(None),
         select_scope: str = Form("selected"),
@@ -10690,12 +10884,20 @@ def create_app() -> FastAPI:
         if not ids:
             return RedirectResponse(url=admin_redirect_url(source_view, error=BULK_SELECTION_REQUIRED_MESSAGE), status_code=303)
         unarchived_count = bulk_unarchive_tickets(ids, admin)
+        record_operation_log(
+            admin,
+            "ticket.restore",
+            "ticket",
+            "",
+            {"mode": "bulk_unarchive", "ticket_ids": ids, "count": unarchived_count},
+            request,
+        )
         return RedirectResponse(url=admin_redirect_url(source_view, unarchived_count=unarchived_count), status_code=303)
 
     @app.post("/admin/tickets/bulk-restore")
     def bulk_restore_tickets_route(
         request: Request,
-        current_user: Dict[str, object] = Depends(require_permission("ticket.update")),
+        current_user: Dict[str, object] = Depends(require_permission("ticket.restore")),
         filters: Dict[str, str] = Depends(admin_ticket_filters_from_form),
         ticket_ids: Optional[List[int]] = Form(None),
         select_scope: str = Form("selected"),
@@ -10711,12 +10913,20 @@ def create_app() -> FastAPI:
         if not ids:
             return RedirectResponse(url=admin_redirect_url(source_view, error=BULK_SELECTION_REQUIRED_MESSAGE), status_code=303)
         restored_count = bulk_restore_tickets(ids, admin)
+        record_operation_log(
+            admin,
+            "ticket.restore",
+            "ticket",
+            "",
+            {"mode": "bulk_restore", "ticket_ids": ids, "count": restored_count},
+            request,
+        )
         return RedirectResponse(url=admin_redirect_url(source_view, restored_count=restored_count), status_code=303)
 
     @app.post("/admin/tickets/bulk-hard-delete")
     def bulk_hard_delete_tickets_route(
         request: Request,
-        current_user: Dict[str, object] = Depends(require_permission("ticket.update")),
+        current_user: Dict[str, object] = Depends(require_permission("ticket.hard_delete")),
         filters: Dict[str, str] = Depends(admin_ticket_filters_from_form),
         ticket_ids: Optional[List[int]] = Form(None),
         select_scope: str = Form("selected"),
@@ -10749,7 +10959,7 @@ def create_app() -> FastAPI:
     def archive_ticket_route(
         request: Request,
         ticket_id: int,
-        current_user: Dict[str, object] = Depends(require_permission("ticket.update")),
+        current_user: Dict[str, object] = Depends(require_permission("ticket.archive")),
         archive_reason: str = Form("后台手动归档"),
         return_url: str = Form(""),
         csrf_token: str = Form(""),
@@ -10758,13 +10968,14 @@ def create_app() -> FastAPI:
         require_admin_csrf(request, csrf_token)
         require_ticket_scope_access(current_user, ticket_id)
         archive_ticket(ticket_id, admin, archive_reason)
+        record_operation_log(admin, "ticket.archive", "ticket", ticket_id, {"reason": archive_reason}, request)
         return RedirectResponse(url=safe_admin_return_url(return_url or "/admin"), status_code=303)
 
     @app.post("/admin/ticket/{ticket_id}/unarchive")
     def unarchive_ticket_route(
         request: Request,
         ticket_id: int,
-        current_user: Dict[str, object] = Depends(require_permission("ticket.update")),
+        current_user: Dict[str, object] = Depends(require_permission("ticket.restore")),
         return_url: str = Form(""),
         csrf_token: str = Form(""),
     ) -> RedirectResponse:
@@ -10772,13 +10983,14 @@ def create_app() -> FastAPI:
         require_admin_csrf(request, csrf_token)
         require_ticket_scope_access(current_user, ticket_id, "archive")
         unarchive_ticket(ticket_id, admin)
+        record_operation_log(admin, "ticket.restore", "ticket", ticket_id, {"mode": "unarchive"}, request)
         return RedirectResponse(url=safe_admin_return_url(return_url or "/admin/archive"), status_code=303)
 
     @app.post("/admin/ticket/{ticket_id}/delete")
     def delete_ticket_route(
         request: Request,
         ticket_id: int,
-        current_user: Dict[str, object] = Depends(require_permission("ticket.update")),
+        current_user: Dict[str, object] = Depends(require_permission("ticket.delete")),
         delete_reason: str = Form(""),
         return_url: str = Form(""),
         csrf_token: str = Form(""),
@@ -10801,20 +11013,21 @@ def create_app() -> FastAPI:
     def restore_ticket_route(
         request: Request,
         ticket_id: int,
-        current_user: Dict[str, object] = Depends(require_permission("ticket.update")),
+        current_user: Dict[str, object] = Depends(require_permission("ticket.restore")),
         csrf_token: str = Form(""),
     ) -> RedirectResponse:
         admin = str(current_user.get("username") or "")
         require_admin_csrf(request, csrf_token)
         require_ticket_scope_access(current_user, ticket_id, "deleted")
         restore_ticket(ticket_id, admin)
+        record_operation_log(admin, "ticket.restore", "ticket", ticket_id, {"mode": "restore"}, request)
         return RedirectResponse(url="/admin/trash", status_code=303)
 
     @app.post("/admin/ticket/{ticket_id}/hard-delete")
     def hard_delete_ticket_route(
         request: Request,
         ticket_id: int,
-        current_user: Dict[str, object] = Depends(require_permission("ticket.update")),
+        current_user: Dict[str, object] = Depends(require_permission("ticket.hard_delete")),
         confirm_delete: str = Form(""),
         csrf_token: str = Form(""),
     ) -> RedirectResponse:
@@ -10838,14 +11051,16 @@ def create_app() -> FastAPI:
     def add_ticket_participant_route(
         request: Request,
         ticket_id: int,
-        admin: str = Depends(require_admin),
+        current_user: Dict[str, object] = Depends(require_permission("ticket.assign")),
         participant_type: str = Form(""),
         participant_name: str = Form(""),
         role: str = Form(""),
         return_url: str = Form(""),
         csrf_token: str = Form(""),
     ) -> RedirectResponse:
+        admin = str(current_user.get("username") or "")
         require_admin_csrf(request, csrf_token)
+        require_ticket_scope_access(current_user, ticket_id)
         ticket = fetch_ticket(ticket_id)
         if not ticket:
             raise HTTPException(status_code=404, detail="工单不存在")
@@ -10853,6 +11068,14 @@ def create_app() -> FastAPI:
             create_ticket_participant(ticket, participant_type, participant_name, role, admin)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        record_operation_log(
+            admin,
+            "ticket.participant.create",
+            "ticket",
+            ticket_id,
+            {"participant_type": participant_type, "participant_name": participant_name, "role": role},
+            request,
+        )
         return RedirectResponse(url=build_ticket_detail_url(ticket_id, return_url, saved="1"), status_code=303)
 
     @app.post("/admin/ticket/{ticket_id}/participant/{participant_id}/delete")
@@ -10860,11 +11083,13 @@ def create_app() -> FastAPI:
         request: Request,
         ticket_id: int,
         participant_id: int,
-        admin: str = Depends(require_admin),
+        current_user: Dict[str, object] = Depends(require_permission("ticket.assign")),
         return_url: str = Form(""),
         csrf_token: str = Form(""),
     ) -> RedirectResponse:
+        admin = str(current_user.get("username") or "")
         require_admin_csrf(request, csrf_token)
+        require_ticket_scope_access(current_user, ticket_id)
         soft_delete_ticket_child(
             "ticket_participants",
             participant_id,
@@ -10873,19 +11098,22 @@ def create_app() -> FastAPI:
             "移除协作人",
             "participant_name",
         )
+        record_operation_log(admin, "ticket.participant.delete", "ticket", ticket_id, {"participant_id": participant_id}, request)
         return RedirectResponse(url=build_ticket_detail_url(ticket_id, return_url, saved="1"), status_code=303)
 
     @app.post("/admin/ticket/{ticket_id}/comments")
     def add_admin_ticket_comment(
         request: Request,
         ticket_id: int,
-        admin: str = Depends(require_admin),
+        current_user: Dict[str, object] = Depends(require_permission("ticket.comment")),
         content: str = Form(""),
         visibility: str = Form("public"),
         return_url: str = Form(""),
         csrf_token: str = Form(""),
     ) -> RedirectResponse:
+        admin = str(current_user.get("username") or "")
         require_admin_csrf(request, csrf_token)
+        require_ticket_scope_access(current_user, ticket_id)
         ticket = fetch_ticket(ticket_id)
         if not ticket:
             raise HTTPException(status_code=404, detail="工单不存在")
@@ -10893,6 +11121,7 @@ def create_app() -> FastAPI:
             create_ticket_comment(ticket, "admin", admin, content, visibility, admin)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        record_operation_log(admin, "ticket.comment.create", "ticket", ticket_id, {"visibility": visibility}, request)
         return RedirectResponse(url=build_ticket_detail_url(ticket_id, return_url, saved="1"), status_code=303)
 
     @app.post("/admin/ticket/{ticket_id}/comment/{comment_id}/delete")
@@ -10900,19 +11129,22 @@ def create_app() -> FastAPI:
         request: Request,
         ticket_id: int,
         comment_id: int,
-        admin: str = Depends(require_admin),
+        current_user: Dict[str, object] = Depends(require_any_permission(["ticket.comment", "ticket.delete"])),
         return_url: str = Form(""),
         csrf_token: str = Form(""),
     ) -> RedirectResponse:
+        admin = str(current_user.get("username") or "")
         require_admin_csrf(request, csrf_token)
+        require_ticket_scope_access(current_user, ticket_id)
         soft_delete_ticket_child("ticket_comments", comment_id, ticket_id, admin, "删除评论", "content")
+        record_operation_log(admin, "ticket.comment.delete", "ticket", ticket_id, {"comment_id": comment_id}, request)
         return RedirectResponse(url=build_ticket_detail_url(ticket_id, return_url, saved="1"), status_code=303)
 
     @app.post("/admin/ticket/{ticket_id}/tasks")
     def add_ticket_task_route(
         request: Request,
         ticket_id: int,
-        admin: str = Depends(require_admin),
+        current_user: Dict[str, object] = Depends(require_permission("ticket.update")),
         title: str = Form(""),
         assignee: str = Form(""),
         status: str = Form("待处理"),
@@ -10920,7 +11152,9 @@ def create_app() -> FastAPI:
         return_url: str = Form(""),
         csrf_token: str = Form(""),
     ) -> RedirectResponse:
+        admin = str(current_user.get("username") or "")
         require_admin_csrf(request, csrf_token)
+        require_ticket_scope_access(current_user, ticket_id)
         ticket = fetch_ticket(ticket_id)
         if not ticket:
             raise HTTPException(status_code=404, detail="工单不存在")
@@ -10928,6 +11162,7 @@ def create_app() -> FastAPI:
             create_ticket_task(ticket, title, assignee, status, due_date, admin)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        record_operation_log(admin, "ticket.task.create", "ticket", ticket_id, {"title": title, "assignee": assignee, "status": status}, request)
         return RedirectResponse(url=build_ticket_detail_url(ticket_id, return_url, saved="1"), status_code=303)
 
     @app.post("/admin/ticket/{ticket_id}/task/{task_id}/delete")
@@ -10935,12 +11170,15 @@ def create_app() -> FastAPI:
         request: Request,
         ticket_id: int,
         task_id: int,
-        admin: str = Depends(require_admin),
+        current_user: Dict[str, object] = Depends(require_any_permission(["ticket.update", "ticket.delete"])),
         return_url: str = Form(""),
         csrf_token: str = Form(""),
     ) -> RedirectResponse:
+        admin = str(current_user.get("username") or "")
         require_admin_csrf(request, csrf_token)
+        require_ticket_scope_access(current_user, ticket_id)
         soft_delete_ticket_child("ticket_tasks", task_id, ticket_id, admin, "删除子任务", "title")
+        record_operation_log(admin, "ticket.task.delete", "ticket", ticket_id, {"task_id": task_id}, request)
         return RedirectResponse(url=build_ticket_detail_url(ticket_id, return_url, saved="1"), status_code=303)
 
     @app.post("/admin/ticket/{ticket_id}/tasks/{task_id}")
@@ -10948,7 +11186,7 @@ def create_app() -> FastAPI:
         request: Request,
         ticket_id: int,
         task_id: int,
-        admin: str = Depends(require_admin),
+        current_user: Dict[str, object] = Depends(require_permission("ticket.update")),
         title: str = Form(""),
         assignee: str = Form(""),
         status: str = Form("待处理"),
@@ -10956,7 +11194,9 @@ def create_app() -> FastAPI:
         return_url: str = Form(""),
         csrf_token: str = Form(""),
     ) -> RedirectResponse:
+        admin = str(current_user.get("username") or "")
         require_admin_csrf(request, csrf_token)
+        require_ticket_scope_access(current_user, ticket_id)
         ticket = fetch_ticket(ticket_id)
         if not ticket:
             raise HTTPException(status_code=404, detail="工单不存在")
@@ -10964,6 +11204,7 @@ def create_app() -> FastAPI:
             update_ticket_task(ticket, task_id, title, assignee, status, due_date, admin)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        record_operation_log(admin, "ticket.task.update", "ticket", ticket_id, {"task_id": task_id, "status": status}, request)
         return RedirectResponse(url=build_ticket_detail_url(ticket_id, return_url, saved="1"), status_code=303)
 
     @app.post("/admin/ticket/{ticket_id}/supplement/{supplement_id}/delete")
@@ -10971,11 +11212,13 @@ def create_app() -> FastAPI:
         request: Request,
         ticket_id: int,
         supplement_id: int,
-        admin: str = Depends(require_admin),
+        current_user: Dict[str, object] = Depends(require_permission("ticket.update")),
         return_url: str = Form(""),
         csrf_token: str = Form(""),
     ) -> RedirectResponse:
+        admin = str(current_user.get("username") or "")
         require_admin_csrf(request, csrf_token)
+        require_ticket_scope_access(current_user, ticket_id)
         soft_delete_ticket_child(
             "ticket_supplements",
             supplement_id,
@@ -10985,6 +11228,7 @@ def create_app() -> FastAPI:
             "note",
             "门店补充资料",
         )
+        record_operation_log(admin, "ticket.supplement.delete", "ticket", ticket_id, {"supplement_id": supplement_id}, request)
         return RedirectResponse(url=build_ticket_detail_url(ticket_id, return_url, saved="1"), status_code=303)
 
     @app.post("/admin/ticket/{ticket_id}")
@@ -11075,13 +11319,15 @@ def create_app() -> FastAPI:
     async def add_attachments(
         request: Request,
         ticket_id: int,
-        admin: str = Depends(require_admin),
+        current_user: Dict[str, object] = Depends(require_permission("ticket.update")),
         new_images: Optional[List[UploadFile]] = File(None),
         new_files: Optional[List[UploadFile]] = File(None),
         return_url: str = Form(""),
         csrf_token: str = Form(""),
     ) -> HTMLResponse:
+        admin = str(current_user.get("username") or "")
         require_admin_csrf(request, csrf_token)
+        require_ticket_scope_access(current_user, ticket_id)
         ticket = fetch_ticket(ticket_id)
         if not ticket:
             raise HTTPException(status_code=404, detail="工单不存在")
@@ -11118,6 +11364,14 @@ def create_app() -> FastAPI:
                 return_url=return_url,
                 status_code=500,
             )
+        record_operation_log(
+            admin,
+            "ticket.attachment.create",
+            "ticket",
+            ticket_id,
+            {"image_count": len(prepared_images), "file_count": len(prepared_files)},
+            request,
+        )
         return RedirectResponse(url=build_ticket_detail_url(ticket_id, return_url, attachments_saved="1"), status_code=303)
 
     @app.post("/admin/ticket/{ticket_id}/image/{image_id}/delete")
@@ -11125,11 +11379,13 @@ def create_app() -> FastAPI:
         request: Request,
         ticket_id: int,
         image_id: int,
-        admin: str = Depends(require_admin),
+        current_user: Dict[str, object] = Depends(require_permission("ticket.delete")),
         return_url: str = Form(""),
         csrf_token: str = Form(""),
     ) -> RedirectResponse:
+        admin = str(current_user.get("username") or "")
         require_admin_csrf(request, csrf_token)
+        require_ticket_scope_access(current_user, ticket_id)
         image = fetch_ticket_image(image_id, ticket_id)
         if not image:
             raise HTTPException(status_code=404, detail="图片不存在")
@@ -11154,6 +11410,7 @@ def create_app() -> FastAPI:
                 physical_path.unlink(missing_ok=True)
             except OSError:
                 pass
+        record_operation_log(admin, "ticket.attachment.delete", "ticket", ticket_id, {"image_id": image_id}, request)
         return RedirectResponse(url=build_ticket_detail_url(ticket_id, return_url, saved="1"), status_code=303)
 
     @app.post("/admin/ticket/{ticket_id}/file/{file_id}/delete")
@@ -11161,11 +11418,13 @@ def create_app() -> FastAPI:
         request: Request,
         ticket_id: int,
         file_id: int,
-        admin: str = Depends(require_admin),
+        current_user: Dict[str, object] = Depends(require_permission("ticket.delete")),
         return_url: str = Form(""),
         csrf_token: str = Form(""),
     ) -> RedirectResponse:
+        admin = str(current_user.get("username") or "")
         require_admin_csrf(request, csrf_token)
+        require_ticket_scope_access(current_user, ticket_id)
         ticket_file = fetch_ticket_file(file_id, ticket_id)
         if not ticket_file:
             raise HTTPException(status_code=404, detail="文件不存在")
@@ -11191,6 +11450,7 @@ def create_app() -> FastAPI:
                 physical_path.unlink(missing_ok=True)
             except OSError:
                 pass
+        record_operation_log(admin, "ticket.attachment.delete", "ticket", ticket_id, {"file_id": file_id}, request)
         return RedirectResponse(url=build_ticket_detail_url(ticket_id, return_url, saved="1"), status_code=303)
 
     @app.get("/admin/uploads/{filename:path}")

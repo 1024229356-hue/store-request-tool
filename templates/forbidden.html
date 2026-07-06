@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>权限不足</title>
+  <link rel="stylesheet" href="/static/style.css?v={{ asset_version }}">
+</head>
+<body class="admin-forbidden-page page-admin">
+  <main class="admin-shell">
+    <section class="work-card account-denied-card">
+      <p class="eyebrow">403</p>
+      <h1>权限不足</h1>
+      <p>缺少权限：{{ missing_permission }}</p>
+      <p>当前账号：{{ admin_user or '-' }}</p>
+      <div class="form-actions">
+        <button class="ghost-button" type="button" onclick="history.back()">返回上一页</button>
+        <a class="primary-button" href="/admin/dashboard">返回业务总览</a>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

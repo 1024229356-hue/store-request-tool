@@ -12,6 +12,7 @@
 <div class="alert alert-success">已将 {{ deleted_count }} 条工单移入回收站。</div>
 {% endif %}
 
+{% if has_perm('ticket.delete') %}
 <section class="admin-section work-card cleanup-section">
   <div class="section-heading admin-section-heading">
     <h2>预览将删除的工单</h2>
@@ -116,4 +117,12 @@
   </form>
   {% endif %}
 </section>
+{% else %}
+<section class="admin-section work-card cleanup-section">
+  <div class="section-heading admin-section-heading">
+    <h2>权限不足</h2>
+    <p>当前账号不能执行测试数据清理。</p>
+  </div>
+</section>
+{% endif %}
 {% endblock %}

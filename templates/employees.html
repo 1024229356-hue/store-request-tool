@@ -21,7 +21,9 @@
       <p class="subtle">主门店用于归属识别；绑定门店用于排班授权，一个员工可以支援多个门店。</p>
     </div>
     <div class="schedule-action-buttons">
+      {% if has_perm('employee.create') %}
       <button class="primary-button compact" type="button" data-drawer-open="employee-create-drawer">新增员工</button>
+      {% endif %}
       <a class="ghost-button compact" href="/admin/schedules">回到排班</a>
     </div>
   </div>
@@ -36,8 +38,12 @@
         <span>数据范围</span>
         <select name="scope">
           <option value="active" {% if filters.scope == 'active' %}selected{% endif %}>在册员工</option>
+          {% if has_perm('employee.archive') %}
           <option value="archive" {% if filters.scope == 'archive' %}selected{% endif %}>归档员工</option>
+          {% endif %}
+          {% if has_perm('employee.delete') or has_perm('employee.hard_delete') %}
           <option value="trash" {% if filters.scope == 'trash' %}selected{% endif %}>员工回收站</option>
+          {% endif %}
         </select>
       </label>
       <label>
@@ -98,40 +104,54 @@
           </dl>
           <div class="employee-card-actions">
             {% if filters.scope == 'active' %}
+            {% if has_perm('employee.update') %}
             <button class="ghost-button compact" type="button" data-drawer-open="employee-drawer-{{ employee.id }}">编辑</button>
             <form method="post" action="/admin/employees/{{ employee.id }}/disable" onsubmit="return confirm('确认将该员工标记为离职吗？');" data-feedback-form data-loading-label="停用中...">
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
               <button class="danger-button compact" type="submit">离职</button>
             </form>
+            {% endif %}
+            {% if has_perm('employee.archive') %}
             <form method="post" action="/admin/employees/{{ employee.id }}/archive" onsubmit="return confirm('确认归档该员工吗？');" data-feedback-form data-loading-label="归档中...">
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
               <input type="hidden" name="archive_reason" value="员工管理归档">
               <button class="ghost-button compact" type="submit">归档</button>
             </form>
+            {% endif %}
+            {% if has_perm('employee.delete') %}
             <form method="post" action="/admin/employees/{{ employee.id }}/delete" onsubmit="return confirm('确认将该员工移入回收站吗？');" data-feedback-form data-loading-label="移入中...">
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
               <input type="hidden" name="delete_reason" value="员工管理移入回收站">
               <button class="danger-button compact" type="submit">移入回收站</button>
             </form>
+            {% endif %}
             {% elif filters.scope == 'archive' %}
+            {% if has_perm('employee.archive') %}
             <form method="post" action="/admin/employees/{{ employee.id }}/unarchive" data-feedback-form data-loading-label="恢复中...">
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
               <button class="primary-button compact" type="submit">取消归档</button>
             </form>
+            {% endif %}
+            {% if has_perm('employee.delete') %}
             <form method="post" action="/admin/employees/{{ employee.id }}/delete" onsubmit="return confirm('确认将该员工移入回收站吗？');" data-feedback-form data-loading-label="移入中...">
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
               <button class="danger-button compact" type="submit">移入回收站</button>
             </form>
+            {% endif %}
             {% else %}
+            {% if has_perm('employee.delete') %}
             <form method="post" action="/admin/employees/{{ employee.id }}/restore" data-feedback-form data-loading-label="恢复中...">
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
               <button class="primary-button compact" type="submit">恢复</button>
             </form>
+            {% endif %}
+            {% if has_perm('employee.hard_delete') %}
             <form method="post" action="/admin/employees/{{ employee.id }}/hard-delete" onsubmit="return confirm('永久删除不可恢复，确认继续吗？');" data-feedback-form data-loading-label="删除中...">
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
               <input type="hidden" name="confirm_delete" value="1">
               <button class="danger-button compact" type="submit">永久删除</button>
             </form>
+            {% endif %}
             {% endif %}
           </div>
         </article>
@@ -152,6 +172,7 @@
   </nav>
 </section>
 
+{% if has_perm('employee.create') %}
 <aside class="employee-drawer drawer-overlay" id="employee-create-drawer" data-drawer="employee-create-drawer" hidden>
   <div class="drawer-panel">
     <header>
@@ -197,8 +218,10 @@
     </form>
   </div>
 </aside>
+{% endif %}
 
 {% for employee in employees %}
+{% if has_perm('employee.update') %}
 <aside class="employee-drawer drawer-overlay" id="employee-drawer-{{ employee.id }}" data-drawer="employee-drawer-{{ employee.id }}" hidden>
   <div class="drawer-panel">
     <header>
@@ -248,5 +271,6 @@
     </form>
   </div>
 </aside>
+{% endif %}
 {% endfor %}
 {% endblock %}

@@ -28,9 +28,14 @@
       <small>PermissionService</small>
     </article>
     <article class="stat-card">
-      <span>未接入权限系统</span>
-      <strong>{{ uncontrolled_routes|length }}</strong>
-      <small>需要分批收敛</small>
+      <span>剩余未接入路由数量</span>
+      <strong>{{ remaining_uncontrolled_count }}</strong>
+      <small>权限总览清零</small>
+    </article>
+    <article class="stat-card">
+      <span>高风险 POST 未接入：{{ high_risk_uncontrolled_count }}</span>
+      <strong>{{ high_risk_uncontrolled_count }}</strong>
+      <small>写操作必须为 0</small>
     </article>
   </div>
 </section>
@@ -110,6 +115,46 @@
             <span class="status-badge inactive-badge">路由缺失</span>
             {% endif %}
           </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="section-heading admin-section-heading">
+  <h2>后台路由覆盖</h2>
+  <p>所有后台路由按 PermissionService、登录保护 API、未接入三类展示。</p>
+</section>
+
+<section class="work-card">
+  <div class="table-wrapper">
+    <table class="admin-table">
+      <thead>
+        <tr>
+          <th>覆盖状态</th>
+          <th>方法</th>
+          <th>路由</th>
+          <th>权限点</th>
+          <th>说明</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for route in admin_route_items %}
+        <tr>
+          <td>
+            {% if route.coverage_status == 'permission' %}
+            <span class="status-badge assignable-badge">{{ route.coverage_label }}</span>
+            {% elif route.coverage_status == 'login_protected' %}
+            <span class="status-badge">{{ route.coverage_label }}</span>
+            {% else %}
+            <span class="status-badge inactive-badge">{{ route.coverage_label }}</span>
+            {% endif %}
+          </td>
+          <td>{{ route.method }}</td>
+          <td><small>{{ route.path }}</small></td>
+          <td>{% if route.permission %}<span class="status-badge role-badge">{{ route.permission }}</span>{% else %}-{% endif %}</td>
+          <td>{{ route.module }} · {{ route.label }}</td>
         </tr>
         {% endfor %}
       </tbody>

@@ -292,6 +292,13 @@ def admin_post(client, url, data=None, **kwargs):
     return client.post(url, data=payload, **kwargs)
 
 
+def assert_html_forbidden(response):
+    assert response.status_code == 403
+    assert "text/html" in response.headers.get("content-type", "")
+    assert "application/json" not in response.headers.get("content-type", "")
+    assert "权限不足" in response.text
+
+
 def ticket_action_logs(tmp_path, ticket_id):
     return [
         row
@@ -1342,6 +1349,226 @@ def test_phase3_permission_and_audit_legacy_paths_are_consolidated():
     assert "def apply_data_scope(" in source
     assert "if not has_permission(" not in source
     assert source.count("INSERT INTO admin_operation_logs") == 1
+
+
+def test_phase4_write_routes_require_permissions_and_hide_buttons(tmp_path, monkeypatch):
+    client, main = build_client(
+        tmp_path,
+        monkeypatch,
+        admin_users="admin:123456,employee_viewer:123456,schedule_viewer:123456,ticket_viewer:123456,trash_viewer:123456,cleanup_viewer:123456",
+    )
+    employee_role = create_role_with_permissions(tmp_path, "phase4-employee-view", ["employee.view"])
+    schedule_role = create_role_with_permissions(tmp_path, "phase4-schedule-view", ["schedule.view"])
+    ticket_role = create_role_with_permissions(tmp_path, "phase4-ticket-view", ["ticket.view"])
+    trash_role = create_role_with_permissions(tmp_path, "phase4-trash-view", ["ticket.view_trash"])
+    cleanup_role = create_role_with_permissions(tmp_path, "phase4-cleanup-view", ["ticket.view"])
+    update_admin_user_access(tmp_path, "employee_viewer", employee_role)
+    update_admin_user_access(tmp_path, "schedule_viewer", schedule_role)
+    update_admin_user_access(tmp_path, "ticket_viewer", ticket_role)
+    update_admin_user_access(tmp_path, "trash_viewer", trash_role)
+    update_admin_user_access(tmp_path, "cleanup_viewer", cleanup_role)
+
+    employee_id = main.create_employee("phase4 existing employee", "南京门东店", "店员", "", "在职", main.load_app_config())
+    shift_id = main.create_shift_type("phase4 schedule shift", "09:00", "18:00", "8", "#2563eb", store_name="南京门东店", config=main.load_app_config())
+    main.bulk_upsert_schedules("南京门东店", [employee_id], ["2026-07-08"], shift_id, "", False, "admin", 20)
+    submit_ticket(client, description="phase4 collaboration ticket")
+    submit_ticket(client, description="phase4 trash ticket")
+    main.soft_delete_ticket(2, "admin", "phase4 trash setup")
+
+    assert_login_success(login_admin(client, "employee_viewer", "123456"))
+    employees_page = client.get("/admin/employees")
+    assert employees_page.status_code == 200
+    assert 'data-drawer-open="employee-create-drawer"' not in employees_page.text
+    assert f'action="/admin/employees/{employee_id}/update"' not in employees_page.text
+    assert f'action="/admin/employees/{employee_id}/delete"' not in employees_page.text
+    employee_csrf = csrf_token_for(client, "/admin/employees")
+    assert_html_forbidden(
+        client.post(
+            "/admin/employees",
+            data={
+                "csrf_token": employee_csrf,
+                "employee_name": "phase4 blocked employee",
+                "store_name": "南京门东店",
+                "primary_store_name": "南京门东店",
+                "store_names": ["南京门东店"],
+                "role": "店员",
+                "status": "在职",
+            },
+        )
+    )
+    assert_html_forbidden(
+        client.post(
+            f"/admin/employees/{employee_id}/update",
+            data={
+                "csrf_token": employee_csrf,
+                "employee_name": "phase4 blocked update",
+                "store_name": "南京门东店",
+                "primary_store_name": "南京门东店",
+                "store_names": ["南京门东店"],
+                "role": "店员",
+                "status": "在职",
+            },
+        )
+    )
+    assert_html_forbidden(client.post(f"/admin/employees/{employee_id}/delete", data={"csrf_token": employee_csrf}))
+    assert not any(row["employee_name"] == "phase4 blocked employee" for row in rows_for(tmp_path, "employees"))
+
+    assert_login_success(login_admin(client, "schedule_viewer", "123456"))
+    schedules_page = client.get("/admin/schedules?store_names=南京门东店&month=2026-07")
+    assert schedules_page.status_code == 200
+    assert 'method="post" action="/admin/schedules"' not in schedules_page.text
+    assert 'action="/admin/schedules/1/delete"' not in schedules_page.text
+    schedule_csrf = csrf_token_for(client, "/admin/schedules?store_names=南京门东店&month=2026-07")
+    assert_html_forbidden(
+        client.post(
+            "/admin/schedules",
+            data={
+                "csrf_token": schedule_csrf,
+                "store_name": "南京门东店",
+                "store_names": ["南京门东店"],
+                "employee_ids": [str(employee_id)],
+                "schedule_dates": ["2026-07-09"],
+                "shift_type_id": str(shift_id),
+            },
+        )
+    )
+    assert_html_forbidden(client.post("/admin/schedules/1/delete", data={"csrf_token": schedule_csrf}))
+
+    assert_login_success(login_admin(client, "ticket_viewer", "123456"))
+    detail_page = client.get("/admin/ticket/1")
+    assert detail_page.status_code == 200
+    assert 'action="/admin/ticket/1/comments"' not in detail_page.text
+    assert 'action="/admin/ticket/1/participants"' not in detail_page.text
+    ticket_csrf = csrf_token_for(client, "/admin/ticket/1")
+    assert_html_forbidden(client.post("/admin/ticket/1/comments", data={"csrf_token": ticket_csrf, "content": "blocked internal comment"}))
+    assert_html_forbidden(
+        client.post(
+            "/admin/ticket/1/participants",
+            data={"csrf_token": ticket_csrf, "participant_type": "team", "participant_name": "blocked partner", "role": "协作处理"},
+        )
+    )
+
+    assert_login_success(login_admin(client, "trash_viewer", "123456"))
+    trash_page = client.get("/admin/trash")
+    assert trash_page.status_code == 200
+    assert 'formaction="/admin/tickets/bulk-hard-delete"' not in trash_page.text
+    assert 'form="hard-delete-ticket-2"' not in trash_page.text
+    trash_csrf = csrf_token_for(client, "/admin/trash")
+    assert_html_forbidden(client.post("/admin/ticket/2/hard-delete", data={"csrf_token": trash_csrf, "confirm_delete": "1"}))
+
+    assert_login_success(login_admin(client, "cleanup_viewer", "123456"))
+    assert_html_forbidden(client.post("/admin/cleanup/preview", data={"csrf_token": csrf_token_for(client, "/admin")}))
+
+
+def test_phase4_audit_service_records_key_write_operations(tmp_path, monkeypatch):
+    client, main = build_client(tmp_path, monkeypatch, admin_users="admin:123456")
+    assert_login_success(login_admin(client, "admin", "123456"))
+
+    employee_csrf = csrf_token_for(client, "/admin/employees")
+    create_employee_response = client.post(
+        "/admin/employees",
+        data={
+            "csrf_token": employee_csrf,
+            "employee_name": "phase4 audited employee",
+            "store_name": "南京门东店",
+            "primary_store_name": "南京门东店",
+            "store_names": ["南京门东店"],
+            "role": "店员",
+            "status": "在职",
+        },
+        follow_redirects=False,
+    )
+    assert create_employee_response.status_code == 303
+    employee_id = rows_for(tmp_path, "employees")[0]["id"]
+    update_employee_response = client.post(
+        f"/admin/employees/{employee_id}/update",
+        data={
+            "csrf_token": employee_csrf,
+            "employee_name": "phase4 audited employee updated",
+            "store_name": "南京门东店",
+            "primary_store_name": "南京门东店",
+            "store_names": ["南京门东店"],
+            "role": "店员",
+            "status": "在职",
+        },
+        follow_redirects=False,
+    )
+    assert update_employee_response.status_code == 303
+
+    shift_id = main.create_shift_type("phase4 audited shift", "09:00", "18:00", "8", "#2563eb", store_name="南京门东店", config=main.load_app_config())
+    schedule_csrf = csrf_token_for(client, "/admin/schedules?store_names=南京门东店&month=2026-07")
+    create_schedule_response = client.post(
+        "/admin/schedules",
+        data={
+            "csrf_token": schedule_csrf,
+            "store_name": "南京门东店",
+            "store_names": ["南京门东店"],
+            "employee_ids": [str(employee_id)],
+            "schedule_dates": ["2026-07-10"],
+            "shift_type_id": str(shift_id),
+        },
+        follow_redirects=False,
+    )
+    assert create_schedule_response.status_code == 303
+    delete_schedule_response = client.post("/admin/schedules/1/delete", data={"csrf_token": schedule_csrf}, follow_redirects=False)
+    assert delete_schedule_response.status_code == 303
+
+    submit_ticket(client, description="phase4 audited collaboration")
+    ticket_csrf = csrf_token_for(client, "/admin/ticket/1")
+    comment_response = client.post(
+        "/admin/ticket/1/comments",
+        data={"csrf_token": ticket_csrf, "content": "phase4 audited comment", "visibility": "internal"},
+        follow_redirects=False,
+    )
+    participant_response = client.post(
+        "/admin/ticket/1/participants",
+        data={"csrf_token": ticket_csrf, "participant_type": "team", "participant_name": "phase4 audited partner", "role": "协作处理"},
+        follow_redirects=False,
+    )
+    assert comment_response.status_code == 303
+    assert participant_response.status_code == 303
+
+    actions = [row["action"] for row in rows_for(tmp_path, "admin_operation_logs")]
+    assert "employee.create" in actions
+    assert "employee.update" in actions
+    assert "schedule.create" in actions
+    assert "schedule.delete" in actions
+    assert "ticket.comment.create" in actions
+    assert "ticket.participant.create" in actions
+
+
+def test_phase4_permission_overview_has_no_high_risk_uncontrolled_posts(tmp_path, monkeypatch):
+    client, main = build_client(tmp_path, monkeypatch, admin_users="admin:123456")
+    context = main.permission_overview_context(main.app)
+    assert context["high_risk_uncontrolled_count"] == 0
+    assert all(
+        route["coverage_status"] != "uncontrolled"
+        for route in context["admin_route_items"]
+        if route["method"] == "POST"
+    )
+
+    assert_login_success(login_admin(client, "admin", "123456"))
+    overview = client.get("/admin/permission-overview")
+    assert overview.status_code == 200
+    assert "剩余未接入路由数量" in overview.text
+    assert "高风险 POST 未接入：0" in overview.text
+    assert "登录保护 API" in overview.text
+
+
+def test_phase4_templates_use_has_perm_for_privileged_controls():
+    expectations = {
+        "templates/base_admin.html": ["account.view", "role.view", "system.route_health", "ticket.view_trash", "ticket.delete"],
+        "templates/admin.html": ["ticket.export", "ticket.archive", "ticket.delete"],
+        "templates/ticket_detail.html": ["ticket.comment", "ticket.assign", "ticket.update", "ticket.delete", "ticket.archive", "ticket.hard_delete"],
+        "templates/employees.html": ["employee.create", "employee.update", "employee.archive", "employee.delete", "employee.hard_delete"],
+        "templates/schedules.html": ["schedule.create", "schedule.delete", "schedule.export"],
+        "templates/trash.html": ["ticket.restore", "ticket.hard_delete", "ticket.delete"],
+        "templates/cleanup.html": ["ticket.delete"],
+    }
+    for relative_path, permissions in expectations.items():
+        text = (PROJECT_DIR / relative_path).read_text(encoding="utf-8")
+        for permission in permissions:
+            assert f"has_perm('{permission}')" in text, f"{relative_path} missing {permission}"
 
 
 def test_ticket_detail_workbench_comment_modes_and_close_prompt(tmp_path, monkeypatch):
@@ -2407,6 +2634,8 @@ def test_base_admin_navigation_uses_only_canonical_admin_paths():
         "/admin/schedules",
         "/admin/settings",
         "/admin/account",
+        "/admin/roles",
+        "/admin/route-health",
         "/admin/system",
         "/admin/embedded-pages",
     }

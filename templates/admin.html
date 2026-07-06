@@ -6,12 +6,16 @@
 {% from "components/modal.html" import modal %}
 
 {% block topbar_actions %}
+{% if has_perm('ticket.create') %}
 <button class="primary-button compact" type="button" data-modal-open="ticket-create-modal">新建工单</button>
-{% if can_export_ticket %}
+{% endif %}
+{% if has_perm('ticket.export') and can_export_ticket %}
 <a class="quick-action-button" href="{{ export_url }}">导出 Excel</a>
 {% endif %}
 <a class="ghost-button compact" href="/admin/dashboard">查看统计</a>
+{% if has_perm('ticket.delete') %}
 <a class="ghost-button compact" href="/admin/cleanup">清理测试数据</a>
+{% endif %}
 {% endblock %}
 
 {% block content %}
@@ -25,6 +29,7 @@
 <div class="alert alert-error">{{ error }}</div>
 {% endif %}
 
+{% if has_perm('ticket.create') %}
 {% call modal("ticket-create-modal", "新建工单") %}
 <form class="form-stack modal-form ticket-create-modal-form" method="post" action="/admin/tickets/create" enctype="multipart/form-data" data-admin-ticket-create-form>
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -36,6 +41,7 @@
   </footer>
 </form>
 {% endcall %}
+{% endif %}
 
 <section class="stats-section work-card" aria-label="统计概览">
   <div class="section-heading admin-section-heading">
@@ -171,6 +177,10 @@
   </form>
 </section>
 
+{% set can_bulk_archive = has_perm('ticket.archive') %}
+{% set can_bulk_delete = has_perm('ticket.delete') %}
+{% set can_bulk_ticket = can_bulk_archive or can_bulk_delete %}
+{% if can_bulk_ticket %}
 <form id="bulk-ticket-form" class="bulk-ticket-form" method="post" action="/admin/tickets/bulk-archive" data-bulk-form data-bulk-root data-filtered-count="{{ pagination.total_count }}">
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
   <input name="select_scope" value="selected" type="hidden" data-select-scope>
@@ -191,16 +201,23 @@
     <button class="ghost-button compact" type="button" data-select-current-page-button>全选当前页</button>
     <button class="ghost-button compact" type="button" data-clear-selection>清空选择</button>
     <button class="ghost-button compact" type="button" data-select-filtered>按当前筛选条件选择全部结果</button>
+    {% if can_bulk_archive %}
     <button class="secondary-button compact" type="submit" formaction="/admin/tickets/bulk-archive" data-bulk-submit data-confirm-selected="确认将选中工单归档吗？" data-confirm-filtered="确认对当前筛选条件下全部 {{ pagination.total_count }} 条工单执行归档吗？">批量归档</button>
+    {% endif %}
+    {% if can_bulk_delete %}
     <button class="danger-button compact" type="submit" formaction="/admin/tickets/bulk-delete" data-bulk-submit data-confirm-selected="确认将选中工单移入回收站吗？" data-confirm-filtered="确认对当前筛选条件下全部 {{ pagination.total_count }} 条工单执行移入回收站吗？">批量移入回收站</button>
+    {% endif %}
   </div>
 </section>
+{% endif %}
 
 <section class="table-wrap work-card">
   <table class="ticket-table erp-table">
     <thead>
       <tr>
+        {% if can_bulk_ticket %}
         <th class="ticket-select-cell"><input class="ticket-select-all" type="checkbox" data-select-current-page aria-label="全选当前页"></th>
+        {% endif %}
         <th>工单号</th>
         <th>提交时间</th>
         <th>门店</th>
@@ -223,7 +240,9 @@
     <tbody>
       {% for ticket in tickets %}
       <tr>
+        {% if can_bulk_ticket %}
         <td class="ticket-select-cell"><input class="ticket-select" type="checkbox" name="ticket_ids" value="{{ ticket.id }}" data-ticket-select aria-label="选择 {{ ticket.ticket_no }}"></td>
+        {% endif %}
         <td><a class="table-link ticket-no-link" href="{{ ticket.detail_url }}">{{ ticket.ticket_no }}</a></td>
         <td>{{ ticket.created_at }}</td>
         <td title="{{ ticket.store_name }}"><div class="multi-value-text">{{ ticket.store_name }}</div></td>
@@ -251,7 +270,7 @@
       </tr>
       {% else %}
       <tr>
-        <td class="empty-cell" colspan="18">
+        <td class="empty-cell" colspan="{{ 18 if can_bulk_ticket else 17 }}">
           <strong>当前条件下暂无工单</strong>
           <span>可以调整筛选条件，或等待门店提交新的需求。</span>
         </td>
@@ -260,7 +279,9 @@
     </tbody>
   </table>
 </section>
+{% if can_bulk_ticket %}
 </form>
+{% endif %}
 
 <nav class="pagination-bar" aria-label="后台分页">
   <div>当前第 {{ pagination.current_page }} 页 / 共 {{ pagination.total_pages }} 页 / 共 {{ pagination.total_count }} 条工单</div>

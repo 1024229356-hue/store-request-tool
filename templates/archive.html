@@ -5,9 +5,13 @@
 {% extends "base_admin.html" %}
 
 {% block topbar_actions %}
+{% if has_perm('ticket.export') %}
 <a class="quick-action-button" href="{{ export_url }}">导出归档 Excel</a>
+{% endif %}
 <a class="ghost-button compact" href="/admin">返回活跃工单</a>
+{% if has_perm('ticket.view_trash') %}
 <a class="ghost-button compact" href="/admin/trash">回收站</a>
+{% endif %}
 {% endblock %}
 
 {% block content %}
@@ -101,6 +105,10 @@
   </form>
 </section>
 
+{% set can_bulk_restore = has_perm('ticket.restore') %}
+{% set can_bulk_delete = has_perm('ticket.delete') %}
+{% set can_bulk_archive_ticket = can_bulk_restore or can_bulk_delete %}
+{% if can_bulk_archive_ticket %}
 <form id="bulk-ticket-form" class="bulk-ticket-form" method="post" action="/admin/tickets/bulk-unarchive" data-bulk-form data-bulk-root data-filtered-count="{{ pagination.total_count }}">
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
   <input name="select_scope" value="selected" type="hidden" data-select-scope>
@@ -120,16 +128,23 @@
     <button class="ghost-button compact" type="button" data-select-current-page-button>全选当前页</button>
     <button class="ghost-button compact" type="button" data-clear-selection>清空选择</button>
     <button class="ghost-button compact" type="button" data-select-filtered>按当前筛选条件选择全部结果</button>
+    {% if can_bulk_restore %}
     <button class="secondary-button compact" type="submit" formaction="/admin/tickets/bulk-unarchive" data-bulk-submit data-confirm-selected="确认将选中工单恢复到活跃列表吗？" data-confirm-filtered="确认对当前筛选条件下全部 {{ pagination.total_count }} 条归档工单执行恢复吗？">批量恢复</button>
+    {% endif %}
+    {% if can_bulk_delete %}
     <button class="danger-button compact" type="submit" formaction="/admin/tickets/bulk-delete" data-bulk-submit data-confirm-selected="确认将选中工单移入回收站吗？" data-confirm-filtered="确认对当前筛选条件下全部 {{ pagination.total_count }} 条归档工单执行移入回收站吗？">批量移入回收站</button>
+    {% endif %}
   </div>
 </section>
+{% endif %}
 
 <section class="table-wrap work-card">
   <table class="ticket-table erp-table archive-table">
     <thead>
       <tr>
+        {% if can_bulk_archive_ticket %}
         <th class="ticket-select-cell"><input class="ticket-select-all" type="checkbox" data-select-current-page aria-label="全选当前页"></th>
+        {% endif %}
         <th>工单号</th>
         <th>提交时间</th>
         <th>门店</th>
@@ -146,7 +161,9 @@
     <tbody>
       {% for ticket in tickets %}
       <tr>
+        {% if can_bulk_archive_ticket %}
         <td class="ticket-select-cell"><input class="ticket-select" type="checkbox" name="ticket_ids" value="{{ ticket.id }}" data-ticket-select aria-label="选择 {{ ticket.ticket_no }}"></td>
+        {% endif %}
         <td><a class="table-link ticket-no-link" href="{{ ticket.detail_url }}">{{ ticket.ticket_no }}</a></td>
         <td>{{ ticket.created_at }}</td>
         <td title="{{ ticket.store_name }}"><div class="multi-value-text">{{ ticket.store_name }}</div></td>
@@ -161,7 +178,7 @@
       </tr>
       {% else %}
       <tr>
-        <td class="empty-cell" colspan="12">
+        <td class="empty-cell" colspan="{{ 12 if can_bulk_archive_ticket else 11 }}">
           <strong>当前条件下暂无归档工单</strong>
           <span>活跃工单归档后会显示在这里。</span>
         </td>
@@ -170,7 +187,9 @@
     </tbody>
   </table>
 </section>
+{% if can_bulk_archive_ticket %}
 </form>
+{% endif %}
 
 <nav class="pagination-bar" aria-label="归档工单分页">
   <div>当前第 {{ pagination.current_page }} 页 / 共 {{ pagination.total_pages }} 页 / 共 {{ pagination.total_count }} 条工单</div>

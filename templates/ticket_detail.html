@@ -18,12 +18,15 @@
 {% block topbar_actions %}
 <a class="ghost-button compact" href="{{ return_url }}">返回列表</a>
 {% if ticket.archived_at %}
+{% if has_perm('ticket.restore') %}
 <form class="inline-action-form" method="post" action="/admin/ticket/{{ ticket.id }}/unarchive" onsubmit="return confirm('确认将该工单恢复到活跃列表吗？');">
   <input type="hidden" name="return_url" value="{{ return_url }}">
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
   <button class="secondary-button compact" type="submit">取消归档</button>
 </form>
+{% endif %}
 {% else %}
+{% if has_perm('ticket.archive') %}
 <form class="inline-action-form" method="post" action="/admin/ticket/{{ ticket.id }}/archive" onsubmit="return confirm('确认将该工单归档吗？');">
   <input type="hidden" name="return_url" value="{{ return_url }}">
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -31,12 +34,23 @@
   <button class="secondary-button compact" type="submit">归档工单</button>
 </form>
 {% endif %}
+{% endif %}
+{% if has_perm('ticket.delete') %}
 <form class="inline-action-form" method="post" action="/admin/ticket/{{ ticket.id }}/delete" onsubmit="return confirm('确认将该工单移入回收站吗？');">
   <input type="hidden" name="return_url" value="{{ return_url }}">
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
   <input type="hidden" name="delete_reason" value="后台手动移入回收站">
   <button class="danger-button compact" type="submit">移入回收站</button>
 </form>
+{% endif %}
+{% if ticket.deleted_at and has_perm('ticket.hard_delete') %}
+<form class="inline-action-form hard-delete-form" method="post" action="/admin/ticket/{{ ticket.id }}/hard-delete" onsubmit="return confirm('确认永久删除该工单及其附件吗？此操作不可恢复。');">
+  <input type="hidden" name="return_url" value="{{ return_url }}">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <input type="hidden" name="confirm_delete" value="1">
+  <button class="danger-button compact" type="submit">永久删除</button>
+</form>
+{% endif %}
 {% endblock %}
 
 {% block main_class %}detail-shell{% endblock %}
@@ -54,7 +68,7 @@
 {% if ticket.due_status == '已超时' %}
 <div class="alert alert-error">该工单已超过期望完成时间，请优先处理。</div>
 {% endif %}
-{% if close_prompt %}
+{% if close_prompt and has_perm('ticket.update') %}
 <div class="alert alert-success close-ticket-prompt">
   <div>
     <strong>所有子任务已完成，是否关闭工单？</strong>
@@ -99,17 +113,23 @@
     <article>
       <span>谁负责</span>
       <strong>{{ ticket.assigned_to or '暂未指定' }}</strong>
+      {% if has_perm('ticket.update') %}
       <a href="#handler-panel">调整处理人</a>
+      {% endif %}
     </article>
     <article>
       <span>谁协作</span>
       <strong>{{ participants | length }} 人</strong>
+      {% if has_perm('ticket.assign') %}
       <a href="#participants">维护协作人</a>
+      {% endif %}
     </article>
     <article>
       <span>谁需要回复</span>
       <strong>{{ '门店需要补充资料' if ticket.status == '待门店补充' else ('总部待回复门店' if supplements or comments else '暂无阻塞') }}</strong>
+      {% if has_perm('ticket.comment') %}
       <a href="#comments">查看沟通</a>
+      {% endif %}
     </article>
     <article>
       <span>下一步</span>
@@ -124,7 +144,9 @@
         更新处理进度
         {% endif %}
       </strong>
+      {% if has_perm('ticket.update') %}
       <a href="#tasks">查看子任务</a>
+      {% endif %}
     </article>
   </div>
 </section>
@@ -214,17 +236,20 @@
             <span class="tag-chip">{{ participant.participant_type }}</span>
             <span class="tag-chip">{{ participant.role or '未设置角色' }}</span>
           </div>
+          {% if has_perm('ticket.assign') %}
           <form class="record-delete-form" method="post" action="/admin/ticket/{{ ticket.id }}/participant/{{ participant.id }}/delete" onsubmit="return confirm('确认移除这个协作人吗？');">
             <input type="hidden" name="return_url" value="{{ return_url }}">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <button class="danger-button compact" type="submit">移除协作人</button>
           </form>
+          {% endif %}
         </article>
         {% endfor %}
       </div>
       {% else %}
       <p class="empty-note">暂无协作人。</p>
       {% endif %}
+      {% if has_perm('ticket.assign') %}
       <form class="compact-form collaboration-form" method="post" action="/admin/ticket/{{ ticket.id }}/participants">
         <input type="hidden" name="return_url" value="{{ return_url }}">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -247,6 +272,7 @@
         </label>
         <button class="ghost-button compact" type="submit">添加协作人</button>
       </form>
+      {% endif %}
     </section>
 
     <section class="detail-section work-card collaboration-section" id="tasks">
@@ -258,6 +284,7 @@
       <div class="task-list">
         {% for task in tasks %}
         <article class="task-card">
+          {% if has_perm('ticket.update') %}
           <form class="task-update-form" method="post" action="/admin/ticket/{{ ticket.id }}/tasks/{{ task.id }}">
             <input type="hidden" name="return_url" value="{{ return_url }}">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -287,17 +314,44 @@
             </div>
             <button class="ghost-button compact" type="submit">更新子任务</button>
           </form>
+          {% else %}
+          <div class="task-update-form">
+            <label>
+              <span>子任务</span>
+              <input value="{{ task.title }}" disabled>
+            </label>
+            <label>
+              <span>负责人</span>
+              <input value="{{ task.assignee or '' }}" disabled>
+            </label>
+            <label>
+              <span>状态</span>
+              <input value="{{ task.status }}" disabled>
+            </label>
+            <label>
+              <span>截止时间</span>
+              <input value="{{ task.due_date or '' }}" disabled>
+            </label>
+            <div class="task-meta">
+              <span>创建：{{ task.created_at }}</span>
+              <span>完成：{{ task.completed_at or '未完成' }}</span>
+            </div>
+          </div>
+          {% endif %}
+          {% if has_perm('ticket.update') or has_perm('ticket.delete') %}
           <form class="record-delete-form" method="post" action="/admin/ticket/{{ ticket.id }}/task/{{ task.id }}/delete" onsubmit="return confirm('确认删除这个子任务吗？');">
             <input type="hidden" name="return_url" value="{{ return_url }}">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <button class="danger-button compact" type="submit">删除子任务</button>
           </form>
+          {% endif %}
         </article>
         {% endfor %}
       </div>
       {% else %}
       <p class="empty-note">暂无子任务。</p>
       {% endif %}
+      {% if has_perm('ticket.update') %}
       <form class="compact-form collaboration-form" method="post" action="/admin/ticket/{{ ticket.id }}/tasks">
         <input type="hidden" name="return_url" value="{{ return_url }}">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -323,6 +377,7 @@
         </label>
         <button class="ghost-button compact" type="submit">新增子任务</button>
       </form>
+      {% endif %}
     </section>
 
     <section class="detail-section work-card collaboration-section" id="comments">
@@ -343,17 +398,20 @@
             <span class="tag-chip">{{ '内部备注' if comment.visibility == 'internal' else '门店可见回复' }}</span>
           </div>
           <p>{{ comment.content }}</p>
+          {% if has_perm('ticket.comment') or has_perm('ticket.delete') %}
           <form class="record-delete-form" method="post" action="/admin/ticket/{{ ticket.id }}/comment/{{ comment.id }}/delete" onsubmit="return confirm('确认删除这条沟通记录吗？');">
             <input type="hidden" name="return_url" value="{{ return_url }}">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <button class="danger-button compact" type="submit">删除评论</button>
           </form>
+          {% endif %}
         </article>
         {% endfor %}
       </div>
       {% else %}
       <p class="empty-note">暂无沟通记录。</p>
       {% endif %}
+      {% if has_perm('ticket.comment') %}
       <form class="comment-form" method="post" action="/admin/ticket/{{ ticket.id }}/comments">
         <input type="hidden" name="return_url" value="{{ return_url }}">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -370,6 +428,7 @@
         </label>
         <button class="primary-button compact" type="submit">发布沟通</button>
       </form>
+      {% endif %}
     </section>
 
     <section class="detail-section work-card collaboration-section">
@@ -391,11 +450,13 @@
             <span class="tag-chip">文件 {{ supplement.file_count or 0 }}</span>
           </div>
           <p>{{ supplement.note or '未填写补充说明。' }}</p>
+          {% if has_perm('ticket.update') %}
           <form class="record-delete-form" method="post" action="/admin/ticket/{{ ticket.id }}/supplement/{{ supplement.id }}/delete" onsubmit="return confirm('确认隐藏这条门店补充记录吗？');">
             <input type="hidden" name="return_url" value="{{ return_url }}">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <button class="danger-button compact" type="submit">隐藏补充记录</button>
           </form>
+          {% endif %}
         </article>
         {% endfor %}
       </div>
@@ -415,11 +476,13 @@
           <span>{{ image.filename }}</span>
           <div class="image-actions">
             <a class="ghost-button compact" href="{{ image.protected_url }}" target="_blank">查看图片</a>
+            {% if has_perm('ticket.delete') %}
             <form method="post" action="/admin/ticket/{{ ticket.id }}/image/{{ image.id }}/delete" onsubmit="return confirm('确认删除这张图片吗？删除后不可恢复。');">
               <input type="hidden" name="return_url" value="{{ return_url }}">
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
               <button class="danger-button compact" type="submit">删除附件</button>
             </form>
+            {% endif %}
           </div>
         </div>
         {% else %}
@@ -439,11 +502,13 @@
           </div>
           <div class="file-actions">
             <a class="ghost-button compact" href="{{ file.download_url }}">下载文件</a>
+            {% if has_perm('ticket.delete') %}
             <form method="post" action="/admin/ticket/{{ ticket.id }}/file/{{ file.id }}/delete" onsubmit="return confirm('确认删除这个文件吗？删除后不可恢复。');">
               <input type="hidden" name="return_url" value="{{ return_url }}">
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
               <button class="danger-button compact" type="submit">删除文件</button>
             </form>
+            {% endif %}
           </div>
         </div>
         {% else %}
@@ -476,6 +541,7 @@
     </section>
   </div>
 
+  {% if has_perm('ticket.update') %}
   <aside class="handler-panel work-card" id="handler-panel">
     <h2>总部处理面板</h2>
     <p class="panel-note">状态改为已完成会记录完成时间，请确认处理结果后保存。</p>
@@ -546,5 +612,6 @@
       </form>
     </section>
   </aside>
+  {% endif %}
 </section>
 {% endblock %}

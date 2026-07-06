@@ -7,7 +7,9 @@
 {% block topbar_actions %}
 <a class="ghost-button compact" href="/admin">活跃工单</a>
 <a class="ghost-button compact" href="/admin/archive">归档工单</a>
+{% if has_perm('ticket.delete') %}
 <a class="ghost-button compact" href="/admin/cleanup">清理测试数据</a>
+{% endif %}
 {% endblock %}
 
 {% block content %}
@@ -84,6 +86,10 @@
   </form>
 </section>
 
+{% set can_restore_ticket = has_perm('ticket.restore') %}
+{% set can_hard_delete_ticket = has_perm('ticket.hard_delete') %}
+{% set can_bulk_trash_ticket = can_restore_ticket or can_hard_delete_ticket %}
+{% if can_bulk_trash_ticket %}
 <form id="bulk-ticket-form" class="bulk-ticket-form" method="post" action="/admin/tickets/bulk-restore" data-bulk-form data-bulk-root data-filtered-count="{{ pagination.total_count }}">
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
   <input name="select_scope" value="selected" type="hidden" data-select-scope>
@@ -103,14 +109,19 @@
     <button class="ghost-button compact" type="button" data-select-current-page-button>全选当前页</button>
     <button class="ghost-button compact" type="button" data-clear-selection>清空选择</button>
     <button class="ghost-button compact" type="button" data-select-filtered>按当前筛选条件选择全部结果</button>
+    {% if can_restore_ticket %}
     <button class="secondary-button compact" type="submit" formaction="/admin/tickets/bulk-restore" formnovalidate data-bulk-submit data-confirm-selected="确认恢复选中工单吗？" data-confirm-filtered="确认对当前筛选条件下全部 {{ pagination.total_count }} 条回收站工单执行恢复吗？">批量恢复</button>
+    {% endif %}
+    {% if can_hard_delete_ticket %}
     <label class="inline-check">
       <input name="confirm_delete" type="checkbox" value="1" required>
       <span>二次确认永久删除</span>
     </label>
     <button class="danger-button compact" type="submit" formaction="/admin/tickets/bulk-hard-delete" data-bulk-submit data-confirm-selected="确认永久删除选中工单及其附件吗？此操作不可恢复。建议先执行 backup.sh。" data-confirm-filtered="确认对当前筛选条件下全部 {{ pagination.total_count }} 条回收站工单执行永久删除吗？此操作不可恢复。建议先执行 backup.sh。">批量永久删除</button>
+    {% endif %}
   </div>
 </section>
+{% endif %}
 
 <section class="admin-section work-card trash-section">
   <div class="section-heading admin-section-heading">
@@ -121,7 +132,9 @@
     <table class="ticket-table erp-table trash-table">
       <thead>
         <tr>
+          {% if can_bulk_trash_ticket %}
           <th class="ticket-select-cell"><input class="ticket-select-all" type="checkbox" data-select-current-page aria-label="全选当前页"></th>
+          {% endif %}
           <th>工单号</th>
           <th>门店</th>
           <th>提报人</th>
@@ -130,14 +143,16 @@
           <th>删除时间</th>
           <th>删除人</th>
           <th>删除原因</th>
-          <th>恢复</th>
-          <th>永久删除</th>
+          {% if can_restore_ticket %}<th>恢复</th>{% endif %}
+          {% if can_hard_delete_ticket %}<th>永久删除</th>{% endif %}
         </tr>
       </thead>
       <tbody>
         {% for ticket in deleted_tickets %}
         <tr>
+          {% if can_bulk_trash_ticket %}
           <td class="ticket-select-cell"><input class="ticket-select" type="checkbox" name="ticket_ids" value="{{ ticket.id }}" data-ticket-select aria-label="选择 {{ ticket.ticket_no }}"></td>
+          {% endif %}
           <td>{{ ticket.ticket_no }}</td>
           <td>{{ ticket.store_name }}</td>
           <td>{{ ticket.submitter }}</td>
@@ -152,9 +167,12 @@
           <td>{{ ticket.deleted_at }}</td>
           <td>{{ ticket.deleted_by or '-' }}</td>
           <td>{{ ticket.delete_reason or '-' }}</td>
+          {% if can_restore_ticket %}
           <td>
             <button class="ghost-button compact" type="submit" form="restore-ticket-{{ ticket.id }}">恢复</button>
           </td>
+          {% endif %}
+          {% if can_hard_delete_ticket %}
           <td>
             <label class="inline-check">
               <input name="confirm_delete" type="checkbox" value="1" required form="hard-delete-ticket-{{ ticket.id }}">
@@ -162,10 +180,11 @@
             </label>
             <button class="danger-button compact" type="submit" form="hard-delete-ticket-{{ ticket.id }}">永久删除</button>
           </td>
+          {% endif %}
         </tr>
         {% else %}
         <tr>
-          <td class="empty-cell" colspan="11">
+          <td class="empty-cell" colspan="{{ 9 + (1 if can_bulk_trash_ticket else 0) + (1 if can_restore_ticket else 0) + (1 if can_hard_delete_ticket else 0) }}">
             <strong>暂无已删除工单</strong>
             <span>工单移入回收站后会显示在这里。</span>
           </td>
@@ -175,15 +194,21 @@
     </table>
   </div>
 </section>
+{% if can_bulk_trash_ticket %}
 </form>
+{% endif %}
 
 {% for ticket in deleted_tickets %}
+{% if can_restore_ticket %}
 <form id="restore-ticket-{{ ticket.id }}" method="post" action="/admin/ticket/{{ ticket.id }}/restore" hidden>
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
 </form>
+{% endif %}
+{% if can_hard_delete_ticket %}
 <form id="hard-delete-ticket-{{ ticket.id }}" class="hard-delete-form" method="post" action="/admin/ticket/{{ ticket.id }}/hard-delete" onsubmit="return confirm('确认永久删除该工单及其附件吗？此操作不可恢复。建议先执行 backup.sh。');" hidden>
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
 </form>
+{% endif %}
 {% endfor %}
 
 <nav class="pagination-bar" aria-label="回收站工单分页">
@@ -218,8 +243,8 @@
           <th>删除时间</th>
           <th>删除人</th>
           <th>删除原因</th>
-          <th>恢复</th>
-          <th>永久删除</th>
+          {% if has_perm('embedded.update') %}<th>恢复</th>{% endif %}
+          {% if has_perm('embedded.hard_delete') %}<th>永久删除</th>{% endif %}
         </tr>
       </thead>
       <tbody>
@@ -232,12 +257,15 @@
           <td>{{ page.deleted_at }}</td>
           <td>{{ page.deleted_by or '-' }}</td>
           <td>{{ page.delete_reason or '-' }}</td>
+          {% if has_perm('embedded.update') %}
           <td>
             <form method="post" action="/admin/embedded-pages/{{ page.page_key }}/restore">
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
               <button class="ghost-button compact" type="submit">恢复</button>
             </form>
           </td>
+          {% endif %}
+          {% if has_perm('embedded.hard_delete') %}
           <td>
             <form class="hard-delete-form" method="post" action="/admin/embedded-pages/{{ page.page_key }}/hard-delete" onsubmit="return confirm('确认永久删除该嵌入页面及资源目录吗？此操作不可恢复。');">
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -248,10 +276,11 @@
               <button class="danger-button compact" type="submit">永久删除</button>
             </form>
           </td>
+          {% endif %}
         </tr>
         {% else %}
         <tr>
-          <td class="empty-cell" colspan="9">
+          <td class="empty-cell" colspan="{{ 7 + (1 if has_perm('embedded.update') else 0) + (1 if has_perm('embedded.hard_delete') else 0) }}">
             <strong>暂无已删除嵌入页面</strong>
             <span>嵌入页面移入回收站后会显示在这里。</span>
           </td>

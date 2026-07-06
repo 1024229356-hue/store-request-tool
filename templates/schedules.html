@@ -5,9 +5,15 @@
 {% extends "base_admin.html" %}
 
 {% block topbar_actions %}
+{% if has_perm('schedule.export') %}
 <a class="quick-action-button" href="{{ context.export_url }}">导出排班 Excel</a>
+{% endif %}
+{% if has_perm('employee.view') %}
 <a class="ghost-button compact" href="/admin/employees">员工管理</a>
+{% endif %}
+{% if has_perm('shift.view') %}
 <a class="ghost-button compact" href="/admin/shift-types">班次设置</a>
+{% endif %}
 <a class="ghost-button compact" href="/schedule">门店查看</a>
 {% endblock %}
 
@@ -26,14 +32,20 @@
       <p class="subtle">排班操作只面向单个具体门店；查看、看板和导出支持单店、多店和全店。</p>
     </div>
     <div class="schedule-action-buttons">
+      {% if has_perm('schedule.export') %}
       <a class="quick-action-button compact" href="{{ context.export_url }}">导出排班 Excel</a>
+      {% endif %}
       <a class="ghost-button compact" href="{{ context.global_view_url }}">全部门店汇总</a>
       <button class="ghost-button compact" type="button" data-filter-toggle="schedule-filters">筛选</button>
+      {% if has_perm('employee.view') %}
       <a class="ghost-button compact" href="/admin/employees">员工管理</a>
+      {% endif %}
+      {% if has_perm('shift.view') %}
       <a class="ghost-button compact" href="/admin/shift-types">班次设置</a>
+      {% endif %}
       <a class="ghost-button compact" href="/schedule">门店查看</a>
     </div>
-    {% if context.form_store %}
+    {% if context.form_store and has_perm('schedule.create') %}
     <form class="schedule-copy-form" method="post" action="/admin/schedules/copy-day" data-feedback-form data-preserve-scroll data-loading-label="复制中..." onsubmit="return confirm('确认按前一天排班复制到目标日期吗？');">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <input type="hidden" name="store_name" value="{{ context.form_store }}">
@@ -164,6 +176,7 @@
     </form>
   </details>
 
+  {% if has_perm('schedule.create') %}
   <details class="schedule-bulk-card schedule-operation-layer schedule-workspace-card admin-section ops-card schedule-operation-panel" id="bulk-schedule">
     <summary class="section-heading admin-section-heading">
       <span>
@@ -275,6 +288,7 @@
     </form>
     {% endif %}
   </details>
+  {% endif %}
 
   <section class="schedule-view-card schedule-view-layer schedule-workspace-card schedule-data-layer ops-card" id="schedule-view">
     <div class="section-heading admin-section-heading">
@@ -366,6 +380,7 @@
           </span>
           {% endfor %}
         </div>
+        {% if has_perm('schedule.delete') %}
         <form method="post" action="/admin/schedules/clear-employee" data-feedback-form data-preserve-scroll data-loading-label="清空中..." onsubmit="return confirm('确认清空该员工本月排班吗？');">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <input type="hidden" name="store_name" value="{{ context.filters.store_name }}">
@@ -373,6 +388,7 @@
           <input type="hidden" name="month" value="{{ context.filters.month }}">
           <button class="danger-button compact" type="submit">清空某员工排班</button>
         </form>
+        {% endif %}
       </article>
       {% else %}
       <p class="empty-note">当前范围暂无员工。</p>
@@ -444,10 +460,12 @@
               <span class="shift-badge {% if schedule.is_custom_time %}custom-shift-badge{% endif %}" style="--shift-color: {{ schedule.color or '#64748b' }}">{{ schedule.shift_name }}</span>
               <small class="schedule-time-line">{{ schedule.display_time }} · {{ schedule.display_hours }}</small>
               {% if schedule.note %}<small>{{ schedule.note }}</small>{% endif %}
+              {% if has_perm('schedule.delete') %}
               <form method="post" action="/admin/schedules/{{ schedule.id }}/delete" onsubmit="return confirm('确认删除这条排班吗？');" data-feedback-form data-preserve-scroll data-loading-label="删除中...">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                 <button class="ghost-button compact" type="submit">删除</button>
               </form>
+              {% endif %}
               {% else %}
               <span class="empty-note">-</span>
               {% endif %}
