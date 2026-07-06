@@ -1088,6 +1088,273 @@ def test_account_management_crud_safety_and_password_reset(tmp_path, monkeypatch
     assert "reset123" not in json.dumps(operation_logs, ensure_ascii=False)
 
 
+def test_person_account_schema_and_legacy_records_remain_usable(tmp_path, monkeypatch):
+    client, main = build_client(
+        tmp_path,
+        monkeypatch,
+        admin_users="admin:123456,legacyops:123456",
+    )
+    logged_in_client(client, "admin", "123456")
+    legacy_employee_id = main.create_employee("旧排班员工", "南京门东店", "店员", "13800000001", "在职", main.load_app_config())
+
+    with sqlite3.connect(tmp_path / "tickets.db") as connection:
+        admin_columns = {row[1] for row in connection.execute("PRAGMA table_info(admin_users)").fetchall()}
+        employee_columns = {row[1] for row in connection.execute("PRAGMA table_info(employees)").fetchall()}
+
+    assert {"employee_id", "allow_login", "participate_schedule"}.issubset(admin_columns)
+    assert {"user_id", "allow_login", "participate_schedule"}.issubset(employee_columns)
+
+    users = {row["username"]: row for row in rows_for(tmp_path, "admin_users")}
+    assert users["admin"]["allow_login"] == 1
+    assert users["legacyops"]["allow_login"] == 1
+    assert users["legacyops"]["participate_schedule"] == 0
+    assert_login_success(login_admin(client, "legacyops", "123456"))
+    assert_login_success(login_admin(client, "admin", "123456"))
+
+    employees = {row["employee_name"]: row for row in rows_for(tmp_path, "employees")}
+    assert employees["旧排班员工"]["allow_login"] == 0
+    assert employees["旧排班员工"]["participate_schedule"] == 1
+    schedule_page = client.get("/admin/schedules?store_name=南京门东店&month=2026-07")
+    assert schedule_page.status_code == 200
+    assert "旧排班员工" in schedule_page.text
+    assert rows_for(tmp_path, "employees")[0]["id"] == legacy_employee_id
+
+
+def test_person_account_management_creates_login_schedule_and_combined_people(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch, admin_users="admin:123456")
+    assert_login_success(login_admin(client, "admin", "123456"))
+    ops_role_id = role_id_by_name(tmp_path, "运营管理")
+
+    page = client.get("/admin/account")
+    assert page.status_code == 200
+    assert "人员与账号管理" in page.text
+    assert "总人员数" in page.text
+    assert "允许登录后台" in page.text
+    assert "参与排班" in page.text
+
+    login_only = client.post(
+        "/admin/account/users",
+        data={
+            "csrf_token": csrf_token_for(client, "/admin/account"),
+            "employee_name": "总部采购",
+            "phone": "13800001001",
+            "employee_role": "采购专员",
+            "allow_login": "1",
+            "username": "hqbuyer",
+            "password": "buyer123",
+            "password_confirm": "buyer123",
+            "role_id": str(ops_role_id),
+            "data_scope": "all",
+            "is_assignable": "1",
+            "is_active": "1",
+            "participate_schedule": "",
+        },
+        follow_redirects=False,
+    )
+    assert login_only.status_code == 303
+    buyer_user = next(row for row in rows_for(tmp_path, "admin_users") if row["username"] == "hqbuyer")
+    assert buyer_user["allow_login"] == 1
+    assert buyer_user["participate_schedule"] == 0
+    assert buyer_user["employee_id"] is None
+    assert_login_success(login_admin(client, "hqbuyer", "buyer123"))
+    assert "hqbuyer" in client.get("/api/handlers").json()["handlers"]
+    assert "总部采购" not in client.get("/admin/schedules?store_name=南京门东店&month=2026-07").text
+
+    assert_login_success(login_admin(client, "admin", "123456"))
+    schedule_only = client.post(
+        "/admin/account/users",
+        data={
+            "csrf_token": csrf_token_for(client, "/admin/account"),
+            "employee_name": "普通店员",
+            "phone": "13800001002",
+            "employee_role": "店员",
+            "primary_store_name": "南京门东店",
+            "schedule_store_names": ["南京门东店", "南昌万寿宫店"],
+            "allow_login": "0",
+            "participate_schedule": "1",
+            "employee_status": "在职",
+            "is_assignable": "1",
+        },
+        follow_redirects=False,
+    )
+    assert schedule_only.status_code == 303
+    staff_employee = next(row for row in rows_for(tmp_path, "employees") if row["employee_name"] == "普通店员")
+    assert staff_employee["allow_login"] == 0
+    assert staff_employee["participate_schedule"] == 1
+    assert staff_employee["user_id"] is None
+    assert not any(row["username"] == "普通店员" for row in rows_for(tmp_path, "admin_users"))
+    assert "普通店员" in client.get("/admin/schedules?store_name=南京门东店&month=2026-07").text
+    assert "普通店员" not in client.get("/api/handlers").json()["handlers"]
+
+    combined = client.post(
+        "/admin/account/users",
+        data={
+            "csrf_token": csrf_token_for(client, "/admin/account"),
+            "employee_name": "门店店长",
+            "phone": "13800001003",
+            "employee_role": "店长",
+            "primary_store_name": "南京门东店",
+            "schedule_store_names": ["南京门东店"],
+            "allow_login": "1",
+            "username": "storemanager",
+            "password": "manager123",
+            "password_confirm": "manager123",
+            "role_id": str(ops_role_id),
+            "data_scope": "stores",
+            "store_names": "南京门东店",
+            "is_assignable": "1",
+            "is_active": "1",
+            "participate_schedule": "1",
+            "employee_status": "在职",
+        },
+        follow_redirects=False,
+    )
+    assert combined.status_code == 303
+    manager_user = next(row for row in rows_for(tmp_path, "admin_users") if row["username"] == "storemanager")
+    manager_employee = next(row for row in rows_for(tmp_path, "employees") if row["employee_name"] == "门店店长")
+    assert manager_user["allow_login"] == 1
+    assert manager_user["participate_schedule"] == 1
+    assert manager_user["employee_id"] == manager_employee["id"]
+    assert manager_employee["user_id"] == manager_user["id"]
+    assert manager_employee["allow_login"] == 1
+    assert manager_employee["participate_schedule"] == 1
+    assert_login_success(login_admin(client, "storemanager", "manager123"))
+    assert_login_success(login_admin(client, "admin", "123456"))
+    assert "门店店长" in client.get("/admin/schedules?store_name=南京门东店&month=2026-07").text
+    assert "storemanager" in client.get("/api/handlers").json()["handlers"]
+
+
+def test_person_status_flags_control_login_schedule_handlers_and_password_reset(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch, admin_users="admin:123456")
+    assert_login_success(login_admin(client, "admin", "123456"))
+    ops_role_id = role_id_by_name(tmp_path, "运营管理")
+    create = client.post(
+        "/admin/account/users",
+        data={
+            "csrf_token": csrf_token_for(client, "/admin/account"),
+            "employee_name": "可变店长",
+            "employee_role": "店长",
+            "phone": "13800002001",
+            "primary_store_name": "南京门东店",
+            "schedule_store_names": ["南京门东店"],
+            "allow_login": "1",
+            "username": "mutablemanager",
+            "password": "mutable123",
+            "password_confirm": "mutable123",
+            "role_id": str(ops_role_id),
+            "data_scope": "all",
+            "is_assignable": "1",
+            "is_active": "1",
+            "participate_schedule": "1",
+            "employee_status": "在职",
+        },
+        follow_redirects=False,
+    )
+    assert create.status_code == 303
+    user_id = user_id_by_username(tmp_path, "mutablemanager")
+    employee_id = next(row["id"] for row in rows_for(tmp_path, "employees") if row["employee_name"] == "可变店长")
+
+    assert_login_success(login_admin(client, "mutablemanager", "mutable123"))
+    assert_login_success(login_admin(client, "admin", "123456"))
+    update = client.post(
+        f"/admin/account/users/{user_id}/update",
+        data={
+            "csrf_token": csrf_token_for(client, "/admin/account"),
+            "employee_name": "可变店长",
+            "employee_role": "店长",
+            "phone": "13800002001",
+            "primary_store_name": "南京门东店",
+            "schedule_store_names": ["南京门东店"],
+            "allow_login": "0",
+            "username": "mutablemanager",
+            "role_id": str(ops_role_id),
+            "data_scope": "all",
+            "store_names": "",
+            "is_assignable": "1",
+            "is_active": "1",
+            "participate_schedule": "1",
+            "employee_status": "在职",
+        },
+        follow_redirects=False,
+    )
+    assert update.status_code == 303
+    user = next(row for row in rows_for(tmp_path, "admin_users") if row["id"] == user_id)
+    assert user["allow_login"] == 0
+    assert user["is_assignable"] == 0
+    assert login_admin(client, "mutablemanager", "mutable123").status_code == 400
+    assert "可变店长" in client.get("/admin/schedules?store_name=南京门东店&month=2026-07").text
+    assert "mutablemanager" not in client.get("/api/handlers").json()["handlers"]
+
+    reset_blocked = client.post(
+        f"/admin/account/users/{user_id}/reset-password",
+        data={
+            "csrf_token": csrf_token_for(client, "/admin/account"),
+            "password": "newpass1",
+            "password_confirm": "newpass1",
+        },
+    )
+    assert reset_blocked.status_code == 400
+    assert "未允许登录" in reset_blocked.text
+
+    leave = client.post(
+        f"/admin/account/users/{user_id}/update",
+        data={
+            "csrf_token": csrf_token_for(client, "/admin/account"),
+            "employee_name": "可变店长",
+            "employee_role": "店长",
+            "phone": "13800002001",
+            "primary_store_name": "南京门东店",
+            "schedule_store_names": ["南京门东店"],
+            "allow_login": "1",
+            "username": "mutablemanager",
+            "role_id": str(ops_role_id),
+            "data_scope": "all",
+            "store_names": "",
+            "is_assignable": "1",
+            "is_active": "1",
+            "participate_schedule": "1",
+            "employee_status": "离职",
+        },
+        follow_redirects=False,
+    )
+    assert leave.status_code == 303
+    user = next(row for row in rows_for(tmp_path, "admin_users") if row["id"] == user_id)
+    employee = next(row for row in rows_for(tmp_path, "employees") if row["id"] == employee_id)
+    assert user["allow_login"] == 0
+    assert user["is_active"] == 0
+    assert user["is_assignable"] == 0
+    assert user["participate_schedule"] == 0
+    assert employee["allow_login"] == 0
+    assert employee["participate_schedule"] == 0
+    assert employee["status"] == "离职"
+    assert login_admin(client, "mutablemanager", "mutable123").status_code == 400
+    assert "可变店长" not in client.get("/admin/schedules?store_name=南京门东店&month=2026-07").text
+    assert "mutablemanager" not in client.get("/api/handlers").json()["handlers"]
+
+
+def test_employees_page_is_schedule_people_view_with_unified_management_hint(tmp_path, monkeypatch):
+    client, main = build_client(tmp_path, monkeypatch)
+    logged_in_client(client)
+    main.create_employee("排班视图员工", "南京门东店", "店员", "", "在职", main.load_app_config())
+    with sqlite3.connect(tmp_path / "tickets.db") as connection:
+        connection.execute(
+            """
+            UPDATE employees
+            SET participate_schedule = 0
+            WHERE employee_name = '排班视图员工'
+            """
+        )
+
+    page = client.get("/admin/employees")
+
+    assert page.status_code == 200
+    assert "排班人员视图" in page.text
+    assert "人员资料请统一到“人员与账号管理”维护" in page.text
+    assert 'href="/admin/account?filter=participate_schedule"' in page.text
+    assert "排班视图员工" not in page.text
+    assert 'data-drawer-open="employee-create-drawer"' not in page.text
+
+
 def test_account_management_requires_account_permissions(tmp_path, monkeypatch):
     client, _ = build_client(
         tmp_path,
@@ -3626,10 +3893,10 @@ def test_employee_primary_store_bindings_and_archive_trash_workflow(tmp_path, mo
 
     employee_page = client.get("/admin/employees")
     assert employee_page.status_code == 200
-    assert 'name="primary_store_name"' in employee_page.text
-    assert "员工主要归属门店" in employee_page.text
-    assert 'type="checkbox"' in employee_page.text
-    assert 'name="store_names"' in employee_page.text
+    assert "排班人员视图" in employee_page.text
+    assert "人员资料请统一到“人员与账号管理”维护" in employee_page.text
+    assert 'href="/admin/account?filter=participate_schedule"' in employee_page.text
+    assert 'data-drawer-open="employee-create-drawer"' not in employee_page.text
 
     create_response = admin_post(
         client,

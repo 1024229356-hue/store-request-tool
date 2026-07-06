@@ -531,7 +531,12 @@ def authenticate_admin(username: str, password: str) -> Optional[str]:
                     (input_username,),
                 ).fetchone()
                 if has_users and has_active_admin:
-                    if row and int(row["is_active"]) == 1 and verify_password(password, str(row["password_hash"] or "")):
+                    if (
+                        row
+                        and int(row["is_active"]) == 1
+                        and int(row["allow_login"] if "allow_login" in row.keys() else 1) == 1
+                        and verify_password(password, str(row["password_hash"] or ""))
+                    ):
                         connection.execute(
                             "UPDATE admin_users SET last_login_at = ?, updated_at = ? WHERE id = ?",
                             (now_text(), now_text(), int(row["id"])),
@@ -550,7 +555,7 @@ def admin_username_exists(username: str) -> bool:
     input_username = username.strip()
     try:
         user = fetch_admin_user_by_username(input_username)
-        if user and int(user.get("is_active") or 0) == 1:
+        if user and int(user.get("is_active") or 0) == 1 and int(user.get("allow_login") or 0) == 1:
             return True
         with get_connection() as connection:
             if table_exists(connection, "admin_users") and active_system_admin_count(connection) > 0:
@@ -1226,6 +1231,9 @@ def ensure_admin_rbac_schema(connection: sqlite3.Connection) -> None:
             username TEXT NOT NULL UNIQUE,
             display_name TEXT,
             password_hash TEXT NOT NULL,
+            employee_id INTEGER,
+            allow_login INTEGER NOT NULL DEFAULT 1,
+            participate_schedule INTEGER NOT NULL DEFAULT 0,
             role_id INTEGER,
             is_active INTEGER NOT NULL DEFAULT 1,
             is_assignable INTEGER NOT NULL DEFAULT 1,
@@ -1267,6 +1275,9 @@ def ensure_admin_rbac_schema(connection: sqlite3.Connection) -> None:
         """
     )
     add_column_if_missing(connection, "admin_users", "display_name", "TEXT")
+    add_column_if_missing(connection, "admin_users", "employee_id", "INTEGER")
+    add_column_if_missing(connection, "admin_users", "allow_login", "INTEGER NOT NULL DEFAULT 1")
+    add_column_if_missing(connection, "admin_users", "participate_schedule", "INTEGER NOT NULL DEFAULT 0")
     add_column_if_missing(connection, "admin_users", "role_id", "INTEGER")
     add_column_if_missing(connection, "admin_users", "is_active", "INTEGER NOT NULL DEFAULT 1")
     add_column_if_missing(connection, "admin_users", "is_assignable", "INTEGER NOT NULL DEFAULT 1")
@@ -1277,6 +1288,8 @@ def ensure_admin_rbac_schema(connection: sqlite3.Connection) -> None:
     add_column_if_missing(connection, "admin_users", "updated_by", "TEXT")
     connection.execute("CREATE INDEX IF NOT EXISTS idx_admin_users_username ON admin_users(username)")
     connection.execute("CREATE INDEX IF NOT EXISTS idx_admin_users_role_id ON admin_users(role_id)")
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_admin_users_employee_id ON admin_users(employee_id)")
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_admin_users_allow_login ON admin_users(allow_login)")
     connection.execute("CREATE INDEX IF NOT EXISTS idx_admin_roles_role_name ON admin_roles(role_name)")
     connection.execute("CREATE INDEX IF NOT EXISTS idx_admin_role_permissions_role_id ON admin_role_permissions(role_id)")
     connection.execute("CREATE INDEX IF NOT EXISTS idx_admin_login_logs_username ON admin_login_logs(username)")
@@ -1370,10 +1383,10 @@ def migrate_env_admin_users_if_empty(connection: sqlite3.Connection) -> None:
         connection.execute(
             """
             INSERT OR IGNORE INTO admin_users (
-                username, display_name, password_hash, role_id, is_active, is_assignable,
+                username, display_name, password_hash, role_id, employee_id, allow_login, participate_schedule, is_active, is_assignable,
                 data_scope, store_names, created_at, updated_at, created_by, updated_by
             )
-            VALUES (?, ?, ?, ?, 1, 1, 'all', '', ?, ?, 'env:migration', 'env:migration')
+            VALUES (?, ?, ?, ?, NULL, 1, 0, 1, 1, 'all', '', ?, ?, 'env:migration', 'env:migration')
             """,
             (
                 clean_username,
@@ -1430,7 +1443,7 @@ def ensure_admin_access_safeguard(connection: Optional[sqlite3.Connection] = Non
                     connection.execute(
                         """
                         UPDATE admin_users
-                        SET password_hash = ?, role_id = ?, is_active = 1, is_assignable = 1,
+                        SET password_hash = ?, role_id = ?, allow_login = 1, is_active = 1, is_assignable = 1,
                             data_scope = 'all', store_names = '', updated_at = ?, updated_by = 'env:recovery'
                         WHERE id = ?
                         """,
@@ -1441,10 +1454,10 @@ def ensure_admin_access_safeguard(connection: Optional[sqlite3.Connection] = Non
                     connection.execute(
                         """
                         INSERT INTO admin_users (
-                            username, display_name, password_hash, role_id, is_active, is_assignable,
+                            username, display_name, password_hash, role_id, employee_id, allow_login, participate_schedule, is_active, is_assignable,
                             data_scope, store_names, created_at, updated_at, created_by, updated_by
                         )
-                        VALUES (?, ?, ?, ?, 1, 1, 'all', '', ?, ?, 'env:recovery', 'env:recovery')
+                        VALUES (?, ?, ?, ?, NULL, 1, 0, 1, 1, 'all', '', ?, ?, 'env:recovery', 'env:recovery')
                         """,
                         (
                             clean_username,
@@ -1466,6 +1479,61 @@ def ensure_admin_access_safeguard(connection: Optional[sqlite3.Connection] = Non
         "account_recovered": account_recovered,
         "active_system_admin_count": active_system_admin_count(connection),
     }
+
+
+def backfill_person_account_links(connection: sqlite3.Connection) -> None:
+    if not table_exists(connection, "admin_users") or not table_exists(connection, "employees"):
+        return
+    timestamp = now_text()
+    connection.execute("UPDATE admin_users SET allow_login = 1 WHERE allow_login IS NULL")
+    connection.execute("UPDATE admin_users SET participate_schedule = 0 WHERE participate_schedule IS NULL")
+    connection.execute("UPDATE employees SET allow_login = 0 WHERE allow_login IS NULL")
+    connection.execute("UPDATE employees SET participate_schedule = 1 WHERE participate_schedule IS NULL")
+    connection.execute(
+        """
+        UPDATE employees
+        SET allow_login = 1, user_id = (
+            SELECT admin_users.id FROM admin_users WHERE admin_users.employee_id = employees.id LIMIT 1
+        )
+        WHERE user_id IS NULL
+          AND EXISTS (SELECT 1 FROM admin_users WHERE admin_users.employee_id = employees.id)
+        """
+    )
+    connection.execute(
+        """
+        UPDATE admin_users
+        SET employee_id = (
+            SELECT employees.id FROM employees WHERE employees.user_id = admin_users.id LIMIT 1
+        ),
+            participate_schedule = 1
+        WHERE employee_id IS NULL
+          AND EXISTS (SELECT 1 FROM employees WHERE employees.user_id = admin_users.id)
+        """
+    )
+    connection.execute(
+        """
+        UPDATE admin_users
+        SET is_assignable = 0, updated_at = ?
+        WHERE COALESCE(allow_login, 1) = 0 AND COALESCE(is_assignable, 0) = 1
+        """,
+        (timestamp,),
+    )
+    connection.execute(
+        """
+        UPDATE admin_users
+        SET allow_login = 0, participate_schedule = 0, is_assignable = 0, is_active = 0, updated_at = ?
+        WHERE employee_id IN (SELECT id FROM employees WHERE status = '离职')
+        """,
+        (timestamp,),
+    )
+    connection.execute(
+        """
+        UPDATE employees
+        SET allow_login = 0, participate_schedule = 0, updated_at = ?
+        WHERE status = '离职'
+        """,
+        (timestamp,),
+    )
 
 
 def permissions_for_role(connection: sqlite3.Connection, role_id: object) -> List[str]:
@@ -1493,6 +1561,9 @@ def row_to_admin_user(connection: sqlite3.Connection, row: sqlite3.Row) -> Dict[
         "permissions": permissions,
         "is_active": int(row["is_active"] or 0),
         "is_assignable": int(row["is_assignable"] or 0),
+        "employee_id": int(row["employee_id"]) if "employee_id" in row.keys() and row["employee_id"] is not None else None,
+        "allow_login": int(row["allow_login"] if "allow_login" in row.keys() and row["allow_login"] is not None else 1),
+        "participate_schedule": int(row["participate_schedule"] if "participate_schedule" in row.keys() and row["participate_schedule"] is not None else 0),
         "data_scope": str(row["data_scope"] or "all"),
         "store_names": str(row["store_names"] or ""),
         "last_login_at": str(row["last_login_at"] or ""),
@@ -1524,10 +1595,120 @@ def fetch_admin_user_by_id(user_id: int) -> Optional[Dict[str, object]]:
 
 def fetch_admin_users_for_account_page() -> List[Dict[str, object]]:
     with get_connection() as connection:
-        return [
-            row_to_admin_user(connection, row)
-            for row in connection.execute("SELECT * FROM admin_users ORDER BY id").fetchall()
-        ]
+        people: List[Dict[str, object]] = []
+        user_rows = connection.execute(
+            """
+            SELECT
+                admin_users.*,
+                employees.id AS linked_employee_id,
+                employees.employee_name AS linked_employee_name,
+                employees.phone AS linked_phone,
+                employees.role AS linked_employee_role,
+                employees.store_name AS linked_store_name,
+                employees.primary_store_name AS linked_primary_store_name,
+                employees.status AS linked_employee_status,
+                employees.participate_schedule AS linked_participate_schedule
+            FROM admin_users
+            LEFT JOIN employees
+              ON employees.id = admin_users.employee_id
+              OR employees.user_id = admin_users.id
+            ORDER BY admin_users.id
+            """
+        ).fetchall()
+        linked_employee_ids: set[int] = set()
+        for row in user_rows:
+            user = row_to_admin_user(connection, row)
+            linked_employee_id = row["linked_employee_id"]
+            if linked_employee_id is not None:
+                linked_employee_ids.add(int(linked_employee_id))
+            employee_store_names = employee_store_map_for_ids(connection, [int(linked_employee_id)]) if linked_employee_id is not None else {}
+            primary_store = str(row["linked_primary_store_name"] or row["linked_store_name"] or "").strip()
+            bound_stores = employee_store_names.get(int(linked_employee_id), []) if linked_employee_id is not None else []
+            schedule_store_names = unique_clean_values([primary_store, *bound_stores])
+            user.update(
+                {
+                    "person_kind": "user",
+                    "person_name": str(row["linked_employee_name"] or user["display_name"] or user["username"]),
+                    "employee_id": int(linked_employee_id) if linked_employee_id is not None else user.get("employee_id"),
+                    "employee_name": str(row["linked_employee_name"] or ""),
+                    "phone": str(row["linked_phone"] or ""),
+                    "employee_role": str(row["linked_employee_role"] or ""),
+                    "primary_store_name": primary_store,
+                    "schedule_store_names": schedule_store_names,
+                    "schedule_store_names_text": join_display_values(schedule_store_names),
+                    "employee_status": str(row["linked_employee_status"] or ""),
+                    "participate_schedule": int(row["linked_participate_schedule"] if row["linked_participate_schedule"] is not None else user.get("participate_schedule") or 0),
+                }
+            )
+            people.append(user)
+
+        employee_rows = connection.execute(
+            """
+            SELECT *
+            FROM employees
+            WHERE id NOT IN (
+                SELECT employee_id FROM admin_users WHERE employee_id IS NOT NULL
+            )
+              AND (user_id IS NULL OR user_id NOT IN (SELECT id FROM admin_users))
+            ORDER BY id
+            """
+        ).fetchall()
+        employee_store_map = employee_store_map_for_ids(connection, [int(row["id"]) for row in employee_rows])
+        for row in employee_rows:
+            employee_id = int(row["id"])
+            primary_store = str(row["primary_store_name"] or row["store_name"] or "").strip()
+            schedule_store_names = unique_clean_values([primary_store, *employee_store_map.get(employee_id, [])])
+            people.append(
+                {
+                    "id": 0,
+                    "person_kind": "employee",
+                    "username": "",
+                    "display_name": str(row["employee_name"] or ""),
+                    "person_name": str(row["employee_name"] or ""),
+                    "role_id": 0,
+                    "role_name": "",
+                    "permissions": [],
+                    "is_active": 0,
+                    "is_assignable": 0,
+                    "employee_id": employee_id,
+                    "employee_name": str(row["employee_name"] or ""),
+                    "phone": str(row["phone"] or ""),
+                    "employee_role": str(row["role"] or ""),
+                    "primary_store_name": primary_store,
+                    "schedule_store_names": schedule_store_names,
+                    "schedule_store_names_text": join_display_values(schedule_store_names),
+                    "employee_status": str(row["status"] or ""),
+                    "allow_login": int(row["allow_login"] or 0),
+                    "participate_schedule": int(row["participate_schedule"] if row["participate_schedule"] is not None else 1),
+                    "data_scope": "all",
+                    "store_names": "",
+                    "last_login_at": "",
+                    "created_at": str(row["created_at"] or ""),
+                    "updated_at": str(row["updated_at"] or ""),
+                }
+            )
+        return people
+
+
+def account_people_stats(people: Iterable[Dict[str, object]]) -> Dict[str, int]:
+    people_list = list(people)
+    return {
+        "total_people": len(people_list),
+        "login_accounts": sum(1 for person in people_list if person.get("username") and int(person.get("allow_login") or 0) == 1),
+        "schedule_people": sum(1 for person in people_list if int(person.get("participate_schedule") or 0) == 1),
+        "assignable_people": sum(
+            1
+            for person in people_list
+            if int(person.get("allow_login") or 0) == 1
+            and int(person.get("is_active") or 0) == 1
+            and int(person.get("is_assignable") or 0) == 1
+        ),
+        "disabled_accounts": sum(
+            1
+            for person in people_list
+            if person.get("username") and (int(person.get("allow_login") or 0) == 0 or int(person.get("is_active") or 0) == 0)
+        ),
+    }
 
 
 def fetch_admin_roles() -> List[Dict[str, object]]:
@@ -1581,7 +1762,7 @@ def fetch_assignable_admin_usernames() -> List[str]:
             """
             SELECT username
             FROM admin_users
-            WHERE is_active = 1 AND is_assignable = 1
+            WHERE is_active = 1 AND is_assignable = 1 AND allow_login = 1
             ORDER BY id
             """
         ).fetchall()
@@ -2647,6 +2828,9 @@ def init_db() -> None:
                 employee_name TEXT NOT NULL,
                 store_name TEXT NOT NULL,
                 primary_store_name TEXT,
+                user_id INTEGER,
+                allow_login INTEGER NOT NULL DEFAULT 0,
+                participate_schedule INTEGER NOT NULL DEFAULT 1,
                 role TEXT,
                 phone TEXT,
                 status TEXT NOT NULL DEFAULT '在职',
@@ -2758,10 +2942,15 @@ def init_db() -> None:
         connection.execute("CREATE INDEX IF NOT EXISTS idx_notification_reads_username ON notification_reads(username)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_embedded_pages_enabled ON embedded_pages(enabled)")
         add_column_if_missing(connection, "employees", "primary_store_name", "TEXT")
+        add_column_if_missing(connection, "employees", "user_id", "INTEGER")
+        add_column_if_missing(connection, "employees", "allow_login", "INTEGER NOT NULL DEFAULT 0")
+        add_column_if_missing(connection, "employees", "participate_schedule", "INTEGER NOT NULL DEFAULT 1")
         add_archive_columns(connection, "employees")
         add_soft_delete_columns(connection, "employees")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_employees_store_name ON employees(store_name)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_employees_primary_store_name ON employees(primary_store_name)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_employees_user_id ON employees(user_id)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_employees_participate_schedule ON employees(participate_schedule)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_employees_deleted_at ON employees(deleted_at)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_employees_archived_at ON employees(archived_at)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_employee_store_map_employee_id ON employee_store_map(employee_id)")
@@ -2787,6 +2976,7 @@ def init_db() -> None:
         add_soft_delete_columns(connection, "embedded_pages")
         backfill_ticket_relations(connection)
         backfill_employee_store_map(connection)
+        backfill_person_account_links(connection)
         ensure_default_shift_types(connection)
 
 
@@ -4817,6 +5007,7 @@ def fetch_employees(store_name: str = "", status: str = "", scope: str = "active
     if status.strip():
         clauses.append("employees.status = ?")
         params.append(status.strip())
+    clauses.append("COALESCE(employees.participate_schedule, 1) = 1")
     clauses.append(employee_record_scope_clause(scope))
     where_sql = "WHERE " + " AND ".join(clauses) if clauses else ""
     with get_connection() as connection:
@@ -4824,6 +5015,7 @@ def fetch_employees(store_name: str = "", status: str = "", scope: str = "active
             f"""
             SELECT
                 employees.id, employees.employee_name, employees.store_name, employees.primary_store_name,
+                employees.user_id, employees.allow_login, employees.participate_schedule,
                 employees.role, employees.phone, employees.status,
                 employees.archived_at, employees.archived_by, employees.archive_reason,
                 employees.deleted_at, employees.deleted_by, employees.delete_reason,
@@ -4912,10 +5104,23 @@ def create_employee(
     with get_connection() as connection:
         cursor = connection.execute(
             """
-            INSERT INTO employees (employee_name, store_name, primary_store_name, role, phone, status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO employees (
+                employee_name, store_name, primary_store_name, user_id, allow_login, participate_schedule,
+                role, phone, status, created_at, updated_at
+            )
+            VALUES (?, ?, ?, NULL, 0, ?, ?, ?, ?, ?, ?)
             """,
-            (clean_name, primary_store, primary_store, role.strip(), phone.strip(), clean_status, timestamp, timestamp),
+            (
+                clean_name,
+                primary_store,
+                primary_store,
+                0 if clean_status == "离职" else 1,
+                role.strip(),
+                phone.strip(),
+                clean_status,
+                timestamp,
+                timestamp,
+            ),
         )
         employee_id = int(cursor.lastrowid)
         replace_employee_store_bindings(connection, employee_id, clean_stores, timestamp)
@@ -4949,11 +5154,32 @@ def update_employee(
         connection.execute(
             """
             UPDATE employees
-            SET employee_name = ?, store_name = ?, primary_store_name = ?, role = ?, phone = ?, status = ?, updated_at = ?
+            SET employee_name = ?, store_name = ?, primary_store_name = ?, role = ?, phone = ?,
+                status = ?, participate_schedule = ?, updated_at = ?
             WHERE id = ?
             """,
-            (clean_name, primary_store, primary_store, role.strip(), phone.strip(), clean_status, timestamp, employee_id),
+            (
+                clean_name,
+                primary_store,
+                primary_store,
+                role.strip(),
+                phone.strip(),
+                clean_status,
+                0 if clean_status == "离职" else 1,
+                timestamp,
+                employee_id,
+            ),
         )
+        if clean_status == "离职":
+            connection.execute(
+                """
+                UPDATE admin_users
+                SET allow_login = 0, participate_schedule = 0, is_assignable = 0, is_active = 0,
+                    updated_at = ?
+                WHERE employee_id = ?
+                """,
+                (timestamp, employee_id),
+            )
         replace_employee_store_bindings(connection, employee_id, clean_stores, timestamp)
 
 
@@ -4962,8 +5188,16 @@ def disable_employee(employee_id: int) -> None:
         raise HTTPException(status_code=404, detail="员工不存在")
     with get_connection() as connection:
         connection.execute(
-            "UPDATE employees SET status = ?, updated_at = ? WHERE id = ?",
+            "UPDATE employees SET status = ?, participate_schedule = 0, allow_login = 0, updated_at = ? WHERE id = ?",
             ("离职", now_text(), employee_id),
+        )
+        connection.execute(
+            """
+            UPDATE admin_users
+            SET allow_login = 0, participate_schedule = 0, is_assignable = 0, is_active = 0, updated_at = ?
+            WHERE employee_id = ?
+            """,
+            (now_text(), employee_id),
         )
 
 
@@ -8216,6 +8450,7 @@ def create_app() -> FastAPI:
         can_view_accounts = has_permission(current_user, "account.view")
         roles = fetch_admin_roles() if can_view_accounts else []
         users = fetch_admin_users_for_account_page() if can_view_accounts else []
+        config = load_app_config()
         return templates.TemplateResponse(
             request,
             "account.html",
@@ -8225,8 +8460,11 @@ def create_app() -> FastAPI:
                 "current_user": current_user,
                 "permissions": current_user.get("permissions", []) if current_user else [],
                 "users": users,
+                "people_stats": account_people_stats(users),
                 "roles": roles,
-                "stores": load_app_config().stores,
+                "stores": config.stores,
+                "employee_statuses": EMPLOYEE_STATUSES,
+                "account_filter": request.query_params.get("filter", ""),
                 "data_scope_options": [
                     {"value": "all", "label": "全部数据"},
                     {"value": "assigned", "label": "仅自己处理"},
@@ -8282,6 +8520,30 @@ def create_app() -> FastAPI:
         if password != password_confirm:
             return "两次输入的密码不一致。"
         return None
+
+    def normalize_person_status_flags(
+        employee_status: str,
+        allow_login: bool,
+        participate_schedule: bool,
+        is_assignable: bool,
+        is_active: bool,
+    ) -> Dict[str, int]:
+        clean_status = employee_status.strip() or "在职"
+        if clean_status == "离职":
+            return {
+                "allow_login": 0,
+                "participate_schedule": 0,
+                "is_assignable": 0,
+                "is_active": 0,
+            }
+        allow_login_flag = 1 if allow_login else 0
+        active_flag = 1 if is_active and allow_login_flag else 0
+        return {
+            "allow_login": allow_login_flag,
+            "participate_schedule": 1 if participate_schedule else 0,
+            "is_assignable": 1 if is_assignable and allow_login_flag and active_flag else 0,
+            "is_active": active_flag,
+        }
 
     def render_ticket_detail(
         request: Request,
@@ -10169,6 +10431,14 @@ def create_app() -> FastAPI:
         csrf_token: str = Form(""),
         username: str = Form(""),
         display_name: str = Form(""),
+        employee_name: str = Form(""),
+        phone: str = Form(""),
+        employee_role: str = Form(""),
+        primary_store_name: str = Form(""),
+        schedule_store_names: Optional[List[str]] = Form(None),
+        allow_login: str = Form(""),
+        participate_schedule: str = Form(""),
+        employee_status: str = Form("在职"),
         password: str = Form(""),
         password_confirm: str = Form(""),
         role_id: int = Form(0),
@@ -10179,48 +10449,122 @@ def create_app() -> FastAPI:
     ):
         admin = str(current_user.get("username") or "")
         require_admin_csrf(request, csrf_token)
+        allow_login_flag = allow_login == "1" or bool(username.strip())
+        participate_schedule_flag = participate_schedule == "1"
+        clean_employee_status = employee_status.strip() or "在职"
+        flags = normalize_person_status_flags(
+            clean_employee_status,
+            allow_login_flag,
+            participate_schedule_flag,
+            is_assignable == "1",
+            is_active == "1",
+        )
+        clean_person_name = employee_name.strip() or display_name.strip() or username.strip()
+        if not clean_person_name:
+            return render_account_page(request, admin, error="请填写人员姓名。", status_code=400)
+        if clean_employee_status not in EMPLOYEE_STATUSES:
+            return render_account_page(request, admin, error="员工状态不正确。", status_code=400)
         clean_username = username.strip()
-        if not clean_username or not USERNAME_RE.match(clean_username):
-            return render_account_page(request, admin, error="用户名只能使用字母、数字、下划线和短横线。", status_code=400)
-        password_error = validate_account_password(password, password_confirm)
-        if password_error:
-            return render_account_page(request, admin, error=password_error, status_code=400)
+        if flags["allow_login"]:
+            if not clean_username or not USERNAME_RE.match(clean_username):
+                return render_account_page(request, admin, error="用户名只能使用字母、数字、下划线和短横线。", status_code=400)
+            password_error = validate_account_password(password, password_confirm)
+            if password_error:
+                return render_account_page(request, admin, error=password_error, status_code=400)
+        employee_store_data: Optional[Tuple[str, List[str]]] = None
+        if flags["participate_schedule"]:
+            try:
+                employee_store_data = normalize_employee_store_data(
+                    primary_store_name,
+                    schedule_store_names,
+                    "",
+                    load_app_config(),
+                )
+            except ValueError as exc:
+                return render_account_page(request, admin, error=form_error_message(exc), status_code=400)
         timestamp = now_text()
         try:
             with get_connection() as connection:
-                role = connection.execute("SELECT id FROM admin_roles WHERE id = ?", (role_id,)).fetchone()
-                if not role:
+                if flags["allow_login"]:
+                    role = connection.execute("SELECT id FROM admin_roles WHERE id = ?", (role_id,)).fetchone()
+                else:
+                    role = None
+                if flags["allow_login"] and not role:
                     return render_account_page(request, admin, error="请选择有效角色。", status_code=400)
-                connection.execute(
-                    """
-                    INSERT INTO admin_users (
-                        username, display_name, password_hash, role_id, is_active, is_assignable,
-                        data_scope, store_names, created_at, updated_at, created_by, updated_by
+                new_employee_id: Optional[int] = None
+                new_user_id: Optional[int] = None
+                if flags["participate_schedule"] and employee_store_data is not None:
+                    primary_store, clean_schedule_stores = employee_store_data
+                    employee_cursor = connection.execute(
+                        """
+                        INSERT INTO employees (
+                            employee_name, store_name, primary_store_name, user_id, allow_login, participate_schedule,
+                            role, phone, status, created_at, updated_at
+                        )
+                        VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            clean_person_name,
+                            primary_store,
+                            primary_store,
+                            flags["allow_login"],
+                            flags["participate_schedule"],
+                            employee_role.strip(),
+                            phone.strip(),
+                            clean_employee_status,
+                            timestamp,
+                            timestamp,
+                        ),
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        clean_username,
-                        display_name.strip() or clean_username,
-                        hash_password(password),
-                        int(role_id),
-                        1 if is_active == "1" else 0,
-                        1 if is_assignable == "1" else 0,
-                        normalize_admin_data_scope(data_scope),
-                        store_names.strip(),
-                        timestamp,
-                        timestamp,
-                        admin,
-                        admin,
-                    ),
-                )
-                new_user_id = int(connection.execute("SELECT last_insert_rowid() AS id").fetchone()["id"])
+                    new_employee_id = int(employee_cursor.lastrowid)
+                    replace_employee_store_bindings(connection, new_employee_id, clean_schedule_stores, timestamp)
+                if flags["allow_login"]:
+                    user_cursor = connection.execute(
+                        """
+                        INSERT INTO admin_users (
+                            username, display_name, password_hash, role_id, employee_id,
+                            allow_login, participate_schedule, is_active, is_assignable,
+                            data_scope, store_names, created_at, updated_at, created_by, updated_by
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            clean_username,
+                            display_name.strip() or clean_person_name or clean_username,
+                            hash_password(password),
+                            int(role_id),
+                            new_employee_id,
+                            flags["allow_login"],
+                            flags["participate_schedule"],
+                            flags["is_active"],
+                            flags["is_assignable"],
+                            normalize_admin_data_scope(data_scope),
+                            store_names.strip(),
+                            timestamp,
+                            timestamp,
+                            admin,
+                            admin,
+                        ),
+                    )
+                    new_user_id = int(user_cursor.lastrowid)
+                    if new_employee_id is not None:
+                        connection.execute(
+                            "UPDATE employees SET user_id = ?, allow_login = ?, updated_at = ? WHERE id = ?",
+                            (new_user_id, flags["allow_login"], timestamp, new_employee_id),
+                        )
             record_operation_log(
                 admin,
                 "account.create",
-                "admin_user",
-                new_user_id,
-                {"username": clean_username, "role_id": role_id, "is_assignable": is_assignable == "1"},
+                "person",
+                new_user_id or new_employee_id or "",
+                {
+                    "username": clean_username,
+                    "employee_id": new_employee_id,
+                    "role_id": role_id if flags["allow_login"] else "",
+                    "allow_login": flags["allow_login"],
+                    "participate_schedule": flags["participate_schedule"],
+                    "is_assignable": flags["is_assignable"],
+                },
                 request,
             )
         except sqlite3.IntegrityError:
@@ -10236,6 +10580,15 @@ def create_app() -> FastAPI:
         current_user: Dict[str, object] = Depends(require_permission("account.update")),
         csrf_token: str = Form(""),
         display_name: str = Form(""),
+        employee_name: str = Form(""),
+        phone: str = Form(""),
+        employee_role: str = Form(""),
+        primary_store_name: str = Form(""),
+        schedule_store_names: Optional[List[str]] = Form(None),
+        allow_login: str = Form("__missing__"),
+        participate_schedule: str = Form("__missing__"),
+        employee_status: str = Form(""),
+        username: str = Form(""),
         role_id: int = Form(0),
         data_scope: str = Form("all"),
         store_names: str = Form(""),
@@ -10247,36 +10600,148 @@ def create_app() -> FastAPI:
         target_user = fetch_admin_user_by_id(user_id)
         if not target_user:
             return render_account_page(request, admin, error="账号不存在。", status_code=404)
-        active_flag = 1 if is_active == "1" else 0
-        if active_flag == 0:
+        linked_employee = fetch_employee(int(target_user["employee_id"])) if target_user.get("employee_id") else None
+        clean_employee_status = employee_status.strip() or str((linked_employee or {}).get("status") or "在职")
+        allow_login_flag = int(target_user.get("allow_login") or 0) == 1 if allow_login == "__missing__" else allow_login == "1"
+        participate_schedule_flag = (
+            int(target_user.get("participate_schedule") or 0) == 1
+            if participate_schedule == "__missing__"
+            else participate_schedule == "1"
+        )
+        is_active_flag = int(target_user.get("is_active") or 0) == 1 if is_active == "" else is_active == "1"
+        flags = normalize_person_status_flags(
+            clean_employee_status,
+            allow_login_flag,
+            participate_schedule_flag,
+            is_assignable == "1",
+            is_active_flag,
+        )
+        if clean_employee_status not in EMPLOYEE_STATUSES:
+            return render_account_page(request, admin, error="员工状态不正确。", status_code=400)
+        if flags["is_active"] == 0 or flags["allow_login"] == 0:
             errors = deactivate_admin_user_errors(target_user, admin)
             if errors:
                 return render_account_page(request, admin, error="，".join(errors) + "。", status_code=400)
+        clean_person_name = (
+            employee_name.strip()
+            or display_name.strip()
+            or str((linked_employee or {}).get("employee_name") or "")
+            or str(target_user["display_name"])
+            or str(target_user["username"])
+        )
+        employee_store_data: Optional[Tuple[str, List[str]]] = None
+        if flags["participate_schedule"]:
+            try:
+                employee_store_data = normalize_employee_store_data(
+                    primary_store_name,
+                    schedule_store_names,
+                    str((linked_employee or {}).get("primary_store_name") or (linked_employee or {}).get("store_name") or ""),
+                    load_app_config(),
+                )
+            except ValueError as exc:
+                return render_account_page(request, admin, error=form_error_message(exc), status_code=400)
         try:
             with get_connection() as connection:
-                role = connection.execute("SELECT role_name FROM admin_roles WHERE id = ?", (role_id,)).fetchone()
-                if not role:
+                role = connection.execute("SELECT role_name FROM admin_roles WHERE id = ?", (role_id,)).fetchone() if flags["allow_login"] else None
+                if flags["allow_login"] and not role:
                     return render_account_page(request, admin, error="请选择有效角色。", status_code=400)
                 current_role_name = str(target_user.get("role_name") or "")
-                new_role_name = str(role["role_name"] or "")
+                new_role_name = str(role["role_name"] or "") if role else current_role_name
                 if (
+                    flags["allow_login"]
+                    and flags["is_active"]
+                    and role
+                    and
                     current_role_name == SYSTEM_ADMIN_ROLE_NAME
                     and new_role_name != SYSTEM_ADMIN_ROLE_NAME
                     and active_system_admin_count(connection, int(user_id)) <= 0
                 ):
                     return render_account_page(request, admin, error="不能移除最后一个系统管理员角色。", status_code=400)
+                employee_id_value = int(target_user["employee_id"]) if target_user.get("employee_id") else None
+                if flags["participate_schedule"] and employee_store_data is not None:
+                    primary_store, clean_schedule_stores = employee_store_data
+                    if employee_id_value:
+                        connection.execute(
+                            """
+                            UPDATE employees
+                            SET employee_name = ?, store_name = ?, primary_store_name = ?, user_id = ?,
+                                allow_login = ?, participate_schedule = ?, role = ?, phone = ?,
+                                status = ?, updated_at = ?
+                            WHERE id = ?
+                            """,
+                            (
+                                clean_person_name,
+                                primary_store,
+                                primary_store,
+                                int(user_id),
+                                flags["allow_login"],
+                                flags["participate_schedule"],
+                                employee_role.strip(),
+                                phone.strip(),
+                                clean_employee_status,
+                                now_text(),
+                                employee_id_value,
+                            ),
+                        )
+                    else:
+                        employee_cursor = connection.execute(
+                            """
+                            INSERT INTO employees (
+                                employee_name, store_name, primary_store_name, user_id, allow_login, participate_schedule,
+                                role, phone, status, created_at, updated_at
+                            )
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                clean_person_name,
+                                primary_store,
+                                primary_store,
+                                int(user_id),
+                                flags["allow_login"],
+                                flags["participate_schedule"],
+                                employee_role.strip(),
+                                phone.strip(),
+                                clean_employee_status,
+                                now_text(),
+                                now_text(),
+                            ),
+                        )
+                        employee_id_value = int(employee_cursor.lastrowid)
+                    replace_employee_store_bindings(connection, employee_id_value, clean_schedule_stores, now_text())
+                elif employee_id_value:
+                    connection.execute(
+                        """
+                        UPDATE employees
+                        SET employee_name = ?, allow_login = ?, participate_schedule = 0,
+                            role = ?, phone = ?, status = ?, updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (
+                            clean_person_name,
+                            flags["allow_login"],
+                            employee_role.strip(),
+                            phone.strip(),
+                            clean_employee_status,
+                            now_text(),
+                            employee_id_value,
+                        ),
+                    )
                 connection.execute(
                     """
                     UPDATE admin_users
-                    SET display_name = ?, role_id = ?, is_active = ?, is_assignable = ?,
+                    SET display_name = ?, role_id = ?, employee_id = ?, allow_login = ?, participate_schedule = ?,
+                        is_active = ?, is_assignable = ?,
                         data_scope = ?, store_names = ?, updated_at = ?, updated_by = ?
                     WHERE id = ?
                     """,
                     (
-                        display_name.strip() or str(target_user["username"]),
-                        int(role_id),
-                        active_flag,
-                        1 if is_assignable == "1" else 0,
+                        display_name.strip() or clean_person_name or str(target_user["username"]),
+                        int(role_id) if flags["allow_login"] else int(target_user.get("role_id") or 0),
+                        employee_id_value,
+                        flags["allow_login"],
+                        flags["participate_schedule"],
+                        flags["is_active"],
+                        flags["is_assignable"],
                         normalize_admin_data_scope(data_scope),
                         store_names.strip(),
                         now_text(),
@@ -10289,7 +10754,13 @@ def create_app() -> FastAPI:
                 "account.update",
                 "admin_user",
                 user_id,
-                {"username": target_user["username"], "role_id": role_id, "is_active": active_flag},
+                {
+                    "username": target_user["username"],
+                    "role_id": role_id,
+                    "allow_login": flags["allow_login"],
+                    "participate_schedule": flags["participate_schedule"],
+                    "is_active": flags["is_active"],
+                },
                 request,
             )
         except sqlite3.Error:
@@ -10316,6 +10787,10 @@ def create_app() -> FastAPI:
                 "UPDATE admin_users SET is_active = 0, updated_at = ?, updated_by = ? WHERE id = ?",
                 (now_text(), admin, int(user_id)),
             )
+            connection.execute(
+                "UPDATE employees SET allow_login = 0, updated_at = ? WHERE user_id = ?",
+                (now_text(), int(user_id)),
+            )
         record_operation_log(admin, "account.disable", "admin_user", user_id, {"username": target_user["username"]}, request)
         return RedirectResponse(url="/admin/account?success=disabled", status_code=303)
 
@@ -10333,8 +10808,12 @@ def create_app() -> FastAPI:
             return render_account_page(request, admin, error="账号不存在。", status_code=404)
         with get_connection() as connection:
             connection.execute(
-                "UPDATE admin_users SET is_active = 1, updated_at = ?, updated_by = ? WHERE id = ?",
+                "UPDATE admin_users SET allow_login = 1, is_active = 1, updated_at = ?, updated_by = ? WHERE id = ?",
                 (now_text(), admin, int(user_id)),
+            )
+            connection.execute(
+                "UPDATE employees SET allow_login = 1, updated_at = ? WHERE user_id = ?",
+                (now_text(), int(user_id)),
             )
         record_operation_log(admin, "account.enable", "admin_user", user_id, {"username": target_user["username"]}, request)
         return RedirectResponse(url="/admin/account?success=enabled", status_code=303)
@@ -10353,6 +10832,8 @@ def create_app() -> FastAPI:
         target_user = fetch_admin_user_by_id(user_id)
         if not target_user:
             return render_account_page(request, admin, error="账号不存在。", status_code=404)
+        if int(target_user.get("allow_login") or 0) != 1:
+            return render_account_page(request, admin, error="该人员未允许登录后台，不能重置密码。", status_code=400)
         password_error = validate_account_password(password, password_confirm)
         if password_error:
             return render_account_page(request, admin, error=password_error, status_code=400)

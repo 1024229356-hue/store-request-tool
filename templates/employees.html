@@ -1,10 +1,11 @@
-{% set page_title = '员工管理' %}
-{% set page_subtitle = '维护员工基础资料和多门店归属，离职或停用员工不会进入排班。' %}
+{% set page_title = '排班人员视图' %}
+{% set page_subtitle = '人员资料请统一到“人员与账号管理”维护。本页主要用于查看和管理排班人员。' %}
 {% set page_eyebrow = '门店排班' %}
 {% set current_menu = 'employees' %}
 {% extends "base_admin.html" %}
 
 {% block topbar_actions %}
+<a class="primary-button compact" href="/admin/account?filter=participate_schedule">新增人员</a>
 <a class="quick-action-button" href="/admin/schedules">门店排班</a>
 <a class="ghost-button compact" href="/admin/shift-types">班次设置</a>
 {% endblock %}
@@ -16,14 +17,15 @@
 <section class="employee-workbench">
   <div class="schedule-action-layer ops-card">
     <div>
-      <p class="eyebrow">员工主数据</p>
-      <h2>员工卡片</h2>
-      <p class="subtle">主门店用于归属识别；绑定门店用于排班授权，一个员工可以支援多个门店。</p>
+      <p class="eyebrow">排班人员视图</p>
+      <h2>排班人员卡片</h2>
+      <p class="subtle">人员资料请统一到“人员与账号管理”维护。本页主要用于查看和管理排班人员。</p>
     </div>
     <div class="schedule-action-buttons">
-      {% if has_perm('employee.create') %}
+      {% if false and has_perm('employee.create') %}
       <button class="primary-button compact" type="button" data-drawer-open="employee-create-drawer">新增员工</button>
       {% endif %}
+      <a class="primary-button compact" href="/admin/account?filter=participate_schedule">新增人员</a>
       <a class="ghost-button compact" href="/admin/schedules">回到排班</a>
     </div>
   </div>
@@ -159,7 +161,7 @@
       </div>
     </section>
     {% else %}
-    <div class="ops-card empty-cell">暂无员工，请先新增员工。</div>
+    <div class="ops-card empty-cell">暂无排班人员，请到人员与账号管理新增或启用参与排班。</div>
     {% endfor %}
   </section>
 
@@ -172,7 +174,7 @@
   </nav>
 </section>
 
-{% if has_perm('employee.create') %}
+{% if false and has_perm('employee.create') %}
 <aside class="employee-drawer drawer-overlay" id="employee-create-drawer" data-drawer="employee-create-drawer" hidden>
   <div class="drawer-panel">
     <header>
