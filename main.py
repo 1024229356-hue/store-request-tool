@@ -50,6 +50,81 @@ DEFAULT_URGENCY_LEVELS = ["普通", "加急", "当天必须处理"]
 DEFAULT_STATUSES = ["待处理", "处理中", "待门店补充", "已完成", "已驳回"]
 DEFAULT_BRANDS: List[str] = []
 DEFAULT_HANDLERS: List[str] = []
+PRODUCT_RECOMMENDED_FIELDS = ["品牌", "商品名称", "规格条码", "数量"]
+DEFAULT_REQUEST_TYPE_TEMPLATES = [
+    {
+        "request_type": "建采购单",
+        "template_name": "建采购单",
+        "description": "门店需要总部协助创建采购单。",
+        "recommended_fields": PRODUCT_RECOMMENDED_FIELDS,
+        "required_description": 1,
+        "image_required": 0,
+        "file_required": 0,
+        "expected_finish_required": 0,
+        "field_help_text": "请尽量说明建单原因、品牌、商品规格、数量和是否已有品牌方确认。商品信息不完整也可以先提交，后续由总部补充。",
+        "sort_order": 10,
+    },
+    {
+        "request_type": "缺货补货",
+        "template_name": "缺货补货",
+        "description": "门店缺货或需要补货支持。",
+        "recommended_fields": PRODUCT_RECOMMENDED_FIELDS,
+        "required_description": 1,
+        "image_required": 0,
+        "file_required": 0,
+        "expected_finish_required": 0,
+        "field_help_text": "请尽量说明缺货商品、当前需求数量、影响销售情况。商品信息不完整也可以提交。",
+        "sort_order": 20,
+    },
+    {
+        "request_type": "瑕疵/破损/漏发",
+        "template_name": "瑕疵/破损/漏发",
+        "description": "商品瑕疵、破损、漏发、错发等售后问题。",
+        "recommended_fields": PRODUCT_RECOMMENDED_FIELDS,
+        "required_description": 1,
+        "image_required": 1,
+        "file_required": 0,
+        "expected_finish_required": 0,
+        "field_help_text": "请上传清晰图片，说明问题类型：破损、漏发、错发、瑕疵。商品信息建议填写，但不强制。",
+        "sort_order": 30,
+    },
+    {
+        "request_type": "审盘点单",
+        "template_name": "审盘点单",
+        "description": "门店盘点单或异常点需要总部审核。",
+        "recommended_fields": [],
+        "required_description": 1,
+        "image_required": 0,
+        "file_required": 1,
+        "expected_finish_required": 0,
+        "field_help_text": "请上传盘点单或截图，并说明需要审核的异常点。",
+        "sort_order": 40,
+    },
+    {
+        "request_type": "排班问题",
+        "template_name": "排班问题",
+        "description": "门店排班、员工、班次或日期调整问题。",
+        "recommended_fields": [],
+        "required_description": 1,
+        "image_required": 0,
+        "file_required": 0,
+        "expected_finish_required": 0,
+        "field_help_text": "请说明门店、日期、员工、班次和需要调整的原因。",
+        "sort_order": 50,
+    },
+    {
+        "request_type": "其他",
+        "template_name": "其他",
+        "description": "未归入固定类型的门店需求。",
+        "recommended_fields": [],
+        "required_description": 1,
+        "image_required": 0,
+        "file_required": 0,
+        "expected_finish_required": 0,
+        "field_help_text": "请尽量说明背景、影响范围和期望处理方式。",
+        "sort_order": 60,
+    },
+]
 ADMIN_PERMISSION_KEYS = [
     "ticket.view",
     "ticket.create",
@@ -66,6 +141,8 @@ ADMIN_PERMISSION_KEYS = [
     "ticket.assignment_rule.update",
     "ticket.sla_rule.view",
     "ticket.sla_rule.update",
+    "ticket.template.view",
+    "ticket.template.update",
     "schedule.view",
     "schedule.create",
     "schedule.update",
@@ -2769,6 +2846,107 @@ def set_sla_rule_enabled(rule_id: int, enabled: bool, admin: str) -> Dict[str, o
     return {"id": int(rule_id), "enabled": 1 if enabled else 0}
 
 
+def save_request_type_template(template_id: int, data: Dict[str, object], admin: str) -> Dict[str, object]:
+    request_type = normalize_rule_text(data.get("request_type"))
+    if not request_type:
+        raise ValueError("请选择需求类型。")
+    try:
+        sort_order = int(data.get("sort_order") or 100)
+    except (TypeError, ValueError):
+        sort_order = 100
+    timestamp = now_text()
+    values = {
+        "request_type": request_type,
+        "template_name": normalize_rule_text(data.get("template_name")) or request_type,
+        "description": normalize_rule_text(data.get("description")),
+        "recommended_fields": serialize_recommended_fields(parse_recommended_fields(data.get("recommended_fields"))),
+        "required_description": 1 if str(data.get("required_description") or "").strip() in {"1", "true", "on", "yes"} else 0,
+        "image_required": 1 if str(data.get("image_required") or "").strip() in {"1", "true", "on", "yes"} else 0,
+        "file_required": 1 if str(data.get("file_required") or "").strip() in {"1", "true", "on", "yes"} else 0,
+        "expected_finish_required": 1 if str(data.get("expected_finish_required") or "").strip() in {"1", "true", "on", "yes"} else 0,
+        "field_help_text": normalize_rule_text(data.get("field_help_text")),
+        "enabled": 1 if str(data.get("enabled") or "").strip() in {"1", "true", "on", "yes"} else 0,
+        "sort_order": sort_order,
+    }
+    with get_connection() as connection:
+        if int(template_id or 0) > 0:
+            template = connection.execute("SELECT id FROM request_type_templates WHERE id = ?", (int(template_id),)).fetchone()
+            if not template:
+                raise ValueError("工单类型模板不存在。")
+            connection.execute(
+                """
+                UPDATE request_type_templates
+                SET request_type = ?, template_name = ?, description = ?, recommended_fields = ?,
+                    required_description = ?, image_required = ?, file_required = ?,
+                    expected_finish_required = ?, field_help_text = ?, enabled = ?,
+                    sort_order = ?, updated_at = ?, updated_by = ?
+                WHERE id = ?
+                """,
+                (
+                    values["request_type"],
+                    values["template_name"],
+                    values["description"],
+                    values["recommended_fields"],
+                    values["required_description"],
+                    values["image_required"],
+                    values["file_required"],
+                    values["expected_finish_required"],
+                    values["field_help_text"],
+                    values["enabled"],
+                    values["sort_order"],
+                    timestamp,
+                    admin,
+                    int(template_id),
+                ),
+            )
+            values["id"] = int(template_id)
+            values["action"] = "ticket.template.update"
+        else:
+            cursor = connection.execute(
+                """
+                INSERT INTO request_type_templates (
+                    request_type, template_name, description, recommended_fields,
+                    required_description, image_required, file_required, expected_finish_required,
+                    field_help_text, enabled, sort_order, created_at, updated_at, created_by, updated_by
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    values["request_type"],
+                    values["template_name"],
+                    values["description"],
+                    values["recommended_fields"],
+                    values["required_description"],
+                    values["image_required"],
+                    values["file_required"],
+                    values["expected_finish_required"],
+                    values["field_help_text"],
+                    values["enabled"],
+                    values["sort_order"],
+                    timestamp,
+                    timestamp,
+                    admin,
+                    admin,
+                ),
+            )
+            values["id"] = int(cursor.lastrowid)
+            values["action"] = "ticket.template.create"
+    return values
+
+
+def set_request_type_template_enabled(template_id: int, enabled: bool, admin: str) -> Dict[str, object]:
+    timestamp = now_text()
+    with get_connection() as connection:
+        template = connection.execute("SELECT * FROM request_type_templates WHERE id = ?", (int(template_id),)).fetchone()
+        if not template:
+            raise ValueError("工单类型模板不存在。")
+        connection.execute(
+            "UPDATE request_type_templates SET enabled = ?, updated_at = ?, updated_by = ? WHERE id = ?",
+            (1 if enabled else 0, timestamp, admin, int(template_id)),
+        )
+    return {"id": int(template_id), "enabled": 1 if enabled else 0}
+
+
 def ticket_rule_match_preview(store_name: str, request_type: str, brand: str, urgency_level: str) -> Dict[str, object]:
     assignment_rule = match_assignment_rule([store_name], request_type, [brand])
     assigned_user = resolve_assignment_handler(assignment_rule) if assignment_rule else None
@@ -2791,6 +2969,8 @@ def admin_permission_groups() -> List[Dict[str, object]]:
         "ticket.assignment_rule.update": "维护分派规则",
         "ticket.sla_rule.view": "查看 SLA 规则",
         "ticket.sla_rule.update": "维护 SLA 规则",
+        "ticket.template.view": "查看类型模板",
+        "ticket.template.update": "维护类型模板",
         "schedule.view": "查看排班",
         "schedule.create": "新增排班",
         "schedule.export": "导出排班",
@@ -2897,6 +3077,8 @@ PERMISSION_ROUTE_RULES: List[Dict[str, str]] = [
     {"method": "POST", "path": "/admin/ticket-rules/sla", "permission": "ticket.sla_rule.update", "module": "工单规则", "label": "保存 SLA 规则"},
     {"method": "POST", "path": "/admin/ticket-rules/sla/{rule_id}/toggle", "permission": "ticket.sla_rule.update", "module": "工单规则", "label": "启停 SLA 规则"},
     {"method": "POST", "path": "/admin/ticket-rules/sla/{rule_id}/delete", "permission": "ticket.sla_rule.update", "module": "工单规则", "label": "停用 SLA 规则"},
+    {"method": "POST", "path": "/admin/ticket-rules/templates", "permission": "ticket.template.update", "module": "工单规则", "label": "保存工单类型模板"},
+    {"method": "POST", "path": "/admin/ticket-rules/templates/{template_id}/toggle", "permission": "ticket.template.update", "module": "工单规则", "label": "启停工单类型模板"},
     {"method": "POST", "path": "/admin/ticket-rules/test", "permission": "ticket.assignment_rule.view", "module": "工单规则", "label": "测试工单规则"},
     {"method": "GET", "path": "/admin/trash", "permission": "ticket.view_trash", "module": "回收站", "label": "工单回收站"},
     {"method": "GET", "path": "/admin/cleanup", "permission": "ticket.delete", "module": "回收站", "label": "测试数据清理"},
@@ -3765,6 +3947,28 @@ def init_db() -> None:
         )
         connection.execute(
             """
+            CREATE TABLE IF NOT EXISTS request_type_templates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                request_type TEXT NOT NULL,
+                template_name TEXT,
+                description TEXT,
+                recommended_fields TEXT,
+                required_description INTEGER DEFAULT 1,
+                image_required INTEGER DEFAULT 0,
+                file_required INTEGER DEFAULT 0,
+                expected_finish_required INTEGER DEFAULT 0,
+                field_help_text TEXT,
+                enabled INTEGER DEFAULT 1,
+                sort_order INTEGER DEFAULT 100,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                created_by TEXT,
+                updated_by TEXT
+            )
+            """
+        )
+        connection.execute(
+            """
             CREATE TABLE IF NOT EXISTS notification_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 event_type TEXT NOT NULL,
@@ -3938,6 +4142,8 @@ def init_db() -> None:
         connection.execute("CREATE INDEX IF NOT EXISTS idx_ticket_assignment_rules_enabled ON ticket_assignment_rules(enabled)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_ticket_assignment_rules_priority ON ticket_assignment_rules(priority)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_ticket_sla_rules_enabled ON ticket_sla_rules(enabled)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_request_type_templates_type ON request_type_templates(request_type)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_request_type_templates_enabled ON request_type_templates(enabled)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_ticket_supplements_ticket_id ON ticket_supplements(ticket_id)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_ticket_participants_ticket_id ON ticket_participants(ticket_id)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_ticket_comments_ticket_id ON ticket_comments(ticket_id)")
@@ -3989,6 +4195,7 @@ def init_db() -> None:
         backfill_ticket_relations(connection)
         backfill_employee_store_map(connection)
         backfill_person_account_links(connection)
+        seed_default_request_type_templates(connection)
         ensure_default_shift_types(connection)
 
 
@@ -4141,6 +4348,161 @@ REQUEST_RULE_FIELD_LABELS = {
     "description": "问题说明",
     "expected_finish_date": "期望完成时间",
 }
+PRODUCT_RULE_FIELDS = {"brand", "product_name", "sku_barcode", "quantity"}
+
+
+def serialize_recommended_fields(fields: Iterable[object]) -> str:
+    return "、".join(unique_clean_values(fields))
+
+
+def parse_recommended_fields(value: object) -> List[str]:
+    text = str(value or "").strip()
+    if not text:
+        return []
+    return unique_clean_values(MULTI_VALUE_SPLIT_RE.split(text))
+
+
+def generic_request_type_template(request_type: str = "") -> Dict[str, object]:
+    return {
+        "id": 0,
+        "request_type": request_type,
+        "template_name": request_type or "通用模板",
+        "description": "",
+        "recommended_fields": [],
+        "required_description": 1,
+        "image_required": 0,
+        "file_required": 0,
+        "expected_finish_required": 0,
+        "field_help_text": "请尽量说明背景、影响范围和期望处理方式。商品信息可作为建议填写，不会阻止提交。",
+        "enabled": 1,
+        "sort_order": 100,
+    }
+
+
+def normalize_request_type_template_row(row: Dict[str, object] | sqlite3.Row) -> Dict[str, object]:
+    template = dict(row)
+    template["id"] = int(template.get("id") or 0)
+    template["request_type"] = str(template.get("request_type") or "")
+    template["template_name"] = str(template.get("template_name") or template["request_type"] or "通用模板")
+    template["description"] = str(template.get("description") or "")
+    template["recommended_fields"] = parse_recommended_fields(template.get("recommended_fields"))
+    template["required_description"] = int(template.get("required_description") or 0)
+    template["image_required"] = int(template.get("image_required") or 0)
+    template["file_required"] = int(template.get("file_required") or 0)
+    template["expected_finish_required"] = int(template.get("expected_finish_required") or 0)
+    template["field_help_text"] = str(template.get("field_help_text") or "")
+    template["enabled"] = int(template.get("enabled") or 0)
+    template["sort_order"] = int(template.get("sort_order") or 100)
+    return template
+
+
+def seed_default_request_type_templates(connection: sqlite3.Connection) -> None:
+    timestamp = now_text()
+    for template in DEFAULT_REQUEST_TYPE_TEMPLATES:
+        connection.execute(
+            """
+            INSERT INTO request_type_templates (
+                request_type, template_name, description, recommended_fields,
+                required_description, image_required, file_required, expected_finish_required,
+                field_help_text, enabled, sort_order, created_at, updated_at, created_by, updated_by
+            )
+            SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, 'system', 'system'
+            WHERE NOT EXISTS (
+                SELECT 1 FROM request_type_templates WHERE request_type = ?
+            )
+            """,
+            (
+                str(template["request_type"]),
+                str(template["template_name"]),
+                str(template["description"]),
+                serialize_recommended_fields(template["recommended_fields"]),
+                int(template["required_description"]),
+                int(template["image_required"]),
+                int(template["file_required"]),
+                int(template["expected_finish_required"]),
+                str(template["field_help_text"]),
+                int(template["sort_order"]),
+                timestamp,
+                timestamp,
+                str(template["request_type"]),
+            ),
+        )
+
+
+def fetch_request_type_templates(include_disabled: bool = True) -> List[Dict[str, object]]:
+    enabled_clause = "" if include_disabled else "WHERE enabled = 1"
+    with get_connection() as connection:
+        rows = connection.execute(
+            f"""
+            SELECT *
+            FROM request_type_templates
+            {enabled_clause}
+            ORDER BY sort_order ASC, id ASC
+            """
+        ).fetchall()
+    return [normalize_request_type_template_row(row) for row in rows]
+
+
+def request_type_templates_for_client() -> Dict[str, Dict[str, object]]:
+    return {
+        str(template["request_type"]): {
+            "template_name": template["template_name"],
+            "description": template["description"],
+            "recommended_fields": template["recommended_fields"],
+            "required_fields": [
+                label
+                for label, enabled in (
+                    ("问题说明", template["required_description"]),
+                    ("图片", template["image_required"]),
+                    ("附件", template["file_required"]),
+                    ("期望完成时间", template["expected_finish_required"]),
+                )
+                if int(enabled or 0) == 1
+            ],
+            "required_description": int(template["required_description"]),
+            "image_required": int(template["image_required"]),
+            "file_required": int(template["file_required"]),
+            "expected_finish_required": int(template["expected_finish_required"]),
+            "field_help_text": template["field_help_text"],
+        }
+        for template in fetch_request_type_templates(include_disabled=False)
+    }
+
+
+def fetch_active_request_type_template(request_type: str) -> Dict[str, object]:
+    clean_request_type = str(request_type or "").strip()
+    if not clean_request_type:
+        return generic_request_type_template(clean_request_type)
+    with get_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT *
+            FROM request_type_templates
+            WHERE request_type = ? AND enabled = 1
+            ORDER BY sort_order ASC, id ASC
+            LIMIT 1
+            """,
+            (clean_request_type,),
+        ).fetchone()
+    return normalize_request_type_template_row(row) if row else generic_request_type_template(clean_request_type)
+
+
+def validate_request_type_template(
+    request_type: str,
+    values: Dict[str, object],
+    prepared_images: List[Tuple[str, bytes]],
+    prepared_files: List[PreparedFile],
+) -> Optional[str]:
+    template = fetch_active_request_type_template(request_type)
+    if int(template.get("required_description") or 0) == 1 and not str(values.get("description") or "").strip():
+        return "请填写问题说明。"
+    if int(template.get("image_required") or 0) == 1 and not prepared_images:
+        return f"{request_type}必须上传至少一张图片。"
+    if int(template.get("file_required") or 0) == 1 and not prepared_files:
+        return f"{request_type}必须上传至少一个文件附件。"
+    if int(template.get("expected_finish_required") or 0) == 1 and not str(values.get("expected_finish_date") or "").strip():
+        return f"{request_type}必须填写期望完成时间。"
+    return None
 
 
 def load_request_type_rules() -> Dict[str, Dict[str, object]]:
@@ -4154,7 +4516,7 @@ def load_request_type_rules() -> Dict[str, Dict[str, object]]:
         required_fields = [
             str(field).strip()
             for field in raw_rule.get("required_fields", [])
-            if str(field).strip() in REQUEST_RULE_FIELD_LABELS
+            if str(field).strip() in REQUEST_RULE_FIELD_LABELS and str(field).strip() not in PRODUCT_RULE_FIELDS
         ]
         rules[str(request_type)] = {
             "required_fields": required_fields,
@@ -4394,8 +4756,6 @@ def validate_submission(
         return "请选择有效需求类型。"
     if urgency not in urgency_levels:
         return "请选择有效紧急程度。"
-    if not description.strip():
-        return "请填写问题说明。"
     if quantity.strip() and not quantity.strip().isdigit():
         return "数量只能填写数字。"
     return None
@@ -4407,6 +4767,9 @@ def validate_request_type_rule(
     prepared_images: List[Tuple[str, bytes]],
     prepared_files: List[PreparedFile],
 ) -> Optional[str]:
+    template_error = validate_request_type_template(request_type, values, prepared_images, prepared_files)
+    if template_error:
+        return template_error
     rule = load_request_type_rules().get(request_type)
     if not rule:
         return None
@@ -9457,7 +9820,7 @@ def create_app() -> FastAPI:
             "max_total_file_upload_mb": config.max_total_file_upload_mb,
             "error": error,
             "values": values or {},
-            "request_type_rules_json": json.dumps(load_request_type_rules(), ensure_ascii=False),
+            "request_type_rules_json": json.dumps(request_type_templates_for_client(), ensure_ascii=False),
         }
 
     def render_submit_form(
@@ -10729,7 +11092,7 @@ def create_app() -> FastAPI:
                 "max_file_mb": config.max_file_mb,
                 "max_total_file_upload_mb": config.max_total_file_upload_mb,
                 "values": {},
-                "request_type_rules_json": json.dumps(load_request_type_rules(), ensure_ascii=False),
+                "request_type_rules_json": json.dumps(request_type_templates_for_client(), ensure_ascii=False),
             },
         )
 
@@ -11537,6 +11900,7 @@ def create_app() -> FastAPI:
                 "csrf_token": current_csrf_token(request),
                 "assignment_rules": fetch_assignment_rules(),
                 "sla_rules": fetch_sla_rules(),
+                "request_type_templates": fetch_request_type_templates(),
                 "roles": fetch_admin_roles(),
                 "handlers": config.handlers,
                 "stores": config.stores,
@@ -11554,7 +11918,7 @@ def create_app() -> FastAPI:
     def admin_ticket_rules(
         request: Request,
         current_user: Dict[str, object] = Depends(
-            require_any_permission(["ticket.assignment_rule.view", "ticket.sla_rule.view"])
+            require_any_permission(["ticket.assignment_rule.view", "ticket.sla_rule.view", "ticket.template.view"])
         ),
         success: str = Query(""),
     ) -> HTMLResponse:
@@ -11565,8 +11929,74 @@ def create_app() -> FastAPI:
             "sla_saved": "SLA 规则已保存。",
             "sla_enabled": "SLA 规则已启用。",
             "sla_disabled": "SLA 规则已停用。",
+            "template_saved": "工单类型模板已保存。",
+            "template_enabled": "工单类型模板已启用。",
+            "template_disabled": "工单类型模板已停用。",
         }
         return render_ticket_rules_page(request, current_user, success=success_messages.get(success, ""))
+
+    @app.post("/admin/ticket-rules/templates", response_class=HTMLResponse)
+    def save_request_type_template_route(
+        request: Request,
+        current_user: Dict[str, object] = Depends(require_permission("ticket.template.update")),
+        csrf_token: str = Form(""),
+        template_id: int = Form(0),
+        request_type: str = Form(""),
+        template_name: str = Form(""),
+        description: str = Form(""),
+        recommended_fields: str = Form(""),
+        required_description: str = Form(""),
+        image_required: str = Form(""),
+        file_required: str = Form(""),
+        expected_finish_required: str = Form(""),
+        field_help_text: str = Form(""),
+        enabled: str = Form(""),
+        sort_order: str = Form("100"),
+    ) -> HTMLResponse:
+        admin = str(current_user.get("username") or "")
+        require_admin_csrf(request, csrf_token)
+        try:
+            result = save_request_type_template(
+                int(template_id or 0),
+                {
+                    "request_type": request_type,
+                    "template_name": template_name,
+                    "description": description,
+                    "recommended_fields": recommended_fields,
+                    "required_description": required_description,
+                    "image_required": image_required,
+                    "file_required": file_required,
+                    "expected_finish_required": expected_finish_required,
+                    "field_help_text": field_help_text,
+                    "enabled": enabled,
+                    "sort_order": sort_order,
+                },
+                admin,
+            )
+        except (ValueError, sqlite3.Error) as exc:
+            return render_ticket_rules_page(request, current_user, error=form_error_message(exc), status_code=400)
+        record_operation_log(admin, str(result.pop("action")), "request_type_template", result["id"], result, request)
+        return RedirectResponse(url="/admin/ticket-rules?success=template_saved", status_code=303)
+
+    @app.post("/admin/ticket-rules/templates/{template_id}/toggle", response_class=HTMLResponse)
+    def toggle_request_type_template_route(
+        request: Request,
+        template_id: int,
+        current_user: Dict[str, object] = Depends(require_permission("ticket.template.update")),
+        csrf_token: str = Form(""),
+        enabled: str = Form(""),
+    ) -> HTMLResponse:
+        admin = str(current_user.get("username") or "")
+        require_admin_csrf(request, csrf_token)
+        try:
+            result = set_request_type_template_enabled(template_id, enabled == "1", admin)
+        except (ValueError, sqlite3.Error) as exc:
+            return render_ticket_rules_page(request, current_user, error=form_error_message(exc), status_code=400)
+        record_operation_log(admin, "ticket.template.toggle", "request_type_template", template_id, result, request)
+        return RedirectResponse(
+            url=f"/admin/ticket-rules?success={'template_enabled' if enabled == '1' else 'template_disabled'}",
+            status_code=303,
+        )
 
     @app.post("/admin/ticket-rules/assignment", response_class=HTMLResponse)
     def save_assignment_rule_route(

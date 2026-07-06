@@ -64,7 +64,7 @@
           <span>配置管理</span>
         </a>
         {% endif %}
-        {% if has_perm('ticket.assignment_rule.view') or has_perm('ticket.sla_rule.view') %}
+        {% if has_perm('ticket.assignment_rule.view') or has_perm('ticket.sla_rule.view') or has_perm('ticket.template.view') %}
         <a class="sidebar-link {% if current_menu == 'ticket-rules' %}active{% endif %}" href="/admin/ticket-rules">
           <span>工单规则</span>
         </a>

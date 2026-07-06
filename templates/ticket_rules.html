@@ -10,8 +10,12 @@
 {% endblock %}
 
 {% block content %}
+{% set can_view_assignment = has_perm('ticket.assignment_rule.view') %}
 {% set can_update_assignment = has_perm('ticket.assignment_rule.update') %}
+{% set can_view_sla = has_perm('ticket.sla_rule.view') %}
 {% set can_update_sla = has_perm('ticket.sla_rule.update') %}
+{% set can_view_template = has_perm('ticket.template.view') %}
+{% set can_update_template = has_perm('ticket.template.update') %}
 
 {% if success %}
 <div class="alert alert-success">{{ success }}</div>
@@ -39,6 +43,7 @@
   </div>
 </section>
 
+{% if can_view_assignment %}
 <section class="admin-section work-card">
   <div class="section-heading admin-section-heading">
     <h2>自动分派规则</h2>
@@ -160,7 +165,9 @@
     </table>
   </div>
 </section>
+{% endif %}
 
+{% if can_view_sla %}
 <section class="admin-section work-card">
   <div class="section-heading admin-section-heading">
     <h2>SLA 规则</h2>
@@ -254,6 +261,171 @@
     </table>
   </div>
 </section>
+{% endif %}
+
+{% if can_view_template %}
+<section class="admin-section work-card">
+  <div class="section-heading admin-section-heading">
+    <h2>工单类型模板</h2>
+    <p>控制不同需求类型的填写提示、建议字段和非商品字段必填规则。商品信息始终只是建议填写。</p>
+  </div>
+  {% if can_update_template %}
+  <form class="form-stack" method="post" action="/admin/ticket-rules/templates">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <section class="template-form-section">
+      <div class="section-heading">
+        <h3>基础信息</h3>
+        <p>选择需求类型并配置门店提交页展示的模板名称与说明。</p>
+      </div>
+      <div class="grid-two">
+        <label>
+          <span>需求类型 <strong>*</strong></span>
+          <select name="request_type" required>
+            <option value="">请选择</option>
+            {% for item in request_types %}
+            <option value="{{ item }}">{{ item }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>
+          <span>模板名称</span>
+          <input name="template_name" placeholder="默认使用需求类型">
+        </label>
+        <label class="full-span">
+          <span>模板说明</span>
+          <input name="description" placeholder="用于后台识别和门店理解该类型用途">
+        </label>
+        <label>
+          <span>排序</span>
+          <input type="number" name="sort_order" value="100">
+        </label>
+        <label class="inline-check">
+          <input type="checkbox" name="enabled" value="1" checked>
+          <span>启用</span>
+        </label>
+      </div>
+    </section>
+
+    <section class="template-form-section">
+      <div class="section-heading">
+        <h3>建议填写字段</h3>
+        <p>商品字段只进入建议填写，不做硬性必填拦截。</p>
+      </div>
+      <label>
+        <span>建议字段</span>
+        <input name="recommended_fields" value="品牌、商品名称、规格条码、数量" placeholder="多个字段用顿号、逗号或分号分隔">
+      </label>
+    </section>
+
+    <section class="template-form-section">
+      <div class="section-heading">
+        <h3>必填规则与上传要求</h3>
+        <p>仅控制问题说明、图片、附件和期望完成时间。</p>
+      </div>
+      <div class="grid-two">
+        <label class="inline-check">
+          <input type="checkbox" name="required_description" value="1" checked>
+          <span>问题说明必填</span>
+        </label>
+        <label class="inline-check">
+          <input type="checkbox" name="image_required" value="1">
+          <span>必须上传图片</span>
+        </label>
+        <label class="inline-check">
+          <input type="checkbox" name="file_required" value="1">
+          <span>必须上传附件</span>
+        </label>
+        <label class="inline-check">
+          <input type="checkbox" name="expected_finish_required" value="1">
+          <span>期望完成时间必填</span>
+        </label>
+      </div>
+    </section>
+
+    <section class="template-form-section">
+      <div class="section-heading">
+        <h3>提示文案</h3>
+        <p>这段提示会展示在门店提交页。</p>
+      </div>
+      <label>
+        <span>字段提示</span>
+        <textarea name="field_help_text" rows="3" placeholder="请说明该类型需要补充哪些背景信息。商品信息建议填写，但不强制。"></textarea>
+      </label>
+      <div class="submit-action-bar">
+        <button class="primary-button compact" type="submit">新增模板</button>
+      </div>
+    </section>
+  </form>
+  {% endif %}
+
+  <div class="table-wrap">
+    <table class="ticket-table erp-table">
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>需求类型</th>
+          <th>模板名称</th>
+          <th>建议填写</th>
+          <th>必填项</th>
+          <th>提示</th>
+          <th>排序</th>
+          <th>状态</th>
+          {% if can_update_template %}<th>操作</th>{% endif %}
+        </tr>
+      </thead>
+      <tbody>
+        {% for template in request_type_templates %}
+        <tr>
+          <td>{{ template.id }}</td>
+          <td>{{ template.request_type }}</td>
+          <td>{{ template.template_name }}</td>
+          <td>
+            <div class="tag-list">
+              {% for field in template.recommended_fields %}
+              <span class="tag-chip">{{ field }}</span>
+              {% else %}
+              <span class="tag-chip">无</span>
+              {% endfor %}
+            </div>
+          </td>
+          <td>
+            <div class="tag-list">
+              {% if template.required_description %}<span class="badge status-badge">问题说明</span>{% endif %}
+              {% if template.image_required %}<span class="badge status-badge due-due-today">图片</span>{% endif %}
+              {% if template.file_required %}<span class="badge status-badge due-due-today">附件</span>{% endif %}
+              {% if template.expected_finish_required %}<span class="badge status-badge">期望完成时间</span>{% endif %}
+              {% if not template.required_description and not template.image_required and not template.file_required and not template.expected_finish_required %}
+              <span class="tag-chip">无</span>
+              {% endif %}
+            </div>
+          </td>
+          <td>{{ template.field_help_text or template.description or '' }}</td>
+          <td>{{ template.sort_order }}</td>
+          <td>
+            {% if template.enabled %}
+            <span class="badge active-badge">启用</span>
+            {% else %}
+            <span class="badge archive-badge">停用</span>
+            {% endif %}
+          </td>
+          {% if can_update_template %}
+          <td>
+            <form class="inline-action-form" method="post" action="/admin/ticket-rules/templates/{{ template.id }}/toggle">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <input type="hidden" name="enabled" value="{{ 0 if template.enabled else 1 }}">
+              <button class="ghost-button compact" type="submit">{{ '停用' if template.enabled else '启用' }}</button>
+            </form>
+          </td>
+          {% endif %}
+        </tr>
+        {% else %}
+        <tr><td class="empty-cell" colspan="{{ 9 if can_update_template else 8 }}">暂无工单类型模板。</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endif %}
 
 <section class="admin-section work-card">
   <div class="section-heading admin-section-heading">

@@ -31,7 +31,7 @@
         <option value="{{ item }}" {% if values.get('request_type') == item %}selected{% endif %}>{{ item }}</option>
         {% endfor %}
       </select>
-      <small class="inline-hint" data-request-type-hint>不同需求类型可能要求补充品牌、商品、数量或附件。</small>
+      <small class="inline-hint" data-request-type-hint>选择需求类型后会显示填写提示、建议填写和必填信息。</small>
     </label>
 
     <label>
@@ -44,6 +44,28 @@
       </select>
     </label>
   </div>
+  <div class="template-hint-card" data-request-type-template-card>
+    <div>
+      <span class="badge active-badge">工单类型模板</span>
+      <h3 data-template-title>请选择需求类型</h3>
+      <p data-template-description>系统会根据需求类型提示建议填写信息和必填信息。</p>
+    </div>
+    <div class="template-hint-grid">
+      <div>
+        <span>建议填写信息</span>
+        <div class="tag-list" data-template-recommended>
+          <span class="tag-chip">商品信息按需补充</span>
+        </div>
+      </div>
+      <div>
+        <span>必填信息</span>
+        <div class="tag-list" data-template-required>
+          <span class="tag-chip">问题说明</span>
+        </div>
+      </div>
+    </div>
+    <p class="field-hint" data-template-help>商品信息是建议填写，不完整也可以先提交。</p>
+  </div>
 </section>
 
 <section class="form-card">
@@ -53,7 +75,7 @@
   </div>
   <div class="grid-two">
     <div class="field-block full-span">
-      <span class="field-label">品牌</span>
+      <span class="field-label">品牌 <em class="recommend-badge">建议填写</em></span>
       <p class="field-hint">可选择一个或多个品牌，未在列表中的品牌可手动输入。</p>
       {% set selected_brands = values.get('brands', []) %}
       {% if brands %}
@@ -71,18 +93,18 @@
       <input name="brand_extra" type="text" value="{{ values.get('brand_extra', '') }}" placeholder="未在列表中的品牌，可手动输入，多个品牌用逗号分隔">
     </div>
     <label>
-      <span>商品名称</span>
+      <span>商品名称 <em class="recommend-badge">建议填写</em></span>
       <input name="product_name" type="text" value="{{ values.get('product_name', '') }}" placeholder="例如：止痒舒缓喷雾">
     </label>
   </div>
 
   <div class="grid-two">
     <label>
-      <span>规格条码</span>
+      <span>规格条码 <em class="recommend-badge">建议填写</em></span>
       <input name="sku_barcode" type="text" value="{{ values.get('sku_barcode', '') }}" placeholder="可填写规格、条码或 SKU">
     </label>
     <label>
-      <span>数量</span>
+      <span>数量 <em class="recommend-badge">建议填写</em></span>
       <input name="quantity" type="number" inputmode="numeric" min="0" step="1" value="{{ values.get('quantity', '') }}" placeholder="需要处理的数量">
     </label>
   </div>
@@ -94,12 +116,14 @@
     <p>尽量写清现场情况、影响范围和希望总部协助的动作。</p>
   </div>
   <label>
-    <span>问题说明 <strong>*</strong></span>
-    <textarea name="description" rows="6" placeholder="请描述发生了什么、涉及哪些商品或系统页面、希望如何处理" required>{{ values.get('description', '') }}</textarea>
+    <span>问题说明 <strong data-description-required>*</strong></span>
+    <textarea name="description" rows="6" placeholder="请描述发生了什么、涉及哪些商品或系统页面、希望如何处理" data-description-input>{{ values.get('description', '') }}</textarea>
+    <small class="inline-hint" data-description-template-hint>此类型需要填写问题说明。</small>
   </label>
   <label>
     <span>期望完成时间</span>
-    <input name="expected_finish_date" type="date" value="{{ values.get('expected_finish_date', '') }}">
+    <input name="expected_finish_date" type="date" value="{{ values.get('expected_finish_date', '') }}" data-expected-finish-input>
+    <small class="inline-hint" data-expected-finish-hint>如有明确期限可填写；未填写时可能按 SLA 自动计算。</small>
   </label>
 </section>
 
@@ -113,6 +137,7 @@
     <div>
       <h3>图片上传</h3>
       <p class="field-hint">支持 {{ image_accept }}，最多 {{ max_image_count }} 张，单张不超过 {{ max_image_mb }}MB。</p>
+      <p class="field-hint requirement-hint" data-image-required-hint hidden>此类型必须上传图片。</p>
     </div>
     <label class="file-control">
       <span>选择图片</span>
@@ -128,6 +153,7 @@
     <div>
       <h3>文件上传</h3>
       <p class="field-hint">支持 PDF、Word、Excel、CSV、TXT、ZIP、RAR 等文件，最多 {{ max_file_count }} 个，单个不超过 {{ max_file_mb }}MB，总大小不超过 {{ max_total_file_upload_mb }}MB。</p>
+      <p class="field-hint requirement-hint" data-file-required-hint hidden>此类型必须上传附件。</p>
     </div>
     <label class="file-control">
       <span>选择文件</span>

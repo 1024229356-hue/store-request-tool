@@ -30,6 +30,19 @@ function initializeStoreRequestApp() {
   const copyTicketButtons = document.querySelectorAll("[data-copy-ticket]");
   const requestTypeSelect = document.querySelector("[data-request-type-select]");
   const requestTypeHint = document.querySelector("[data-request-type-hint]");
+  const requestTypeTemplateCard = document.querySelector("[data-request-type-template-card]");
+  const templateTitle = document.querySelector("[data-template-title]");
+  const templateDescription = document.querySelector("[data-template-description]");
+  const templateRecommended = document.querySelector("[data-template-recommended]");
+  const templateRequired = document.querySelector("[data-template-required]");
+  const templateHelp = document.querySelector("[data-template-help]");
+  const descriptionRequiredMark = document.querySelector("[data-description-required]");
+  const descriptionInput = document.querySelector("[data-description-input]");
+  const descriptionTemplateHint = document.querySelector("[data-description-template-hint]");
+  const expectedFinishInput = document.querySelector("[data-expected-finish-input]");
+  const expectedFinishHint = document.querySelector("[data-expected-finish-hint]");
+  const imageRequiredHint = document.querySelector("[data-image-required-hint]");
+  const fileRequiredHint = document.querySelector("[data-file-required-hint]");
   const notificationRoot = document.querySelector("[data-notification-root]");
   const notificationToggle = document.querySelector("[data-notification-toggle]");
   const notificationPanel = document.querySelector("[data-notification-panel]");
@@ -477,7 +490,67 @@ function initializeStoreRequestApp() {
       rules = {};
     }
     const selectedRule = rules[requestTypeSelect.value] || {};
-    requestTypeHint.textContent = selectedRule.description_hint || "不同需求类型可能要求补充品牌、商品、数量或附件。";
+    const fallbackRecommended = ["品牌", "商品名称", "规格条码", "数量"];
+    const recommendedFields = Array.isArray(selectedRule.recommended_fields) && selectedRule.recommended_fields.length
+      ? selectedRule.recommended_fields
+      : fallbackRecommended;
+    const requiredFields = Array.isArray(selectedRule.required_fields) && selectedRule.required_fields.length
+      ? selectedRule.required_fields
+      : ["问题说明"];
+    const helpText = selectedRule.field_help_text || selectedRule.description_hint || "商品信息是建议填写，不完整也可以先提交。";
+    requestTypeHint.textContent = helpText;
+
+    if (requestTypeTemplateCard) {
+      requestTypeTemplateCard.hidden = false;
+    }
+    if (templateTitle) {
+      templateTitle.textContent = selectedRule.template_name || requestTypeSelect.value || "请选择需求类型";
+    }
+    if (templateDescription) {
+      templateDescription.textContent = selectedRule.description || "系统会根据需求类型提示建议填写信息和必填信息。";
+    }
+    const renderTags = (container, items, emptyText) => {
+      if (!container) {
+        return;
+      }
+      container.innerHTML = "";
+      const values = items.length ? items : [emptyText];
+      values.forEach((item) => {
+        const tag = document.createElement("span");
+        tag.className = "tag-chip";
+        tag.textContent = item;
+        container.appendChild(tag);
+      });
+    };
+    renderTags(templateRecommended, recommendedFields, "无");
+    renderTags(templateRequired, requiredFields, "无");
+    if (templateHelp) {
+      templateHelp.textContent = helpText;
+    }
+
+    const descriptionRequired = selectedRule.required_description !== 0;
+    if (descriptionRequiredMark) {
+      descriptionRequiredMark.hidden = !descriptionRequired;
+    }
+    if (descriptionInput) {
+      descriptionInput.required = descriptionRequired;
+    }
+    if (descriptionTemplateHint) {
+      descriptionTemplateHint.textContent = descriptionRequired ? "此类型需要填写问题说明。" : "此类型的问题说明可选，但建议写清背景。";
+    }
+    const expectedRequired = selectedRule.expected_finish_required === 1;
+    if (expectedFinishInput) {
+      expectedFinishInput.required = expectedRequired;
+    }
+    if (expectedFinishHint) {
+      expectedFinishHint.textContent = expectedRequired ? "此类型必须填写期望完成时间。" : "如有明确期限可填写；未填写时可能按 SLA 自动计算。";
+    }
+    if (imageRequiredHint) {
+      imageRequiredHint.hidden = selectedRule.image_required !== 1;
+    }
+    if (fileRequiredHint) {
+      fileRequiredHint.hidden = selectedRule.file_required !== 1;
+    }
   }
 
   function notificationSeverityLabel(severity) {

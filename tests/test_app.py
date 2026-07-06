@@ -508,7 +508,7 @@ def test_multi_store_and_brand_validation_errors(tmp_path, monkeypatch):
     assert invalid_store.status_code == 400
     assert "请选择有效门店。" in invalid_store.text
 
-    missing_brand = client.post(
+    missing_brand_is_allowed = client.post(
         "/submit",
         data={
             "store_names": ["南京门东店"],
@@ -520,8 +520,8 @@ def test_multi_store_and_brand_validation_errors(tmp_path, monkeypatch):
             "description": "品牌必填规则",
         },
     )
-    assert missing_brand.status_code == 400
-    assert "建单需求必须至少选择或填写一个品牌。" in missing_brand.text
+    assert missing_brand_is_allowed.status_code == 200
+    assert rows_for(tmp_path, "tickets")[-1]["brand"] == ""
 
 
 def test_admin_comments_visibility_logs_and_notifications(tmp_path, monkeypatch):
@@ -973,6 +973,50 @@ def insert_sla_rule(
                 int(due_hours),
                 int(enabled),
                 note,
+                timestamp,
+                timestamp,
+            ),
+        )
+    return int(cursor.lastrowid)
+
+
+def insert_request_type_template(
+    tmp_path,
+    request_type,
+    template_name="",
+    description="",
+    recommended_fields="",
+    required_description=1,
+    image_required=0,
+    file_required=0,
+    expected_finish_required=0,
+    field_help_text="",
+    enabled=1,
+    sort_order=100,
+):
+    timestamp = "2026-07-06 10:00:00"
+    with sqlite3.connect(tmp_path / "tickets.db") as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO request_type_templates (
+                request_type, template_name, description, recommended_fields,
+                required_description, image_required, file_required, expected_finish_required,
+                field_help_text, enabled, sort_order, created_at, updated_at, created_by, updated_by
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pytest', 'pytest')
+            """,
+            (
+                request_type,
+                template_name or request_type,
+                description,
+                recommended_fields,
+                int(required_description),
+                int(image_required),
+                int(file_required),
+                int(expected_finish_required),
+                field_help_text,
+                int(enabled),
+                int(sort_order),
                 timestamp,
                 timestamp,
             ),
@@ -2414,6 +2458,213 @@ def test_p1a_ticket_rules_page_permissions_and_overview(tmp_path, monkeypatch):
     assert ("GET", "/admin/ticket-rules") in route_paths
     assert ("POST", "/admin/ticket-rules/assignment") in route_paths
     assert ("POST", "/admin/ticket-rules/sla") in route_paths
+
+
+def test_p1b_request_type_templates_schema_defaults_and_submit_ui(tmp_path, monkeypatch):
+    config = {
+        "request_types.json": ["建采购单", "缺货补货", "瑕疵/破损/漏发", "审盘点单", "排班问题", "其他", "无模板类型"],
+    }
+    client, _ = build_client(tmp_path, monkeypatch, admin_users="admin:123456", config_overrides=config)
+    with sqlite3.connect(tmp_path / "tickets.db") as connection:
+        tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(request_type_templates)")}
+    assert "request_type_templates" in tables
+    assert {
+        "request_type",
+        "recommended_fields",
+        "required_description",
+        "image_required",
+        "file_required",
+        "expected_finish_required",
+        "field_help_text",
+        "enabled",
+        "sort_order",
+    }.issubset(columns)
+    assert not {"brand_required", "product_name_required", "barcode_required", "quantity_required"}.intersection(columns)
+
+    templates = {row["request_type"]: row for row in rows_for(tmp_path, "request_type_templates")}
+    assert {"建采购单", "缺货补货", "瑕疵/破损/漏发", "审盘点单", "排班问题", "其他"}.issubset(templates)
+    assert templates["瑕疵/破损/漏发"]["image_required"] == 1
+    assert templates["审盘点单"]["file_required"] == 1
+    assert "商品信息不完整也可以提交" in templates["缺货补货"]["field_help_text"]
+
+    page = client.get("/submit")
+    assert page.status_code == 200
+    assert "data-request-type-template-card" in page.text
+    assert "建议填写信息" in page.text
+    assert "必填信息" in page.text
+    assert "建议填写" in page.text
+    assert "商品名称 <strong>*</strong>" not in page.text
+    assert "规格条码 <strong>*</strong>" not in page.text
+    assert "数量 <strong>*</strong>" not in page.text
+
+    logged_in_client(client, "admin", "123456")
+    rules_page = client.get("/admin/ticket-rules")
+    assert rules_page.status_code == 200
+    assert "工单类型模板" in rules_page.text
+
+
+def test_p1b_product_fields_are_recommended_and_template_validation_controls_non_product_fields(tmp_path, monkeypatch):
+    config = {
+        "request_types.json": ["建采购单", "缺货补货", "瑕疵/破损/漏发", "审盘点单", "排班问题", "其他", "无模板类型"],
+    }
+    client, _ = build_client(tmp_path, monkeypatch, admin_users="admin:123456", config_overrides=config)
+
+    product_blank = submit_ticket(
+        client,
+        request_type="缺货补货",
+        brand="",
+        brand_extra="",
+        product_name="",
+        sku_barcode="",
+        quantity="",
+        description="商品信息都为空但说明完整",
+    )
+    assert product_blank.status_code == 200
+    ticket = rows_for(tmp_path, "tickets")[-1]
+    assert ticket["request_type"] == "缺货补货"
+    assert ticket["brand"] == ""
+    assert ticket["product_name"] == ""
+    assert ticket["sku_barcode"] == ""
+    assert ticket["quantity"] is None
+
+    image_missing = submit_ticket(
+        client,
+        request_type="瑕疵/破损/漏发",
+        description="图片必填但没有上传",
+    )
+    assert image_missing.status_code == 400
+    assert "瑕疵/破损/漏发必须上传至少一张图片。" in image_missing.text
+
+    image_ok = submit_ticket_with_image(
+        client,
+        request_type="瑕疵/破损/漏发",
+        description="已上传现场图片",
+    )
+    assert image_ok.status_code == 200
+
+    file_missing = submit_ticket(client, request_type="审盘点单", description="附件必填但没有上传")
+    assert file_missing.status_code == 400
+    assert "审盘点单必须上传至少一个文件附件。" in file_missing.text
+
+    file_ok = submit_ticket_with_file(client, request_type="审盘点单", description="已上传盘点附件")
+    assert file_ok.status_code == 200
+
+    description_missing = submit_ticket(client, request_type="排班问题", description="")
+    assert description_missing.status_code == 400
+    assert "请填写问题说明。" in description_missing.text
+
+    insert_request_type_template(
+        tmp_path,
+        "无模板类型",
+        required_description=0,
+        expected_finish_required=1,
+        field_help_text="这个类型需要期望完成时间。",
+    )
+    expected_missing = submit_ticket(client, request_type="无模板类型", description="有说明但缺期望完成时间", expected_finish_date="")
+    assert expected_missing.status_code == 400
+    assert "无模板类型必须填写期望完成时间。" in expected_missing.text
+
+    with sqlite3.connect(tmp_path / "tickets.db") as connection:
+        connection.execute("UPDATE request_type_templates SET enabled = 0 WHERE request_type = ?", ("无模板类型",))
+    disabled_template = submit_ticket(client, request_type="无模板类型", description="停用模板不再拦截", expected_finish_date="")
+    assert disabled_template.status_code == 200
+
+
+def test_p1b_template_permissions_crud_audit_and_permission_overview(tmp_path, monkeypatch):
+    client, main = build_client(tmp_path, monkeypatch, admin_users="admin:123456")
+    logged_in_client(client, "admin", "123456")
+    page = client.get("/admin/ticket-rules")
+    assert page.status_code == 200
+    assert "工单类型模板" in page.text
+    assert "新增模板" in page.text
+
+    response = admin_post(
+        client,
+        "/admin/ticket-rules/templates",
+        data={
+            "request_type": "系统问题",
+            "template_name": "系统问题模板",
+            "recommended_fields": "品牌,商品名称",
+            "required_description": "1",
+            "image_required": "0",
+            "file_required": "0",
+            "expected_finish_required": "1",
+            "field_help_text": "请说明系统页面和异常截图。",
+            "enabled": "1",
+            "sort_order": "12",
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    template = rows_for(tmp_path, "request_type_templates")[-1]
+    assert template["template_name"] == "系统问题模板"
+    assert template["expected_finish_required"] == 1
+
+    toggle = admin_post(
+        client,
+        f"/admin/ticket-rules/templates/{template['id']}/toggle",
+        data={"enabled": "0"},
+        follow_redirects=False,
+    )
+    assert toggle.status_code == 303
+    assert rows_for(tmp_path, "request_type_templates")[-1]["enabled"] == 0
+    assert any(row["action"] in {"ticket.template.create", "ticket.template.toggle"} for row in rows_for(tmp_path, "admin_operation_logs"))
+
+    readonly_role = create_role_with_permissions(tmp_path, "p1b-template-viewer", ["ticket.template.view"])
+    create_test_admin_user(tmp_path, "templateviewer", "模板只读", password="viewer123")
+    update_admin_user_access(tmp_path, "templateviewer", readonly_role)
+    assert_login_success(login_admin(client, "templateviewer", "viewer123"))
+    readonly_page = client.get("/admin/ticket-rules")
+    assert readonly_page.status_code == 200
+    assert "工单类型模板" in readonly_page.text
+    token = csrf_token_for(client, "/admin/ticket-rules")
+    denied = client.post(
+        "/admin/ticket-rules/templates",
+        data={"csrf_token": token, "request_type": "其他", "template_name": "只读不能保存"},
+    )
+    assert_html_forbidden(denied)
+
+    no_view_role = create_role_with_permissions(tmp_path, "p1b-no-template-view", ["ticket.assignment_rule.view"])
+    create_test_admin_user(tmp_path, "notemplate", "无模板权限", password="noview123")
+    update_admin_user_access(tmp_path, "notemplate", no_view_role)
+    assert_login_success(login_admin(client, "notemplate", "noview123"))
+    no_view_page = client.get("/admin/ticket-rules")
+    assert no_view_page.status_code == 200
+    assert "工单类型模板" not in no_view_page.text
+
+    context = main.permission_overview_context(main.app)
+    assert context["high_risk_uncontrolled_count"] == 0
+    route_paths = {(row["method"], row["path"]) for row in context["route_items"]}
+    assert ("POST", "/admin/ticket-rules/templates") in route_paths
+    assert ("POST", "/admin/ticket-rules/templates/{template_id}/toggle") in route_paths
+
+
+def test_p1b_template_validation_keeps_auto_assignment_and_sla(tmp_path, monkeypatch):
+    config = {"request_types.json": ["缺货补货"]}
+    client, main = build_client(tmp_path, monkeypatch, admin_users="admin:123456", config_overrides=config)
+    monkeypatch.setattr(main, "now_text", lambda: "2026-07-06 10:00:00")
+    create_test_admin_user(tmp_path, "buyer_active", "采购可指派", is_assignable=1)
+    insert_assignment_rule(tmp_path, request_type="缺货补货", default_handler="buyer_active")
+    insert_sla_rule(tmp_path, request_type="缺货补货", due_hours=24)
+
+    response = submit_ticket(
+        client,
+        request_type="缺货补货",
+        brand="",
+        product_name="",
+        sku_barcode="",
+        quantity="",
+        expected_finish_date="",
+        description="模板校验通过后继续执行 P1A",
+    )
+    assert response.status_code == 200
+    ticket = rows_for(tmp_path, "tickets")[-1]
+    assert ticket["assigned_to"] == "buyer_active"
+    assert ticket["expected_finish_date"] == "2026-07-07 10:00:00"
+    actions = [row["action"] for row in rows_for(tmp_path, "admin_operation_logs")]
+    assert "ticket.auto_assign" in actions
+    assert "ticket.sla_deadline.auto" in actions
 
 
 def test_phase4_templates_use_has_perm_for_privileged_controls():
@@ -6788,12 +7039,14 @@ def test_request_type_rules_validate_fields_attachments_and_missing_config(tmp_p
     client, _ = build_client(tmp_path, monkeypatch, config_overrides={"request_type_rules.json": rules})
 
     submit_page = client.get("/submit")
-    assert "不同需求类型可能要求补充品牌、商品、数量或附件。" in submit_page.text
+    assert "选择需求类型后会显示填写提示、建议填写和必填信息。" in submit_page.text
+    assert "工单类型模板" in submit_page.text
+    assert "建议填写" in submit_page.text
     assert "data-request-type-rules" in submit_page.text
 
     missing_brand = submit_ticket_with_file(client, request_type="建单需求", brand="", product_name="商品", quantity="1")
-    assert missing_brand.status_code == 400
-    assert "建单需求必须至少选择或填写一个品牌。" in missing_brand.text
+    assert missing_brand.status_code == 200
+    assert rows_for(tmp_path, "tickets")[-1]["brand"] == ""
 
     missing_attachment = submit_ticket(client, request_type="建单需求", brand="品牌", product_name="商品", quantity="1")
     assert missing_attachment.status_code == 400

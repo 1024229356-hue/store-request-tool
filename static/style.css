@@ -393,6 +393,56 @@ label span {
   font-size: 12px;
 }
 
+.template-hint-card {
+  display: grid;
+  gap: 14px;
+  margin-top: 14px;
+  border: 1px solid rgba(91, 108, 255, 0.18);
+  border-radius: var(--radius-md);
+  background: linear-gradient(135deg, rgba(232, 237, 255, 0.86), rgba(248, 251, 255, 0.94));
+  padding: 14px;
+}
+
+.template-hint-card h3 {
+  margin-top: 8px;
+}
+
+.template-hint-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.template-hint-grid > div {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.72);
+  padding: 10px;
+}
+
+.template-hint-grid span {
+  display: block;
+  margin-bottom: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.recommend-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  margin-left: 6px;
+  border-radius: 999px;
+  background: var(--primary-soft);
+  color: var(--primary-dark);
+  padding: 0 8px;
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 800;
+}
+
 .store-checkbox-grid,
 .schedule-filter-chip-grid {
   display: flex;
@@ -863,6 +913,26 @@ a:focus-visible {
 
 .field-hint {
   font-size: 13px;
+}
+
+.requirement-hint {
+  margin-top: 6px;
+  border-left: 3px solid var(--danger);
+  color: var(--danger);
+  padding-left: 8px;
+  font-weight: 800;
+}
+
+.template-form-section {
+  display: grid;
+  gap: 12px;
+  border-top: 1px solid var(--line);
+  padding-top: 14px;
+}
+
+.template-form-section:first-of-type {
+  border-top: 0;
+  padding-top: 0;
 }
 
 .inline-hint {
@@ -4250,6 +4320,10 @@ dd {
 
   .header-tags {
     gap: 6px;
+  }
+
+  .template-hint-grid {
+    grid-template-columns: 1fr;
   }
 
   .upload-preview {
