@@ -452,13 +452,13 @@ config/holidays.json
 ]
 ```
 
-处理人列表会自动合并 `config/handlers.json` 与 `.env` 中的 `ADMIN_USERS` 用户名；如果 `config/handlers.json` 不存在，则直接使用 `ADMIN_USERS` 作为处理人列表。这样能登录后台的账号默认都可以被选择为处理人。旧的处理人名称（例如“总部运营”）继续通过 `config/handlers.json` 保留。
+处理人列表会自动合并 `config/handlers.json` 与数据库账号中 `is_active=1` 且 `is_assignable=1` 的用户名；如果 `config/handlers.json` 不存在，则直接使用可指派的数据库账号。旧的处理人名称（例如“总部运营”）继续通过 `config/handlers.json` 保留。停用账号或取消“可作为工单处理人”的账号不会出现在处理人候选中。
 
 后台也提供登录态接口 `GET /api/handlers`，返回当前统一处理人列表，便于前端控件使用同一来源。
 
 ### 后台多账号配置
 
-后台账号配置在 `.env` 中维护，`.env` 不要上传 GitHub。正式试运行建议使用 `ADMIN_USERS`：
+后台账号已升级为数据库账号。首次启动且 `admin_users` 表为空时，系统会从 `.env` 中的 `ADMIN_USERS` 自动迁移账号：第一个账号默认为“系统管理员”，其他账号默认为“运营管理”，密码会保存为 `password_hash`，不会保存明文。
 
 ```text
 ADMIN_USERS=admin:123456,caigou:123456,yunying:123456
@@ -467,8 +467,8 @@ ADMIN_USERS=admin:123456,caigou:123456,yunying:123456
 - 多账号之间用英文逗号分隔。
 - 用户名和密码之间用英文冒号分隔。
 - 用户名和密码前后空格会自动去掉。
-- 修改 `.env` 后需要重启 `run.bat` 或 systemd 服务。
-- 本版本多个账号权限相同，不区分角色。
+- 迁移完成后，日常新增账号、编辑角色、停用账号、重置密码请在 `/admin/account` 维护。
+- `.env` 不要上传 GitHub，后续仅作为数据库异常或没有有效系统管理员时的应急兜底。
 
 旧的单账号配置仍然兼容：
 
@@ -476,6 +476,8 @@ ADMIN_USERS=admin:123456,caigou:123456,yunying:123456
 ADMIN_USERNAME=admin
 ADMIN_PASSWORD=change-me
 ```
+
+第一阶段只对账号管理页面做严格权限校验，工单、排班、员工、班次、嵌入页面和消息提醒等原有后台能力暂保持现有登录态访问方式。后续阶段会逐步把角色权限、数据范围和审计覆盖扩展到全部业务路由。
 
 ### 如何修改系统配置
 
@@ -575,6 +577,11 @@ ADMIN_PASSWORD=change-me
 - `ticket_comments.deleted_at`、`ticket_comments.deleted_by`、`ticket_comments.delete_reason`
 - `ticket_tasks.deleted_at`、`ticket_tasks.deleted_by`、`ticket_tasks.delete_reason`
 - `embedded_pages.deleted_at`、`embedded_pages.deleted_by`、`embedded_pages.delete_reason`
+- `admin_users`
+- `admin_roles`
+- `admin_role_permissions`
+- `admin_login_logs`
+- `admin_operation_logs`
 
 升级过程是兼容式迁移，不会清空 `tickets`、`ticket_images`，也不会删除 `uploads/` 或 `data/embedded_pages/`。上线前仍建议先备份数据库、附件和嵌入 HTML 运行数据。
 

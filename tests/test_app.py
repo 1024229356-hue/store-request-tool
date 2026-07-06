@@ -804,6 +804,255 @@ def test_handlers_fallback_to_admin_users_when_config_file_missing(tmp_path, mon
     assert "总部运营" not in handlers
 
 
+def role_id_by_name(tmp_path, role_name):
+    with sqlite3.connect(tmp_path / "tickets.db") as connection:
+        row = connection.execute(
+            "SELECT id FROM admin_roles WHERE role_name = ?",
+            (role_name,),
+        ).fetchone()
+    assert row is not None
+    return int(row[0])
+
+
+def user_id_by_username(tmp_path, username):
+    with sqlite3.connect(tmp_path / "tickets.db") as connection:
+        row = connection.execute(
+            "SELECT id FROM admin_users WHERE username = ?",
+            (username,),
+        ).fetchone()
+    assert row is not None
+    return int(row[0])
+
+
+def test_rbac_tables_env_migration_password_hashes_and_login_logs(tmp_path, monkeypatch):
+    client, _ = build_client(
+        tmp_path,
+        monkeypatch,
+        admin_users="admin:123456,caigou:123456",
+    )
+
+    with sqlite3.connect(tmp_path / "tickets.db") as connection:
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+    assert {
+        "admin_users",
+        "admin_roles",
+        "admin_role_permissions",
+        "admin_login_logs",
+        "admin_operation_logs",
+    }.issubset(tables)
+
+    roles = {row["id"]: row["role_name"] for row in rows_for(tmp_path, "admin_roles")}
+    users = {row["username"]: row for row in rows_for(tmp_path, "admin_users")}
+    assert roles[users["admin"]["role_id"]] == "系统管理员"
+    assert roles[users["caigou"]["role_id"]] == "运营管理"
+    assert users["admin"]["password_hash"].startswith("pbkdf2_sha256$")
+    assert users["admin"]["password_hash"] != "123456"
+    assert users["admin"]["is_active"] == 1
+    assert users["admin"]["is_assignable"] == 1
+    assert users["admin"]["data_scope"] == "all"
+
+    bad_login = login_admin(client, "admin", "wrong-password")
+    assert bad_login.status_code == 400
+    assert_login_success(login_admin(client, "admin", "123456"))
+
+    with sqlite3.connect(tmp_path / "tickets.db") as connection:
+        connection.execute("UPDATE admin_users SET is_active = 0 WHERE username = 'caigou'")
+    disabled = login_admin(client, "caigou", "123456")
+    assert disabled.status_code == 400
+
+    login_logs = rows_for(tmp_path, "admin_login_logs")
+    assert [row["username"] for row in login_logs] == ["admin", "admin", "caigou"]
+    assert [row["success"] for row in login_logs] == [0, 1, 0]
+    assert "wrong-password" not in json.dumps(login_logs, ensure_ascii=False)
+    assert rows_for(tmp_path, "admin_users")[0]["last_login_at"]
+
+
+def test_account_management_crud_safety_and_password_reset(tmp_path, monkeypatch):
+    client, _ = build_client(
+        tmp_path,
+        monkeypatch,
+        admin_users="admin:123456",
+    )
+    assert_login_success(login_admin(client, "admin", "123456"))
+    csrf_token = csrf_token_for(client, "/admin/account")
+    ops_role_id = role_id_by_name(tmp_path, "运营管理")
+
+    account_page = client.get("/admin/account")
+    assert account_page.status_code == 200
+    assert "账号列表" in account_page.text
+    assert "新增账号" in account_page.text
+    assert "password_hash" not in account_page.text
+
+    create = client.post(
+        "/admin/account/users",
+        data={
+            "csrf_token": csrf_token,
+            "username": "buyer01",
+            "display_name": "采购01",
+            "password": "newpass1",
+            "password_confirm": "newpass1",
+            "role_id": str(ops_role_id),
+            "data_scope": "stores",
+            "store_names": "南京门东店",
+            "is_assignable": "1",
+            "is_active": "1",
+        },
+        follow_redirects=False,
+    )
+    assert create.status_code == 303
+    buyer = next(row for row in rows_for(tmp_path, "admin_users") if row["username"] == "buyer01")
+    assert buyer["display_name"] == "采购01"
+    assert buyer["role_id"] == ops_role_id
+    assert buyer["data_scope"] == "stores"
+    assert buyer["store_names"] == "南京门东店"
+    assert buyer["is_assignable"] == 1
+    assert_login_success(login_admin(client, "buyer01", "newpass1"))
+
+    assert_login_success(login_admin(client, "admin", "123456"))
+    buyer_id = user_id_by_username(tmp_path, "buyer01")
+    csrf_token = csrf_token_for(client, "/admin/account")
+    update = client.post(
+        f"/admin/account/users/{buyer_id}/update",
+        data={
+            "csrf_token": csrf_token,
+            "display_name": "采购专员01",
+            "role_id": str(ops_role_id),
+            "data_scope": "assigned",
+            "store_names": "",
+            "is_assignable": "",
+            "is_active": "1",
+        },
+        follow_redirects=False,
+    )
+    assert update.status_code == 303
+    buyer = next(row for row in rows_for(tmp_path, "admin_users") if row["username"] == "buyer01")
+    assert buyer["display_name"] == "采购专员01"
+    assert buyer["data_scope"] == "assigned"
+    assert buyer["is_assignable"] == 0
+
+    disable = client.post(
+        f"/admin/account/users/{buyer_id}/disable",
+        data={"csrf_token": csrf_token_for(client, "/admin/account")},
+        follow_redirects=False,
+    )
+    assert disable.status_code == 303
+    assert next(row for row in rows_for(tmp_path, "admin_users") if row["username"] == "buyer01")["is_active"] == 0
+    assert login_admin(client, "buyer01", "newpass1").status_code == 400
+
+    enable = client.post(
+        f"/admin/account/users/{buyer_id}/enable",
+        data={"csrf_token": csrf_token_for(client, "/admin/account")},
+        follow_redirects=False,
+    )
+    assert enable.status_code == 303
+
+    reset = client.post(
+        f"/admin/account/users/{buyer_id}/reset-password",
+        data={
+            "csrf_token": csrf_token_for(client, "/admin/account"),
+            "password": "reset123",
+            "password_confirm": "reset123",
+        },
+        follow_redirects=False,
+    )
+    assert reset.status_code == 303
+    assert login_admin(client, "buyer01", "newpass1").status_code == 400
+    assert_login_success(login_admin(client, "buyer01", "reset123"))
+
+    assert_login_success(login_admin(client, "admin", "123456"))
+    admin_id = user_id_by_username(tmp_path, "admin")
+    self_disable = client.post(
+        f"/admin/account/users/{admin_id}/disable",
+        data={"csrf_token": csrf_token_for(client, "/admin/account")},
+    )
+    assert self_disable.status_code == 400
+    assert "不能停用当前登录账号" in self_disable.text
+    assert "最后一个系统管理员" in self_disable.text
+
+    operation_logs = rows_for(tmp_path, "admin_operation_logs")
+    assert [row["action"] for row in operation_logs] == [
+        "account.create",
+        "account.update",
+        "account.disable",
+        "account.enable",
+        "account.reset_password",
+    ]
+    assert "reset123" not in json.dumps(operation_logs, ensure_ascii=False)
+
+
+def test_account_management_requires_account_permissions(tmp_path, monkeypatch):
+    client, _ = build_client(
+        tmp_path,
+        monkeypatch,
+        admin_users="admin:123456,caigou:123456",
+    )
+
+    assert_login_success(login_admin(client, "caigou", "123456"))
+    denied_page = client.get("/admin/account")
+    assert denied_page.status_code == 403
+    assert "权限不足" in denied_page.text
+    assert "application/json" not in denied_page.headers.get("content-type", "")
+
+    denied_create = client.post(
+        "/admin/account/users",
+        data={
+            "csrf_token": csrf_token_for(client, "/admin"),
+            "username": "buyer02",
+            "display_name": "采购02",
+            "password": "newpass1",
+            "password_confirm": "newpass1",
+            "role_id": str(role_id_by_name(tmp_path, "运营管理")),
+            "data_scope": "all",
+        },
+    )
+    assert denied_create.status_code == 403
+    assert "权限不足" in denied_create.text
+    assert not any(row["username"] == "buyer02" for row in rows_for(tmp_path, "admin_users"))
+
+
+def test_database_assignable_admin_users_extend_handler_candidates(tmp_path, monkeypatch):
+    client, _ = build_client(
+        tmp_path,
+        monkeypatch,
+        config_overrides={"handlers.json": ["总部运营"]},
+        admin_users="admin:123456,liuhao:123456,caigou:123456,yunying:123456",
+    )
+    with sqlite3.connect(tmp_path / "tickets.db") as connection:
+        connection.execute("UPDATE admin_users SET is_assignable = 0 WHERE username = 'caigou'")
+        connection.execute("UPDATE admin_users SET is_active = 0 WHERE username = 'yunying'")
+    assert_login_success(login_admin(client, "admin", "123456"))
+    submit_ticket(client, description="数据库账号处理人测试工单")
+
+    detail_page = client.get("/admin/ticket/1")
+    handlers = client.get("/api/handlers").json()["handlers"]
+
+    assert detail_page.status_code == 200
+    assert "总部运营" in handlers
+    assert "admin" in handlers
+    assert "liuhao" in handlers
+    assert "caigou" not in handlers
+    assert "yunying" not in handlers
+    assert 'value="liuhao"' in detail_page.text
+    assert 'value="caigou"' not in detail_page.text
+    assert 'value="yunying"' not in detail_page.text
+
+    update = admin_post(
+        client,
+        "/admin/ticket/1",
+        data={"status": "处理中", "assigned_to": "liuhao", "handler_note": "liuhao 接手处理"},
+        follow_redirects=False,
+    )
+
+    assert update.status_code == 303
+    assert rows_for(tmp_path, "tickets")[0]["assigned_to"] == "liuhao"
+    assert ticket_action_logs(tmp_path, 1)[-1]["new_assigned_to"] == "liuhao"
+
+
 def test_ticket_detail_workbench_comment_modes_and_close_prompt(tmp_path, monkeypatch):
     client, _ = build_client(tmp_path, monkeypatch)
     submit_ticket(client, description="协作工作台提示工单")

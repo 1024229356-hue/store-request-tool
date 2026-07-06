@@ -5245,6 +5245,94 @@ button[disabled],
   }
 }
 
+.account-overview-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.5fr) minmax(280px, 0.8fr);
+  gap: 18px;
+  margin-bottom: 18px;
+}
+
+.account-detail-grid {
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
+.account-list-card .table-wrap {
+  overflow-x: auto;
+}
+
+.account-table th,
+.account-table td {
+  vertical-align: middle;
+}
+
+.role-badge,
+.status-badge.muted,
+.status-badge.danger,
+.status-badge.warning {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.role-badge {
+  color: #2f4f8f;
+  background: rgba(97, 132, 210, 0.14);
+  border: 1px solid rgba(97, 132, 210, 0.22);
+}
+
+.status-badge.muted {
+  color: var(--muted-text);
+  background: rgba(118, 124, 142, 0.12);
+  border: 1px solid rgba(118, 124, 142, 0.2);
+}
+
+.status-badge.danger {
+  color: #a33b3b;
+  background: rgba(236, 102, 102, 0.13);
+  border: 1px solid rgba(236, 102, 102, 0.22);
+}
+
+.status-badge.warning {
+  color: #875c18;
+  background: rgba(229, 178, 80, 0.18);
+  border: 1px solid rgba(229, 178, 80, 0.28);
+}
+
+.badge-row,
+.compact-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.compact-actions form {
+  margin: 0;
+}
+
+.muted-inline {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted-text);
+  font-size: 12px;
+}
+
+.inline-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+}
+
+.inline-check input {
+  width: auto;
+}
+
 @media (max-width: 1100px) {
   .topbar {
     top: 0;
@@ -5296,6 +5384,10 @@ button[disabled],
   .schedule-date-calendar,
   .schedule-calendar-summary,
   .store-summary-calendar {
+    grid-template-columns: 1fr;
+  }
+
+  .account-overview-grid {
     grid-template-columns: 1fr;
   }
 }

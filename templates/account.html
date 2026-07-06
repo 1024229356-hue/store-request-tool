@@ -1,24 +1,259 @@
-{% set page_title = '账号设置' %}
-{% set page_subtitle = '查看当前登录账号和多账号环境变量配置方式。' %}
+{% set page_title = '账号管理' %}
+{% set page_subtitle = '维护后台数据库账号、角色、启用状态和处理人资格。' %}
 {% set page_eyebrow = '账号与权限' %}
 {% set current_menu = 'account' %}
 {% extends "base_admin.html" %}
 
+{% macro role_label(role_id) -%}
+  {%- for role in roles -%}
+    {%- if role.id == role_id -%}{{ role.role_name }}{%- endif -%}
+  {%- endfor -%}
+{%- endmacro %}
+
+{% macro data_scope_label(value) -%}
+  {%- if value == 'assigned' -%}仅自己处理
+  {%- elif value == 'stores' -%}指定门店
+  {%- else -%}全部数据
+  {%- endif -%}
+{%- endmacro %}
+
+{% block topbar_actions %}
+  {% if can_create_account and not permission_denied %}
+  <button class="primary-button compact" type="button" data-drawer-open="account-create">新增账号</button>
+  {% endif %}
+{% endblock %}
+
 {% block content %}
-<section class="work-card placeholder-panel">
-  <div class="section-heading">
-    <h2>当前账号</h2>
-    <p>后台登录会话使用 Cookie 保存，退出或切换账号后需要重新登录。</p>
+{% if error %}
+<div class="alert alert-error">{{ error }}</div>
+{% endif %}
+{% if success %}
+<div class="alert alert-success">{{ success }}</div>
+{% endif %}
+
+{% if permission_denied %}
+<section class="work-card account-denied-panel">
+  <div class="section-heading admin-section-heading">
+    <h2>权限不足</h2>
+    <p>当前账号没有账号管理权限，请使用系统管理员账号操作。</p>
   </div>
-  <dl class="detail-grid">
-    <div><dt>当前账号</dt><dd>{{ admin_user }}</dd></div>
-    <div><dt>登录方式</dt><dd>admin_session Cookie</dd></div>
-    <div><dt>配置位置</dt><dd>.env</dd></div>
-  </dl>
-  <div class="note-box plain-note">
-    <span>多账号配置说明</span>
-    <p>ADMIN_USERS=admin:123456,caigou:123456</p>
-  </div>
-  <p class="empty-note">修改 .env 后需要重启服务，系统不会读取浏览器缓存的 Basic Auth 自动登录。</p>
 </section>
+{% else %}
+<section class="account-overview-grid">
+  <article class="work-card account-current-card">
+    <div class="section-heading admin-section-heading">
+      <h2>当前账号</h2>
+      <p>当前登录会话仍使用原有 Cookie 机制，账号信息来自数据库账号表。</p>
+    </div>
+    <dl class="detail-grid account-detail-grid">
+      <div><dt>用户名</dt><dd>{{ current_user.username }}</dd></div>
+      <div><dt>显示名</dt><dd>{{ current_user.display_name or current_user.username }}</dd></div>
+      <div><dt>角色</dt><dd><span class="role-badge">{{ current_user.role_name }}</span></dd></div>
+      <div><dt>数据范围</dt><dd>{{ data_scope_label(current_user.data_scope) }}</dd></div>
+      <div><dt>上次登录</dt><dd>{{ current_user.last_login_at or '暂无记录' }}</dd></div>
+    </dl>
+  </article>
+
+  <article class="work-card account-rbac-card">
+    <div class="section-heading admin-section-heading">
+      <h2>权限底座状态</h2>
+      <p>第一阶段只严格拦截账号管理页面，其他业务路由暂保持原登录态访问。</p>
+    </div>
+    <div class="badge-row">
+      <span class="status-badge active">数据库账号</span>
+      <span class="status-badge active">角色权限</span>
+      <span class="status-badge active">登录日志</span>
+      <span class="status-badge warning">数据范围待二阶段生效</span>
+    </div>
+  </article>
+</section>
+
+<section class="work-card account-list-card">
+  <div class="section-heading admin-section-heading">
+    <h2>账号列表</h2>
+    <p>停用账号无法登录，也不会出现在工单处理人候选中。</p>
+  </div>
+  <div class="table-wrap">
+    <table class="ticket-table erp-table account-table">
+      <thead>
+        <tr>
+          <th>用户名</th>
+          <th>显示名</th>
+          <th>角色</th>
+          <th>数据范围</th>
+          <th>可处理工单</th>
+          <th>状态</th>
+          <th>上次登录</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for user in users %}
+        <tr>
+          <td><strong>{{ user.username }}</strong></td>
+          <td>{{ user.display_name or user.username }}</td>
+          <td><span class="role-badge">{{ user.role_name or '未设置' }}</span></td>
+          <td>
+            {{ data_scope_label(user.data_scope) }}
+            {% if user.store_names %}
+            <small class="muted-inline">{{ user.store_names }}</small>
+            {% endif %}
+          </td>
+          <td>
+            {% if user.is_assignable %}
+            <span class="status-badge active">可指派</span>
+            {% else %}
+            <span class="status-badge muted">不可指派</span>
+            {% endif %}
+          </td>
+          <td>
+            {% if user.is_active %}
+            <span class="status-badge active">启用</span>
+            {% else %}
+            <span class="status-badge danger">停用</span>
+            {% endif %}
+          </td>
+          <td>{{ user.last_login_at or '暂无' }}</td>
+          <td>
+            <div class="table-actions compact-actions">
+              {% if can_update_account %}
+              <button class="ghost-button compact" type="button" data-drawer-open="account-edit-{{ user.id }}">编辑</button>
+              {% endif %}
+              {% if can_reset_password %}
+              <button class="ghost-button compact" type="button" data-drawer-open="account-reset-{{ user.id }}">重置密码</button>
+              {% endif %}
+              {% if can_disable_account and user.username != admin_user %}
+                {% if user.is_active %}
+                <form method="post" action="/admin/account/users/{{ user.id }}/disable">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                  <button class="ghost-button compact danger" type="submit">停用</button>
+                </form>
+                {% else %}
+                <form method="post" action="/admin/account/users/{{ user.id }}/enable">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                  <button class="ghost-button compact" type="submit">启用</button>
+                </form>
+                {% endif %}
+              {% endif %}
+            </div>
+          </td>
+        </tr>
+        {% else %}
+        <tr><td class="empty-cell" colspan="8">暂无账号。</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+{% if can_create_account %}
+<div class="drawer-overlay" data-drawer="account-create" hidden>
+  <aside class="drawer-panel" role="dialog" aria-modal="true" aria-labelledby="account-create-title">
+    <header>
+      <div>
+        <p class="eyebrow">账号管理</p>
+        <h2 id="account-create-title">新增账号</h2>
+      </div>
+      <button class="modal-close" type="button" data-drawer-close aria-label="关闭">×</button>
+    </header>
+    <form class="drawer-form" method="post" action="/admin/account/users">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label><span>用户名</span><input name="username" type="text" required pattern="[A-Za-z0-9_-]+"></label>
+      <label><span>显示名</span><input name="display_name" type="text"></label>
+      <label><span>初始密码</span><input name="password" type="password" minlength="6" autocomplete="new-password" required></label>
+      <label><span>确认密码</span><input name="password_confirm" type="password" minlength="6" autocomplete="new-password" required></label>
+      <label>
+        <span>角色</span>
+        <select name="role_id" required>
+          {% for role in roles %}
+          <option value="{{ role.id }}">{{ role.role_name }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>
+        <span>数据范围</span>
+        <select name="data_scope">
+          {% for option in data_scope_options %}
+          <option value="{{ option.value }}">{{ option.label }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label><span>门店范围</span><input name="store_names" type="text" placeholder="多个门店用逗号或顿号分隔"></label>
+      <label class="inline-check"><input name="is_assignable" value="1" type="checkbox" checked><span>可作为工单处理人</span></label>
+      <label class="inline-check"><input name="is_active" value="1" type="checkbox" checked><span>启用账号</span></label>
+      <div class="modal-footer">
+        <button class="ghost-button" type="button" data-drawer-close>取消</button>
+        <button class="primary-button" type="submit">保存账号</button>
+      </div>
+    </form>
+  </aside>
+</div>
+{% endif %}
+
+{% for user in users %}
+{% if can_update_account %}
+<div class="drawer-overlay" data-drawer="account-edit-{{ user.id }}" hidden>
+  <aside class="drawer-panel" role="dialog" aria-modal="true" aria-labelledby="account-edit-title-{{ user.id }}">
+    <header>
+      <div>
+        <p class="eyebrow">{{ user.username }}</p>
+        <h2 id="account-edit-title-{{ user.id }}">编辑账号</h2>
+      </div>
+      <button class="modal-close" type="button" data-drawer-close aria-label="关闭">×</button>
+    </header>
+    <form class="drawer-form" method="post" action="/admin/account/users/{{ user.id }}/update">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label><span>显示名</span><input name="display_name" type="text" value="{{ user.display_name or user.username }}"></label>
+      <label>
+        <span>角色</span>
+        <select name="role_id" required>
+          {% for role in roles %}
+          <option value="{{ role.id }}" {% if role.id == user.role_id %}selected{% endif %}>{{ role.role_name }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>
+        <span>数据范围</span>
+        <select name="data_scope">
+          {% for option in data_scope_options %}
+          <option value="{{ option.value }}" {% if option.value == user.data_scope %}selected{% endif %}>{{ option.label }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label><span>门店范围</span><input name="store_names" type="text" value="{{ user.store_names }}"></label>
+      <label class="inline-check"><input name="is_assignable" value="1" type="checkbox" {% if user.is_assignable %}checked{% endif %}><span>可作为工单处理人</span></label>
+      <label class="inline-check"><input name="is_active" value="1" type="checkbox" {% if user.is_active %}checked{% endif %}><span>启用账号</span></label>
+      <div class="modal-footer">
+        <button class="ghost-button" type="button" data-drawer-close>取消</button>
+        <button class="primary-button" type="submit">保存修改</button>
+      </div>
+    </form>
+  </aside>
+</div>
+{% endif %}
+
+{% if can_reset_password %}
+<div class="drawer-overlay" data-drawer="account-reset-{{ user.id }}" hidden>
+  <aside class="drawer-panel" role="dialog" aria-modal="true" aria-labelledby="account-reset-title-{{ user.id }}">
+    <header>
+      <div>
+        <p class="eyebrow">{{ user.username }}</p>
+        <h2 id="account-reset-title-{{ user.id }}">重置密码</h2>
+      </div>
+      <button class="modal-close" type="button" data-drawer-close aria-label="关闭">×</button>
+    </header>
+    <form class="drawer-form" method="post" action="/admin/account/users/{{ user.id }}/reset-password">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label><span>新密码</span><input name="password" type="password" minlength="6" autocomplete="new-password" required></label>
+      <label><span>确认密码</span><input name="password_confirm" type="password" minlength="6" autocomplete="new-password" required></label>
+      <div class="modal-footer">
+        <button class="ghost-button" type="button" data-drawer-close>取消</button>
+        <button class="primary-button" type="submit">确认重置</button>
+      </div>
+    </form>
+  </aside>
+</div>
+{% endif %}
+{% endfor %}
+{% endif %}
 {% endblock %}

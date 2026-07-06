@@ -49,6 +49,117 @@ DEFAULT_URGENCY_LEVELS = ["普通", "加急", "当天必须处理"]
 DEFAULT_STATUSES = ["待处理", "处理中", "待门店补充", "已完成", "已驳回"]
 DEFAULT_BRANDS: List[str] = []
 DEFAULT_HANDLERS: List[str] = []
+ADMIN_PERMISSION_KEYS = [
+    "ticket.view",
+    "ticket.create",
+    "ticket.update",
+    "ticket.assign",
+    "ticket.comment",
+    "ticket.archive",
+    "ticket.restore",
+    "ticket.delete",
+    "ticket.hard_delete",
+    "ticket.export",
+    "ticket.view_trash",
+    "schedule.view",
+    "schedule.create",
+    "schedule.update",
+    "schedule.delete",
+    "schedule.export",
+    "employee.view",
+    "employee.create",
+    "employee.update",
+    "employee.archive",
+    "employee.delete",
+    "employee.hard_delete",
+    "shift.view",
+    "shift.create",
+    "shift.update",
+    "shift.archive",
+    "shift.delete",
+    "shift.hard_delete",
+    "embedded.view",
+    "embedded.create",
+    "embedded.update",
+    "embedded.delete",
+    "embedded.hard_delete",
+    "config.view",
+    "config.update",
+    "account.view",
+    "account.create",
+    "account.update",
+    "account.disable",
+    "account.reset_password",
+    "role.view",
+    "role.create",
+    "role.update",
+    "role.delete",
+    "system.view",
+    "system.health",
+    "system.route_health",
+    "system.backup_info",
+]
+SYSTEM_ADMIN_ROLE_NAME = "系统管理员"
+OPERATIONS_ROLE_NAME = "运营管理"
+DEFAULT_ADMIN_ROLE_DEFINITIONS = [
+    {
+        "role_name": SYSTEM_ADMIN_ROLE_NAME,
+        "description": "拥有全部后台权限，可管理账号、角色和系统配置。",
+        "is_system": 1,
+        "permissions": ADMIN_PERMISSION_KEYS,
+    },
+    {
+        "role_name": OPERATIONS_ROLE_NAME,
+        "description": "查看和处理工单、归档、回收站查看、排班查看和工单导出。",
+        "is_system": 1,
+        "permissions": [
+            "ticket.view",
+            "ticket.update",
+            "ticket.assign",
+            "ticket.comment",
+            "ticket.archive",
+            "ticket.restore",
+            "ticket.export",
+            "ticket.view_trash",
+            "schedule.view",
+        ],
+    },
+    {
+        "role_name": "商品采购",
+        "description": "处理商品、建单、缺货和新品相关工单。",
+        "is_system": 1,
+        "permissions": ["ticket.view", "ticket.update", "ticket.assign", "ticket.comment", "ticket.export"],
+    },
+    {
+        "role_name": "排班管理员",
+        "description": "管理员工、班次和门店排班。",
+        "is_system": 1,
+        "permissions": [
+            "schedule.view",
+            "schedule.create",
+            "schedule.update",
+            "schedule.delete",
+            "schedule.export",
+            "employee.view",
+            "employee.create",
+            "employee.update",
+            "employee.archive",
+            "shift.view",
+            "shift.create",
+            "shift.update",
+            "shift.archive",
+        ],
+    },
+    {
+        "role_name": "只读账号",
+        "description": "只允许查看，不允许新增、处理、删除或导出。",
+        "is_system": 1,
+        "permissions": ["ticket.view", "schedule.view", "employee.view", "shift.view", "embedded.view"],
+    },
+]
+USERNAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+DATA_SCOPE_OPTIONS = {"all", "assigned", "stores"}
+PASSWORD_HASH_ITERATIONS = 260000
 TASK_STATUSES = ["待处理", "处理中", "已完成"]
 EMPLOYEE_STATUSES = ["在职", "离职", "停用"]
 EMPLOYEE_ROLE_GROUPS = [
@@ -344,36 +455,60 @@ def parse_admin_users(raw_users: str) -> List[Tuple[str, str]]:
     return users
 
 
-def get_admin_credentials() -> List[Tuple[str, str]]:
+def get_env_admin_credentials() -> List[Tuple[str, str]]:
     admin_users = os.environ.get("ADMIN_USERS")
     if admin_users is not None:
         users = parse_admin_users(admin_users)
         if users:
             return users
-        raise HTTPException(status_code=503, detail="Admin credentials are not configured.")
-
-    username = os.environ.get("ADMIN_USERNAME", "").strip()
-    password = os.environ.get("ADMIN_PASSWORD", "")
-    if not username or not password:
-        raise HTTPException(status_code=503, detail="Admin credentials are not configured.")
-    return [(username, password)]
-
-
-def admin_usernames_for_handlers() -> List[str]:
-    admin_users = os.environ.get("ADMIN_USERS")
-    if admin_users is not None:
-        return unique_clean_values(username for username, _password in parse_admin_users(admin_users))
 
     username = os.environ.get("ADMIN_USERNAME", "").strip()
     password = os.environ.get("ADMIN_PASSWORD", "")
     if username and password:
-        return [username]
+        return [(username, password)]
     return []
 
 
-def authenticate_admin(username: str, password: str) -> Optional[str]:
+def get_admin_credentials() -> List[Tuple[str, str]]:
+    users = get_env_admin_credentials()
+    if not users:
+        raise HTTPException(status_code=503, detail="Admin credentials are not configured.")
+    return users
+
+
+def admin_usernames_for_handlers() -> List[str]:
+    try:
+        handlers = fetch_assignable_admin_usernames()
+    except sqlite3.Error:
+        handlers = []
+    if handlers:
+        return handlers
+    return unique_clean_values(username for username, _password in get_env_admin_credentials())
+
+
+def hash_password(password: str, iterations: int = PASSWORD_HASH_ITERATIONS) -> str:
+    salt = secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("ascii"), iterations)
+    return f"pbkdf2_sha256${iterations}${salt}${digest.hex()}"
+
+
+def verify_password(password: str, password_hash: str) -> bool:
+    parts = (password_hash or "").split("$")
+    if len(parts) != 4 or parts[0] != "pbkdf2_sha256":
+        return False
+    try:
+        iterations = int(parts[1])
+        salt = parts[2]
+        expected_hash = parts[3]
+        digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("ascii"), iterations)
+    except (TypeError, ValueError):
+        return False
+    return hmac.compare_digest(digest.hex(), expected_hash)
+
+
+def authenticate_env_admin(username: str, password: str) -> Optional[str]:
     input_username = username.strip()
-    for expected_username, expected_password in get_admin_credentials():
+    for expected_username, expected_password in get_env_admin_credentials():
         username_ok = secrets.compare_digest(input_username, expected_username)
         password_ok = secrets.compare_digest(password, expected_password)
         if username_ok and password_ok:
@@ -381,9 +516,45 @@ def authenticate_admin(username: str, password: str) -> Optional[str]:
     return None
 
 
+def authenticate_admin(username: str, password: str) -> Optional[str]:
+    input_username = username.strip()
+    try:
+        with get_connection() as connection:
+            if table_exists(connection, "admin_users"):
+                has_users = admin_users_count(connection) > 0
+                has_active_admin = active_system_admin_count(connection) > 0
+                row = connection.execute(
+                    "SELECT * FROM admin_users WHERE username = ?",
+                    (input_username,),
+                ).fetchone()
+                if has_users and has_active_admin:
+                    if row and int(row["is_active"]) == 1 and verify_password(password, str(row["password_hash"] or "")):
+                        connection.execute(
+                            "UPDATE admin_users SET last_login_at = ?, updated_at = ? WHERE id = ?",
+                            (now_text(), now_text(), int(row["id"])),
+                        )
+                        return str(row["username"])
+                    return None
+    except sqlite3.Error:
+        pass
+    env_username = authenticate_env_admin(username, password)
+    if env_username:
+        return env_username
+    return None
+
+
 def admin_username_exists(username: str) -> bool:
     input_username = username.strip()
-    for expected_username, _expected_password in get_admin_credentials():
+    try:
+        user = fetch_admin_user_by_username(input_username)
+        if user and int(user.get("is_active") or 0) == 1:
+            return True
+        with get_connection() as connection:
+            if table_exists(connection, "admin_users") and active_system_admin_count(connection) > 0:
+                return False
+    except sqlite3.Error:
+        pass
+    for expected_username, _expected_password in get_env_admin_credentials():
         if secrets.compare_digest(input_username, expected_username):
             return True
     return False
@@ -487,6 +658,65 @@ def read_admin_session(token: str) -> Optional[str]:
 
 def current_admin_username(request: Request) -> Optional[str]:
     return read_admin_session(request.cookies.get(SESSION_COOKIE_NAME, ""))
+
+
+def current_admin_user(request: Request) -> Optional[Dict[str, object]]:
+    username = current_admin_username(request)
+    if not username:
+        return None
+    try:
+        user = fetch_admin_user_by_username(username)
+    except sqlite3.Error:
+        user = None
+    if user and int(user.get("is_active") or 0) == 1:
+        return user
+    for expected_username, _password in get_env_admin_credentials():
+        if secrets.compare_digest(username, expected_username):
+            return {
+                "id": 0,
+                "username": username,
+                "display_name": username,
+                "role_id": 0,
+                "role_name": SYSTEM_ADMIN_ROLE_NAME,
+                "permissions": ADMIN_PERMISSION_KEYS,
+                "is_active": 1,
+                "is_assignable": 1,
+                "data_scope": "all",
+                "store_names": "",
+                "last_login_at": "",
+            }
+    return None
+
+
+def has_permission(user: Optional[Dict[str, object]], permission_key: str) -> bool:
+    if not user:
+        return False
+    permissions = set(str(permission) for permission in user.get("permissions") or [])
+    return permission_key in permissions
+
+
+def require_permission(permission_key: str):
+    def dependency(request: Request) -> Dict[str, object]:
+        user = current_admin_user(request)
+        if not user:
+            raise HTTPException(status_code=http_status.HTTP_401_UNAUTHORIZED, detail="Login required.")
+        if not has_permission(user, permission_key):
+            raise HTTPException(status_code=http_status.HTTP_403_FORBIDDEN, detail="权限不足")
+        return user
+
+    return dependency
+
+
+def require_any_permission(permission_keys: List[str]):
+    def dependency(request: Request) -> Dict[str, object]:
+        user = current_admin_user(request)
+        if not user:
+            raise HTTPException(status_code=http_status.HTTP_401_UNAUTHORIZED, detail="Login required.")
+        if not any(has_permission(user, permission_key) for permission_key in permission_keys):
+            raise HTTPException(status_code=http_status.HTTP_403_FORBIDDEN, detail="权限不足")
+        return user
+
+    return dependency
 
 
 def current_csrf_token(request: Request) -> str:
@@ -876,6 +1106,366 @@ def add_archive_columns(connection: sqlite3.Connection, table_name: str) -> None
     add_column_if_missing(connection, table_name, "archived_at", "TEXT")
     add_column_if_missing(connection, table_name, "archived_by", "TEXT")
     add_column_if_missing(connection, table_name, "archive_reason", "TEXT")
+
+
+def ensure_admin_rbac_schema(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS admin_roles (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            role_name TEXT NOT NULL UNIQUE,
+            description TEXT,
+            is_system INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS admin_role_permissions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            role_id INTEGER NOT NULL,
+            permission_key TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(role_id, permission_key)
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS admin_users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL UNIQUE,
+            display_name TEXT,
+            password_hash TEXT NOT NULL,
+            role_id INTEGER,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            is_assignable INTEGER NOT NULL DEFAULT 1,
+            data_scope TEXT NOT NULL DEFAULT 'all',
+            store_names TEXT,
+            last_login_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            created_by TEXT,
+            updated_by TEXT
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS admin_login_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL,
+            success INTEGER NOT NULL,
+            ip_address TEXT,
+            user_agent TEXT,
+            message TEXT,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS admin_operation_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL,
+            action TEXT NOT NULL,
+            target_type TEXT,
+            target_id TEXT,
+            detail TEXT,
+            ip_address TEXT,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    add_column_if_missing(connection, "admin_users", "display_name", "TEXT")
+    add_column_if_missing(connection, "admin_users", "role_id", "INTEGER")
+    add_column_if_missing(connection, "admin_users", "is_active", "INTEGER NOT NULL DEFAULT 1")
+    add_column_if_missing(connection, "admin_users", "is_assignable", "INTEGER NOT NULL DEFAULT 1")
+    add_column_if_missing(connection, "admin_users", "data_scope", "TEXT NOT NULL DEFAULT 'all'")
+    add_column_if_missing(connection, "admin_users", "store_names", "TEXT")
+    add_column_if_missing(connection, "admin_users", "last_login_at", "TEXT")
+    add_column_if_missing(connection, "admin_users", "created_by", "TEXT")
+    add_column_if_missing(connection, "admin_users", "updated_by", "TEXT")
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_admin_users_username ON admin_users(username)")
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_admin_users_role_id ON admin_users(role_id)")
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_admin_roles_role_name ON admin_roles(role_name)")
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_admin_role_permissions_role_id ON admin_role_permissions(role_id)")
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_admin_login_logs_username ON admin_login_logs(username)")
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_admin_operation_logs_username ON admin_operation_logs(username)")
+    seed_default_admin_roles(connection)
+    migrate_env_admin_users_if_empty(connection)
+
+
+def seed_default_admin_roles(connection: sqlite3.Connection) -> None:
+    timestamp = now_text()
+    for role in DEFAULT_ADMIN_ROLE_DEFINITIONS:
+        connection.execute(
+            """
+            INSERT INTO admin_roles (role_name, description, is_system, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(role_name) DO UPDATE SET
+                description = excluded.description,
+                is_system = excluded.is_system,
+                updated_at = excluded.updated_at
+            """,
+            (
+                str(role["role_name"]),
+                str(role["description"]),
+                int(role["is_system"]),
+                timestamp,
+                timestamp,
+            ),
+        )
+        role_id = role_id_for_name(connection, str(role["role_name"]))
+        for permission_key in role["permissions"]:
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO admin_role_permissions (role_id, permission_key, created_at)
+                VALUES (?, ?, ?)
+                """,
+                (role_id, str(permission_key), timestamp),
+            )
+
+
+def role_id_for_name(connection: sqlite3.Connection, role_name: str) -> int:
+    row = connection.execute("SELECT id FROM admin_roles WHERE role_name = ?", (role_name,)).fetchone()
+    if not row:
+        raise RuntimeError(f"Missing admin role: {role_name}")
+    return int(row["id"])
+
+
+def admin_users_count(connection: sqlite3.Connection) -> int:
+    if not table_exists(connection, "admin_users"):
+        return 0
+    row = connection.execute("SELECT COUNT(*) AS count FROM admin_users").fetchone()
+    return int(row["count"] or 0)
+
+
+def active_system_admin_count(connection: sqlite3.Connection, excluding_user_id: Optional[int] = None) -> int:
+    if not table_exists(connection, "admin_users") or not table_exists(connection, "admin_roles"):
+        return 0
+    params: List[object] = [SYSTEM_ADMIN_ROLE_NAME]
+    exclude_clause = ""
+    if excluding_user_id is not None:
+        exclude_clause = "AND admin_users.id != ?"
+        params.append(int(excluding_user_id))
+    row = connection.execute(
+        f"""
+        SELECT COUNT(*) AS count
+        FROM admin_users
+        JOIN admin_roles ON admin_roles.id = admin_users.role_id
+        WHERE admin_users.is_active = 1
+          AND admin_roles.role_name = ?
+          {exclude_clause}
+        """,
+        tuple(params),
+    ).fetchone()
+    return int(row["count"] or 0)
+
+
+def migrate_env_admin_users_if_empty(connection: sqlite3.Connection) -> None:
+    if admin_users_count(connection) > 0:
+        return
+    credentials = get_env_admin_credentials()
+    if not credentials:
+        return
+    timestamp = now_text()
+    system_role_id = role_id_for_name(connection, SYSTEM_ADMIN_ROLE_NAME)
+    operations_role_id = role_id_for_name(connection, OPERATIONS_ROLE_NAME)
+    for index, (username, password) in enumerate(credentials):
+        clean_username = username.strip()
+        if not clean_username or not password:
+            continue
+        role_id = system_role_id if index == 0 else operations_role_id
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO admin_users (
+                username, display_name, password_hash, role_id, is_active, is_assignable,
+                data_scope, store_names, created_at, updated_at, created_by, updated_by
+            )
+            VALUES (?, ?, ?, ?, 1, 1, 'all', '', ?, ?, 'env:migration', 'env:migration')
+            """,
+            (
+                clean_username,
+                clean_username,
+                hash_password(password),
+                role_id,
+                timestamp,
+                timestamp,
+            ),
+        )
+
+
+def permissions_for_role(connection: sqlite3.Connection, role_id: object) -> List[str]:
+    if not role_id:
+        return []
+    return [
+        str(row["permission_key"])
+        for row in connection.execute(
+            "SELECT permission_key FROM admin_role_permissions WHERE role_id = ? ORDER BY permission_key",
+            (int(role_id),),
+        ).fetchall()
+    ]
+
+
+def row_to_admin_user(connection: sqlite3.Connection, row: sqlite3.Row) -> Dict[str, object]:
+    role_id = int(row["role_id"] or 0)
+    role = connection.execute("SELECT * FROM admin_roles WHERE id = ?", (role_id,)).fetchone() if role_id else None
+    permissions = permissions_for_role(connection, role_id)
+    return {
+        "id": int(row["id"]),
+        "username": str(row["username"] or ""),
+        "display_name": str(row["display_name"] or row["username"] or ""),
+        "role_id": role_id,
+        "role_name": str(role["role_name"] if role else ""),
+        "permissions": permissions,
+        "is_active": int(row["is_active"] or 0),
+        "is_assignable": int(row["is_assignable"] or 0),
+        "data_scope": str(row["data_scope"] or "all"),
+        "store_names": str(row["store_names"] or ""),
+        "last_login_at": str(row["last_login_at"] or ""),
+        "created_at": str(row["created_at"] or ""),
+        "updated_at": str(row["updated_at"] or ""),
+    }
+
+
+def fetch_admin_user_by_username(username: str) -> Optional[Dict[str, object]]:
+    clean_username = username.strip()
+    if not clean_username:
+        return None
+    with get_connection() as connection:
+        if not table_exists(connection, "admin_users"):
+            return None
+        row = connection.execute("SELECT * FROM admin_users WHERE username = ?", (clean_username,)).fetchone()
+        if not row:
+            return None
+        return row_to_admin_user(connection, row)
+
+
+def fetch_admin_user_by_id(user_id: int) -> Optional[Dict[str, object]]:
+    with get_connection() as connection:
+        row = connection.execute("SELECT * FROM admin_users WHERE id = ?", (int(user_id),)).fetchone()
+        if not row:
+            return None
+        return row_to_admin_user(connection, row)
+
+
+def fetch_admin_users_for_account_page() -> List[Dict[str, object]]:
+    with get_connection() as connection:
+        return [
+            row_to_admin_user(connection, row)
+            for row in connection.execute("SELECT * FROM admin_users ORDER BY id").fetchall()
+        ]
+
+
+def fetch_admin_roles() -> List[Dict[str, object]]:
+    with get_connection() as connection:
+        return [
+            {
+                "id": int(row["id"]),
+                "role_name": str(row["role_name"] or ""),
+                "description": str(row["description"] or ""),
+                "is_system": int(row["is_system"] or 0),
+                "permissions": permissions_for_role(connection, int(row["id"])),
+            }
+            for row in connection.execute("SELECT * FROM admin_roles ORDER BY id").fetchall()
+        ]
+
+
+def fetch_assignable_admin_usernames() -> List[str]:
+    with get_connection() as connection:
+        if not table_exists(connection, "admin_users"):
+            return []
+        rows = connection.execute(
+            """
+            SELECT username
+            FROM admin_users
+            WHERE is_active = 1 AND is_assignable = 1
+            ORDER BY id
+            """
+        ).fetchall()
+    return unique_clean_values(row["username"] for row in rows)
+
+
+def record_login_log(request: Request, username: str, success: bool, message: str = "") -> None:
+    try:
+        with get_connection() as connection:
+            if not table_exists(connection, "admin_login_logs"):
+                return
+            connection.execute(
+                """
+                INSERT INTO admin_login_logs (username, success, ip_address, user_agent, message, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    username.strip(),
+                    1 if success else 0,
+                    request.client.host if request.client else "",
+                    request.headers.get("user-agent", ""),
+                    message,
+                    now_text(),
+                ),
+            )
+    except sqlite3.Error:
+        return
+
+
+def record_operation_log(
+    username: str,
+    action: str,
+    target_type: str = "",
+    target_id: object = "",
+    detail: Dict[str, object] | str = "",
+    request: Optional[Request] = None,
+) -> None:
+    if isinstance(detail, dict):
+        clean_detail = {key: value for key, value in detail.items() if "password" not in key}
+        detail_text = json.dumps(clean_detail, ensure_ascii=False, sort_keys=True)
+    else:
+        detail_text = str(detail or "")
+    try:
+        with get_connection() as connection:
+            if not table_exists(connection, "admin_operation_logs"):
+                return
+            connection.execute(
+                """
+                INSERT INTO admin_operation_logs (username, action, target_type, target_id, detail, ip_address, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    username.strip(),
+                    action,
+                    target_type,
+                    str(target_id or ""),
+                    detail_text,
+                    request.client.host if request and request.client else "",
+                    now_text(),
+                ),
+            )
+    except sqlite3.Error:
+        return
+
+
+def normalize_admin_data_scope(value: str) -> str:
+    clean_value = (value or "").strip()
+    return clean_value if clean_value in DATA_SCOPE_OPTIONS else "all"
+
+
+def deactivate_admin_user_errors(target_user: Dict[str, object], actor_username: str) -> List[str]:
+    errors: List[str] = []
+    target_id = int(target_user["id"])
+    if str(target_user["username"]) == actor_username:
+        errors.append("不能停用当前登录账号")
+    with get_connection() as connection:
+        role = connection.execute(
+            "SELECT role_name FROM admin_roles WHERE id = ?",
+            (int(target_user.get("role_id") or 0),),
+        ).fetchone()
+        if role and str(role["role_name"]) == SYSTEM_ADMIN_ROLE_NAME and active_system_admin_count(connection, target_id) <= 0:
+            errors.append("不能停用最后一个系统管理员")
+    return errors
 
 
 MULTI_VALUE_SPLIT_RE = re.compile(r"[,\uFF0C\u3001;\uFF1B]+")
@@ -1660,6 +2250,7 @@ def init_db() -> None:
             )
             """
         )
+        ensure_admin_rbac_schema(connection)
         connection.execute("CREATE INDEX IF NOT EXISTS idx_tickets_created_at ON tickets(created_at)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_tickets_status ON tickets(status)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_tickets_assigned_to ON tickets(assigned_to)")
@@ -7052,6 +7643,62 @@ def create_app() -> FastAPI:
             status_code=status_code,
         )
 
+    def render_account_page(
+        request: Request,
+        admin: str,
+        error: str = "",
+        success: str = "",
+        status_code: int = 200,
+        permission_denied: bool = False,
+    ) -> HTMLResponse:
+        current_user = current_admin_user(request)
+        can_view_accounts = has_permission(current_user, "account.view")
+        roles = fetch_admin_roles() if can_view_accounts else []
+        users = fetch_admin_users_for_account_page() if can_view_accounts else []
+        return templates.TemplateResponse(
+            request,
+            "account.html",
+            {
+                "request": request,
+                "admin_user": admin,
+                "current_user": current_user,
+                "permissions": current_user.get("permissions", []) if current_user else [],
+                "users": users,
+                "roles": roles,
+                "stores": load_app_config().stores,
+                "data_scope_options": [
+                    {"value": "all", "label": "全部数据"},
+                    {"value": "assigned", "label": "仅自己处理"},
+                    {"value": "stores", "label": "指定门店"},
+                ],
+                "can_create_account": has_permission(current_user, "account.create"),
+                "can_update_account": has_permission(current_user, "account.update"),
+                "can_disable_account": has_permission(current_user, "account.disable"),
+                "can_reset_password": has_permission(current_user, "account.reset_password"),
+                "permission_denied": permission_denied,
+                "error": error,
+                "success": success,
+                "csrf_token": current_csrf_token(request),
+            },
+            status_code=status_code,
+        )
+
+    def account_permission_denied(request: Request, admin: str) -> HTMLResponse:
+        return render_account_page(
+            request,
+            admin,
+            error="权限不足，无法执行账号管理操作。",
+            status_code=http_status.HTTP_403_FORBIDDEN,
+            permission_denied=True,
+        )
+
+    def validate_account_password(password: str, password_confirm: str) -> Optional[str]:
+        if len(password) < 6:
+            return "密码最少需要 6 位。"
+        if password != password_confirm:
+            return "两次输入的密码不一致。"
+        return None
+
     def render_ticket_detail(
         request: Request,
         ticket_id: int,
@@ -7610,6 +8257,7 @@ def create_app() -> FastAPI:
         next_url = safe_admin_return_url(next)
         authenticated_username = authenticate_admin(username, password)
         if not authenticated_username:
+            record_login_log(request, username.strip(), False, "用户名或密码不正确")
             return render_login_form(
                 request,
                 status_code=400,
@@ -7617,6 +8265,7 @@ def create_app() -> FastAPI:
                 username=username.strip(),
                 next_url=next_url,
             )
+        record_login_log(request, authenticated_username, True, "登录成功")
         response = RedirectResponse(url=next_url, status_code=303)
         max_age = get_session_max_age_seconds()
         response.set_cookie(
@@ -8824,16 +9473,234 @@ def create_app() -> FastAPI:
         )
 
     @app.get("/admin/account", response_class=HTMLResponse)
-    def admin_account(request: Request, admin: str = Depends(require_admin)) -> HTMLResponse:
-        return templates.TemplateResponse(
-            request,
-            "account.html",
-            {
-                "request": request,
-                "admin_user": admin,
-                "csrf_token": current_csrf_token(request),
-            },
-        )
+    def admin_account(
+        request: Request,
+        admin: str = Depends(require_admin),
+        success: str = Query(""),
+    ) -> HTMLResponse:
+        current_user = current_admin_user(request)
+        if not has_permission(current_user, "account.view"):
+            return account_permission_denied(request, admin)
+        success_messages = {
+            "created": "账号已新增。",
+            "updated": "账号已更新。",
+            "disabled": "账号已停用。",
+            "enabled": "账号已启用。",
+            "password_reset": "密码已重置。",
+        }
+        return render_account_page(request, admin, success=success_messages.get(success, ""))
+
+    @app.post("/admin/account/users", response_class=HTMLResponse)
+    def create_admin_account(
+        request: Request,
+        admin: str = Depends(require_admin),
+        csrf_token: str = Form(""),
+        username: str = Form(""),
+        display_name: str = Form(""),
+        password: str = Form(""),
+        password_confirm: str = Form(""),
+        role_id: int = Form(0),
+        data_scope: str = Form("all"),
+        store_names: str = Form(""),
+        is_assignable: str = Form(""),
+        is_active: str = Form(""),
+    ):
+        require_admin_csrf(request, csrf_token)
+        current_user = current_admin_user(request)
+        if not has_permission(current_user, "account.create"):
+            return account_permission_denied(request, admin)
+        clean_username = username.strip()
+        if not clean_username or not USERNAME_RE.match(clean_username):
+            return render_account_page(request, admin, error="用户名只能使用字母、数字、下划线和短横线。", status_code=400)
+        password_error = validate_account_password(password, password_confirm)
+        if password_error:
+            return render_account_page(request, admin, error=password_error, status_code=400)
+        timestamp = now_text()
+        try:
+            with get_connection() as connection:
+                role = connection.execute("SELECT id FROM admin_roles WHERE id = ?", (role_id,)).fetchone()
+                if not role:
+                    return render_account_page(request, admin, error="请选择有效角色。", status_code=400)
+                connection.execute(
+                    """
+                    INSERT INTO admin_users (
+                        username, display_name, password_hash, role_id, is_active, is_assignable,
+                        data_scope, store_names, created_at, updated_at, created_by, updated_by
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        clean_username,
+                        display_name.strip() or clean_username,
+                        hash_password(password),
+                        int(role_id),
+                        1 if is_active == "1" else 0,
+                        1 if is_assignable == "1" else 0,
+                        normalize_admin_data_scope(data_scope),
+                        store_names.strip(),
+                        timestamp,
+                        timestamp,
+                        admin,
+                        admin,
+                    ),
+                )
+                new_user_id = int(connection.execute("SELECT last_insert_rowid() AS id").fetchone()["id"])
+            record_operation_log(
+                admin,
+                "account.create",
+                "admin_user",
+                new_user_id,
+                {"username": clean_username, "role_id": role_id, "is_assignable": is_assignable == "1"},
+                request,
+            )
+        except sqlite3.IntegrityError:
+            return render_account_page(request, admin, error="用户名已存在。", status_code=400)
+        except sqlite3.Error:
+            return render_account_page(request, admin, error="账号保存失败，请稍后重试。", status_code=500)
+        return RedirectResponse(url="/admin/account?success=created", status_code=303)
+
+    @app.post("/admin/account/users/{user_id}/update", response_class=HTMLResponse)
+    def update_admin_account(
+        request: Request,
+        user_id: int,
+        admin: str = Depends(require_admin),
+        csrf_token: str = Form(""),
+        display_name: str = Form(""),
+        role_id: int = Form(0),
+        data_scope: str = Form("all"),
+        store_names: str = Form(""),
+        is_assignable: str = Form(""),
+        is_active: str = Form(""),
+    ):
+        require_admin_csrf(request, csrf_token)
+        current_user = current_admin_user(request)
+        if not has_permission(current_user, "account.update"):
+            return account_permission_denied(request, admin)
+        target_user = fetch_admin_user_by_id(user_id)
+        if not target_user:
+            return render_account_page(request, admin, error="账号不存在。", status_code=404)
+        active_flag = 1 if is_active == "1" else 0
+        if active_flag == 0:
+            errors = deactivate_admin_user_errors(target_user, admin)
+            if errors:
+                return render_account_page(request, admin, error="，".join(errors) + "。", status_code=400)
+        try:
+            with get_connection() as connection:
+                role = connection.execute("SELECT role_name FROM admin_roles WHERE id = ?", (role_id,)).fetchone()
+                if not role:
+                    return render_account_page(request, admin, error="请选择有效角色。", status_code=400)
+                current_role_name = str(target_user.get("role_name") or "")
+                new_role_name = str(role["role_name"] or "")
+                if (
+                    current_role_name == SYSTEM_ADMIN_ROLE_NAME
+                    and new_role_name != SYSTEM_ADMIN_ROLE_NAME
+                    and active_system_admin_count(connection, int(user_id)) <= 0
+                ):
+                    return render_account_page(request, admin, error="不能移除最后一个系统管理员角色。", status_code=400)
+                connection.execute(
+                    """
+                    UPDATE admin_users
+                    SET display_name = ?, role_id = ?, is_active = ?, is_assignable = ?,
+                        data_scope = ?, store_names = ?, updated_at = ?, updated_by = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        display_name.strip() or str(target_user["username"]),
+                        int(role_id),
+                        active_flag,
+                        1 if is_assignable == "1" else 0,
+                        normalize_admin_data_scope(data_scope),
+                        store_names.strip(),
+                        now_text(),
+                        admin,
+                        int(user_id),
+                    ),
+                )
+            record_operation_log(
+                admin,
+                "account.update",
+                "admin_user",
+                user_id,
+                {"username": target_user["username"], "role_id": role_id, "is_active": active_flag},
+                request,
+            )
+        except sqlite3.Error:
+            return render_account_page(request, admin, error="账号更新失败，请稍后重试。", status_code=500)
+        return RedirectResponse(url="/admin/account?success=updated", status_code=303)
+
+    @app.post("/admin/account/users/{user_id}/disable", response_class=HTMLResponse)
+    def disable_admin_account(
+        request: Request,
+        user_id: int,
+        admin: str = Depends(require_admin),
+        csrf_token: str = Form(""),
+    ):
+        require_admin_csrf(request, csrf_token)
+        current_user = current_admin_user(request)
+        if not has_permission(current_user, "account.disable"):
+            return account_permission_denied(request, admin)
+        target_user = fetch_admin_user_by_id(user_id)
+        if not target_user:
+            return render_account_page(request, admin, error="账号不存在。", status_code=404)
+        errors = deactivate_admin_user_errors(target_user, admin)
+        if errors:
+            return render_account_page(request, admin, error="，".join(errors) + "。", status_code=400)
+        with get_connection() as connection:
+            connection.execute(
+                "UPDATE admin_users SET is_active = 0, updated_at = ?, updated_by = ? WHERE id = ?",
+                (now_text(), admin, int(user_id)),
+            )
+        record_operation_log(admin, "account.disable", "admin_user", user_id, {"username": target_user["username"]}, request)
+        return RedirectResponse(url="/admin/account?success=disabled", status_code=303)
+
+    @app.post("/admin/account/users/{user_id}/enable", response_class=HTMLResponse)
+    def enable_admin_account(
+        request: Request,
+        user_id: int,
+        admin: str = Depends(require_admin),
+        csrf_token: str = Form(""),
+    ):
+        require_admin_csrf(request, csrf_token)
+        current_user = current_admin_user(request)
+        if not has_permission(current_user, "account.disable"):
+            return account_permission_denied(request, admin)
+        target_user = fetch_admin_user_by_id(user_id)
+        if not target_user:
+            return render_account_page(request, admin, error="账号不存在。", status_code=404)
+        with get_connection() as connection:
+            connection.execute(
+                "UPDATE admin_users SET is_active = 1, updated_at = ?, updated_by = ? WHERE id = ?",
+                (now_text(), admin, int(user_id)),
+            )
+        record_operation_log(admin, "account.enable", "admin_user", user_id, {"username": target_user["username"]}, request)
+        return RedirectResponse(url="/admin/account?success=enabled", status_code=303)
+
+    @app.post("/admin/account/users/{user_id}/reset-password", response_class=HTMLResponse)
+    def reset_admin_account_password(
+        request: Request,
+        user_id: int,
+        admin: str = Depends(require_admin),
+        csrf_token: str = Form(""),
+        password: str = Form(""),
+        password_confirm: str = Form(""),
+    ):
+        require_admin_csrf(request, csrf_token)
+        current_user = current_admin_user(request)
+        if not has_permission(current_user, "account.reset_password"):
+            return account_permission_denied(request, admin)
+        target_user = fetch_admin_user_by_id(user_id)
+        if not target_user:
+            return render_account_page(request, admin, error="账号不存在。", status_code=404)
+        password_error = validate_account_password(password, password_confirm)
+        if password_error:
+            return render_account_page(request, admin, error=password_error, status_code=400)
+        with get_connection() as connection:
+            connection.execute(
+                "UPDATE admin_users SET password_hash = ?, updated_at = ?, updated_by = ? WHERE id = ?",
+                (hash_password(password), now_text(), admin, int(user_id)),
+            )
+        record_operation_log(admin, "account.reset_password", "admin_user", user_id, {"username": target_user["username"]}, request)
+        return RedirectResponse(url="/admin/account?success=password_reset", status_code=303)
 
     @app.get("/admin/system", response_class=HTMLResponse)
     def admin_system(request: Request, admin: str = Depends(require_admin)) -> HTMLResponse:
