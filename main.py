@@ -220,6 +220,7 @@ CANONICAL_ACCESS_PATHS = {
     "schedules": "/admin/schedules",
     "settings": "/admin/settings",
     "account": "/admin/account",
+    "personnel_governance": "/admin/personnel-governance",
     "system": "/admin/system",
     "embedded_pages": "/admin/embedded-pages",
     "route_health": "/admin/route-health",
@@ -245,6 +246,7 @@ REQUIRED_RUNTIME_ROUTES = [
     "/admin/schedules",
     "/admin/settings",
     "/admin/account",
+    "/admin/personnel-governance",
     "/admin/system",
     "/admin/embedded-pages",
     "/admin/route-health",
@@ -273,6 +275,7 @@ REQUIRED_RUNTIME_ROUTE_LABELS = {
     "/admin/schedules": "门店排班",
     "/admin/settings": "配置管理",
     "/admin/account": "账号设置",
+    "/admin/personnel-governance": "人员数据治理",
     "/admin/system": "系统设置",
     "/admin/embedded-pages": "嵌入页面管理",
     "/admin/route-health": "路由体检",
@@ -1711,6 +1714,481 @@ def account_people_stats(people: Iterable[Dict[str, object]]) -> Dict[str, int]:
     }
 
 
+PERSONNEL_CONFIDENCE_RANK = {"low": 1, "medium": 2, "high": 3}
+PERSONNEL_CONFIDENCE_LABELS = {
+    "high": "高置信",
+    "medium": "中置信",
+    "low": "低置信",
+}
+
+
+def compact_personnel_text(value: object) -> str:
+    return re.sub(r"[\s\-_./]+", "", str(value or "").strip().lower())
+
+
+def personnel_digits(value: object) -> str:
+    return re.sub(r"\D+", "", str(value or ""))
+
+
+def is_phone_like(value: object) -> bool:
+    digits = personnel_digits(value)
+    return 6 <= len(digits) <= 15
+
+
+def personnel_name_overlap(left: object, right: object) -> bool:
+    left_text = compact_personnel_text(left)
+    right_text = compact_personnel_text(right)
+    if not left_text or not right_text or left_text == right_text:
+        return False
+    if len(left_text) >= 2 and len(right_text) >= 2 and (left_text in right_text or right_text in left_text):
+        return True
+    left_chars = set(left_text)
+    right_chars = set(right_text)
+    return len(left_chars & right_chars) >= 2
+
+
+def personnel_confidence_badge(confidence: str) -> str:
+    return PERSONNEL_CONFIDENCE_LABELS.get(confidence, "低置信")
+
+
+def fetch_unlinked_admin_users_for_personnel(connection: sqlite3.Connection) -> List[Dict[str, object]]:
+    rows = connection.execute(
+        """
+        SELECT admin_users.*
+        FROM admin_users
+        WHERE admin_users.employee_id IS NULL
+          AND admin_users.id NOT IN (
+              SELECT user_id FROM employees WHERE user_id IS NOT NULL
+          )
+        ORDER BY admin_users.id
+        """
+    ).fetchall()
+    return [row_to_admin_user(connection, row) for row in rows]
+
+
+def fetch_unlinked_employees_for_personnel(connection: sqlite3.Connection) -> List[Dict[str, object]]:
+    rows = connection.execute(
+        """
+        SELECT *
+        FROM employees
+        WHERE user_id IS NULL
+          AND id NOT IN (
+              SELECT employee_id FROM admin_users WHERE employee_id IS NOT NULL
+          )
+        ORDER BY id
+        """
+    ).fetchall()
+    return attach_employee_store_bindings(connection, rows)
+
+
+def active_personnel_match_ignores(connection: sqlite3.Connection) -> Dict[Tuple[int, int], Dict[str, object]]:
+    if not table_exists(connection, "personnel_match_ignores"):
+        return {}
+    rows = connection.execute(
+        """
+        SELECT *
+        FROM personnel_match_ignores
+        WHERE COALESCE(is_active, 1) = 1
+        ORDER BY ignored_at DESC, id DESC
+        """
+    ).fetchall()
+    return {(int(row["user_id"]), int(row["employee_id"])): dict(row) for row in rows}
+
+
+def personnel_candidate_reasons(user: Dict[str, object], employee: Dict[str, object]) -> Tuple[str, List[str]]:
+    reasons: List[Tuple[str, str]] = []
+    username = str(user.get("username") or "")
+    display_name = str(user.get("display_name") or "")
+    employee_name = str(employee.get("employee_name") or "")
+    employee_phone = str(employee.get("phone") or "")
+    employee_primary_store = str(employee.get("primary_store_name") or employee.get("store_name") or "")
+    user_store_names = split_multi_value_text(user.get("store_names"))
+    username_digits = personnel_digits(username)
+    phone_digits = personnel_digits(employee_phone)
+    display_key = compact_personnel_text(display_name)
+    employee_key = compact_personnel_text(employee_name)
+
+    if phone_digits and username_digits == phone_digits:
+        reasons.append(("high", "用户名与员工手机号一致"))
+    if display_key and employee_key and display_key == employee_key and employee_phone:
+        reasons.append(("high", "姓名一致且员工手机号完整"))
+    if display_key and employee_key and display_key == employee_key and employee_primary_store and employee_primary_store in user_store_names:
+        reasons.append(("high", "姓名一致且门店范围一致"))
+    if display_key and employee_key and display_key == employee_key and not employee_phone:
+        reasons.append(("medium", "姓名一致但手机号缺失"))
+    if phone_digits and username_digits and username_digits != phone_digits and phone_digits in username_digits:
+        reasons.append(("medium", "用户名包含员工手机号"))
+    if employee_phone and not employee_name:
+        reasons.append(("medium", "员工手机号存在但姓名缺失"))
+    if display_name and employee_name and personnel_name_overlap(display_name, employee_name):
+        reasons.append(("low", "姓名相似"))
+    if phone_digits and username_digits and len(phone_digits) >= 4 and phone_digits[-4:] in username_digits:
+        reasons.append(("low", "用户名包含手机号后四位"))
+    if employee_primary_store and employee_primary_store in user_store_names:
+        reasons.append(("low", "账号数据门店与员工主门店一致"))
+
+    if not reasons:
+        return "", []
+    confidence = max((item[0] for item in reasons), key=lambda value: PERSONNEL_CONFIDENCE_RANK[value])
+    ordered_reasons = []
+    for _level, reason in reasons:
+        if reason not in ordered_reasons:
+            ordered_reasons.append(reason)
+    return confidence, ordered_reasons
+
+
+def build_personnel_match_candidates(include_ignored: bool = True) -> List[Dict[str, object]]:
+    with get_connection() as connection:
+        users = fetch_unlinked_admin_users_for_personnel(connection)
+        employees = fetch_unlinked_employees_for_personnel(connection)
+        ignored_map = active_personnel_match_ignores(connection)
+    candidates: List[Dict[str, object]] = []
+    for user in users:
+        for employee in employees:
+            confidence, reasons = personnel_candidate_reasons(user, employee)
+            if not confidence:
+                continue
+            key = (int(user["id"]), int(employee["id"]))
+            ignored = ignored_map.get(key)
+            if ignored and not include_ignored:
+                continue
+            candidates.append(
+                {
+                    "user": user,
+                    "employee": employee,
+                    "user_id": int(user["id"]),
+                    "employee_id": int(employee["id"]),
+                    "confidence": confidence,
+                    "confidence_label": personnel_confidence_badge(confidence),
+                    "confidence_rank": PERSONNEL_CONFIDENCE_RANK[confidence],
+                    "reasons": reasons,
+                    "reason_text": "、".join(reasons),
+                    "ignored": bool(ignored),
+                    "ignore": ignored or {},
+                }
+            )
+    candidates.sort(
+        key=lambda item: (
+            -int(item["confidence_rank"]),
+            int(item["user_id"]),
+            int(item["employee_id"]),
+        )
+    )
+    return candidates
+
+
+def detect_personnel_link_anomalies() -> List[Dict[str, object]]:
+    anomalies: List[Dict[str, object]] = []
+    with get_connection() as connection:
+        user_employee_ids = [
+            int(row["employee_id"])
+            for row in connection.execute("SELECT employee_id FROM admin_users WHERE employee_id IS NOT NULL").fetchall()
+        ]
+        employee_user_ids = [
+            int(row["user_id"])
+            for row in connection.execute("SELECT user_id FROM employees WHERE user_id IS NOT NULL").fetchall()
+        ]
+        for employee_id, count in Counter(user_employee_ids).items():
+            if count > 1:
+                anomalies.append({"level": "danger", "message": f"员工 #{employee_id} 被多个账号关联"})
+        for user_id, count in Counter(employee_user_ids).items():
+            if count > 1:
+                anomalies.append({"level": "danger", "message": f"账号 #{user_id} 被多个员工关联"})
+        missing_employee_rows = connection.execute(
+            """
+            SELECT id, username, employee_id
+            FROM admin_users
+            WHERE employee_id IS NOT NULL
+              AND employee_id NOT IN (SELECT id FROM employees)
+            """
+        ).fetchall()
+        for row in missing_employee_rows:
+            anomalies.append({"level": "warning", "message": f"账号 {row['username']} 关联的员工 #{row['employee_id']} 不存在"})
+        missing_user_rows = connection.execute(
+            """
+            SELECT id, employee_name, user_id
+            FROM employees
+            WHERE user_id IS NOT NULL
+              AND user_id NOT IN (SELECT id FROM admin_users)
+            """
+        ).fetchall()
+        for row in missing_user_rows:
+            anomalies.append({"level": "warning", "message": f"员工 {row['employee_name']} 关联的账号 #{row['user_id']} 不存在"})
+        mismatch_rows = connection.execute(
+            """
+            SELECT admin_users.id AS user_id, admin_users.username, admin_users.employee_id,
+                   employees.user_id AS employee_user_id
+            FROM admin_users
+            JOIN employees ON employees.id = admin_users.employee_id
+            WHERE employees.user_id IS NOT NULL AND employees.user_id != admin_users.id
+            """
+        ).fetchall()
+        for row in mismatch_rows:
+            anomalies.append(
+                {
+                    "level": "danger",
+                    "message": f"账号 {row['username']} 与员工 #{row['employee_id']} 双向关联不一致",
+                }
+            )
+    return anomalies
+
+
+def personnel_governance_context(filter_value: str = "unprocessed") -> Dict[str, object]:
+    selected_filter = filter_value if filter_value in {"all", "high", "medium", "low", "processed", "unprocessed", "ignored"} else "unprocessed"
+    all_candidates = build_personnel_match_candidates(include_ignored=True)
+    pending_candidates = [candidate for candidate in all_candidates if not candidate["ignored"]]
+    ignored_candidates = [candidate for candidate in all_candidates if candidate["ignored"]]
+    if selected_filter == "all":
+        visible_candidates = all_candidates
+    elif selected_filter in {"high", "medium", "low"}:
+        visible_candidates = [candidate for candidate in pending_candidates if candidate["confidence"] == selected_filter]
+    elif selected_filter in {"processed", "ignored"}:
+        visible_candidates = ignored_candidates
+    else:
+        visible_candidates = pending_candidates
+    with get_connection() as connection:
+        unlinked_users = fetch_unlinked_admin_users_for_personnel(connection)
+        unlinked_employees = fetch_unlinked_employees_for_personnel(connection)
+    anomalies = detect_personnel_link_anomalies()
+    return {
+        "selected_filter": selected_filter,
+        "filter_tabs": [
+            {"value": "unprocessed", "label": "未处理"},
+            {"value": "all", "label": "全部"},
+            {"value": "high", "label": "高置信"},
+            {"value": "medium", "label": "中置信"},
+            {"value": "low", "label": "低置信"},
+            {"value": "ignored", "label": "已忽略"},
+            {"value": "processed", "label": "已处理"},
+        ],
+        "candidates": visible_candidates,
+        "ignored_candidates": ignored_candidates,
+        "unlinked_users": unlinked_users,
+        "unlinked_employees": unlinked_employees,
+        "anomalies": anomalies,
+        "stats": {
+            "suspicious_count": len(pending_candidates),
+            "high_count": sum(1 for candidate in pending_candidates if candidate["confidence"] == "high"),
+            "ignored_count": len(ignored_candidates),
+            "unlinked_account_count": len(unlinked_users),
+            "unlinked_employee_count": len(unlinked_employees),
+            "anomaly_count": len(anomalies),
+        },
+    }
+
+
+def linked_personnel_target_id(user_id: int, employee_id: int) -> str:
+    return f"user:{int(user_id)}|employee:{int(employee_id)}"
+
+
+def link_personnel_records(user_id: int, employee_id: int) -> Dict[str, object]:
+    timestamp = now_text()
+    with get_connection() as connection:
+        user_row = connection.execute("SELECT * FROM admin_users WHERE id = ?", (int(user_id),)).fetchone()
+        employee_row = connection.execute("SELECT * FROM employees WHERE id = ?", (int(employee_id),)).fetchone()
+        if not user_row or not employee_row:
+            raise ValueError("账号或员工不存在。")
+        current_employee_id = user_row["employee_id"]
+        current_user_id = employee_row["user_id"]
+        if current_employee_id is not None and int(current_employee_id) != int(employee_id):
+            raise ValueError("该账号已关联其他员工。")
+        if current_user_id is not None and int(current_user_id) != int(user_id):
+            raise ValueError("该员工已关联其他账号。")
+        other_user = connection.execute(
+            "SELECT id, username FROM admin_users WHERE employee_id = ? AND id != ?",
+            (int(employee_id), int(user_id)),
+        ).fetchone()
+        if other_user:
+            raise ValueError(f"该员工已关联账号 {other_user['username']}。")
+        other_employee = connection.execute(
+            "SELECT id, employee_name FROM employees WHERE user_id = ? AND id != ?",
+            (int(user_id), int(employee_id)),
+        ).fetchone()
+        if other_employee:
+            raise ValueError(f"该账号已关联员工 {other_employee['employee_name']}。")
+
+        user_display_name = str(user_row["display_name"] or "").strip()
+        employee_name = str(employee_row["employee_name"] or "").strip()
+        employee_phone = str(employee_row["phone"] or "").strip()
+        username = str(user_row["username"] or "").strip()
+        display_name_to_save = user_display_name or employee_name or username
+        phone_to_save = employee_phone
+        if not phone_to_save and is_phone_like(username):
+            phone_to_save = username
+        connection.execute(
+            """
+            UPDATE admin_users
+            SET employee_id = ?, display_name = ?, participate_schedule = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                int(employee_id),
+                display_name_to_save,
+                int(employee_row["participate_schedule"] if employee_row["participate_schedule"] is not None else 1),
+                timestamp,
+                int(user_id),
+            ),
+        )
+        connection.execute(
+            """
+            UPDATE employees
+            SET user_id = ?, allow_login = ?, phone = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                int(user_id),
+                int(user_row["allow_login"] if user_row["allow_login"] is not None else 1),
+                phone_to_save,
+                timestamp,
+                int(employee_id),
+            ),
+        )
+        connection.execute(
+            """
+            UPDATE personnel_match_ignores
+            SET is_active = 0, unignored_at = ?, unignored_by = COALESCE(unignored_by, '')
+            WHERE user_id = ? AND employee_id = ? AND COALESCE(is_active, 1) = 1
+            """,
+            (timestamp, int(user_id), int(employee_id)),
+        )
+        return {
+            "user_id": int(user_id),
+            "employee_id": int(employee_id),
+            "username": username,
+            "employee_name": employee_name,
+        }
+
+
+def unlink_personnel_records(user_id: int, employee_id: int) -> Dict[str, object]:
+    timestamp = now_text()
+    with get_connection() as connection:
+        user_row = connection.execute("SELECT * FROM admin_users WHERE id = ?", (int(user_id),)).fetchone()
+        employee_row = connection.execute("SELECT * FROM employees WHERE id = ?", (int(employee_id),)).fetchone()
+        if not user_row or not employee_row:
+            raise ValueError("账号或员工不存在。")
+        connection.execute(
+            """
+            UPDATE admin_users
+            SET employee_id = NULL, updated_at = ?
+            WHERE id = ? AND employee_id = ?
+            """,
+            (timestamp, int(user_id), int(employee_id)),
+        )
+        connection.execute(
+            """
+            UPDATE employees
+            SET user_id = NULL, updated_at = ?
+            WHERE id = ? AND user_id = ?
+            """,
+            (timestamp, int(employee_id), int(user_id)),
+        )
+        return {
+            "user_id": int(user_id),
+            "employee_id": int(employee_id),
+            "username": str(user_row["username"] or ""),
+            "employee_name": str(employee_row["employee_name"] or ""),
+        }
+
+
+def ignore_personnel_match(user_id: int, employee_id: int, reason: str, ignored_by: str) -> None:
+    timestamp = now_text()
+    with get_connection() as connection:
+        user_exists = connection.execute("SELECT 1 FROM admin_users WHERE id = ?", (int(user_id),)).fetchone()
+        employee_exists = connection.execute("SELECT 1 FROM employees WHERE id = ?", (int(employee_id),)).fetchone()
+        if not user_exists or not employee_exists:
+            raise ValueError("账号或员工不存在。")
+        connection.execute(
+            """
+            INSERT INTO personnel_match_ignores (
+                user_id, employee_id, reason, ignored_by, ignored_at, is_active, unignored_by, unignored_at
+            )
+            VALUES (?, ?, ?, ?, ?, 1, NULL, NULL)
+            ON CONFLICT(user_id, employee_id) DO UPDATE SET
+                reason = excluded.reason,
+                ignored_by = excluded.ignored_by,
+                ignored_at = excluded.ignored_at,
+                is_active = 1,
+                unignored_by = NULL,
+                unignored_at = NULL
+            """,
+            (int(user_id), int(employee_id), reason.strip(), ignored_by, timestamp),
+        )
+
+
+def unignore_personnel_match(user_id: int, employee_id: int, unignored_by: str) -> None:
+    with get_connection() as connection:
+        connection.execute(
+            """
+            UPDATE personnel_match_ignores
+            SET is_active = 0, unignored_by = ?, unignored_at = ?
+            WHERE user_id = ? AND employee_id = ? AND COALESCE(is_active, 1) = 1
+            """,
+            (unignored_by, now_text(), int(user_id), int(employee_id)),
+        )
+
+
+def personnel_detail_context(user_id: int = 0, employee_id: int = 0) -> Dict[str, object]:
+    with get_connection() as connection:
+        user = None
+        employee = None
+        if int(user_id or 0) > 0:
+            row = connection.execute("SELECT * FROM admin_users WHERE id = ?", (int(user_id),)).fetchone()
+            user = row_to_admin_user(connection, row) if row else None
+        if int(employee_id or 0) > 0:
+            row = connection.execute("SELECT * FROM employees WHERE id = ?", (int(employee_id),)).fetchone()
+            employee = attach_employee_store_bindings(connection, [row])[0] if row else None
+        audit_rows = connection.execute(
+            """
+            SELECT *
+            FROM admin_operation_logs
+            WHERE target_type IN ('personnel', 'person', 'admin_user', 'employee')
+              AND (
+                  target_id LIKE ?
+                  OR target_id LIKE ?
+                  OR target_id = ?
+                  OR target_id = ?
+              )
+            ORDER BY id DESC
+            LIMIT 30
+            """,
+            (
+                f"%user:{int(user_id or 0)}%",
+                f"%employee:{int(employee_id or 0)}%",
+                str(int(user_id or 0)),
+                str(int(employee_id or 0)),
+            ),
+        ).fetchall()
+        ticket_count = 0
+        schedule_count = 0
+        if user:
+            ticket_count = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM tickets WHERE assigned_to = ?",
+                    (str(user.get("username") or ""),),
+                ).fetchone()[0]
+            )
+        if employee:
+            schedule_count = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM store_schedules WHERE employee_id = ?",
+                    (int(employee["id"]),),
+                ).fetchone()[0]
+            )
+    return {
+        "user": user,
+        "employee": employee,
+        "audit_logs": [dict(row) for row in audit_rows],
+        "ticket_count": ticket_count,
+        "schedule_count": schedule_count,
+        "governance_candidates": [
+            candidate
+            for candidate in build_personnel_match_candidates(include_ignored=True)
+            if int(candidate["user_id"]) == int(user_id or 0) or int(candidate["employee_id"]) == int(employee_id or 0)
+        ],
+    }
+
+
 def fetch_admin_roles() -> List[Dict[str, object]]:
     with get_connection() as connection:
         return [
@@ -1956,11 +2434,17 @@ PERMISSION_ROUTE_RULES: List[Dict[str, str]] = [
     {"method": "POST", "path": "/admin/cleanup/preview", "permission": "ticket.delete", "module": "回收站", "label": "清理预览"},
     {"method": "POST", "path": "/admin/cleanup/delete", "permission": "ticket.delete", "module": "回收站", "label": "执行清理"},
     {"method": "GET", "path": "/admin/account", "permission": "account.view", "module": "账号", "label": "账号管理"},
+    {"method": "GET", "path": "/admin/personnel-governance", "permission": "account.view", "module": "账号", "label": "人员数据治理"},
+    {"method": "GET", "path": "/admin/account/detail", "permission": "account.view", "module": "账号", "label": "人员详情"},
     {"method": "POST", "path": "/admin/account/users", "permission": "account.create", "module": "账号", "label": "新增账号"},
     {"method": "POST", "path": "/admin/account/users/{user_id}/update", "permission": "account.update", "module": "账号", "label": "编辑账号"},
     {"method": "POST", "path": "/admin/account/users/{user_id}/disable", "permission": "account.disable", "module": "账号", "label": "停用账号"},
     {"method": "POST", "path": "/admin/account/users/{user_id}/enable", "permission": "account.disable", "module": "账号", "label": "启用账号"},
     {"method": "POST", "path": "/admin/account/users/{user_id}/reset-password", "permission": "account.reset_password", "module": "账号", "label": "重置密码"},
+    {"method": "POST", "path": "/admin/personnel-governance/link", "permission": "account.update", "module": "账号", "label": "关联人员与账号"},
+    {"method": "POST", "path": "/admin/personnel-governance/unlink", "permission": "account.update", "module": "账号", "label": "解除人员与账号关联"},
+    {"method": "POST", "path": "/admin/personnel-governance/ignore", "permission": "account.update", "module": "账号", "label": "忽略疑似重复"},
+    {"method": "POST", "path": "/admin/personnel-governance/unignore", "permission": "account.update", "module": "账号", "label": "取消忽略疑似重复"},
     {"method": "GET", "path": "/admin/roles", "permission": "role.view", "module": "角色", "label": "角色管理"},
     {"method": "POST", "path": "/admin/roles/{role_id}/permissions", "permission": "role.update", "module": "角色", "label": "编辑角色权限"},
     {"method": "GET", "path": "/admin/permission-overview", "permission": "role.view", "module": "角色", "label": "权限概览"},
@@ -2859,6 +3343,22 @@ def init_db() -> None:
         )
         connection.execute(
             """
+            CREATE TABLE IF NOT EXISTS personnel_match_ignores (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                employee_id INTEGER NOT NULL,
+                reason TEXT,
+                ignored_by TEXT,
+                ignored_at TEXT NOT NULL,
+                is_active INTEGER NOT NULL DEFAULT 1,
+                unignored_by TEXT,
+                unignored_at TEXT,
+                UNIQUE(user_id, employee_id)
+            )
+            """
+        )
+        connection.execute(
+            """
             CREATE TABLE IF NOT EXISTS shift_types (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 shift_name TEXT NOT NULL,
@@ -2955,6 +3455,11 @@ def init_db() -> None:
         connection.execute("CREATE INDEX IF NOT EXISTS idx_employees_archived_at ON employees(archived_at)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_employee_store_map_employee_id ON employee_store_map(employee_id)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_employee_store_map_store_name ON employee_store_map(store_name)")
+        add_column_if_missing(connection, "personnel_match_ignores", "is_active", "INTEGER NOT NULL DEFAULT 1")
+        add_column_if_missing(connection, "personnel_match_ignores", "unignored_by", "TEXT")
+        add_column_if_missing(connection, "personnel_match_ignores", "unignored_at", "TEXT")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_personnel_match_ignores_pair ON personnel_match_ignores(user_id, employee_id)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_personnel_match_ignores_active ON personnel_match_ignores(is_active)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_store_schedules_store_name ON store_schedules(store_name)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_store_schedules_schedule_date ON store_schedules(schedule_date)")
         ensure_schedule_schema_migrations(connection)
@@ -8482,6 +8987,58 @@ def create_app() -> FastAPI:
             status_code=status_code,
         )
 
+    def render_personnel_governance_page(
+        request: Request,
+        admin: str,
+        error: str = "",
+        success: str = "",
+        status_code: int = 200,
+    ) -> HTMLResponse:
+        context = personnel_governance_context(request.query_params.get("filter", "unprocessed"))
+        context.update(
+            {
+                "request": request,
+                "admin_user": admin,
+                "current_user": current_admin_user(request),
+                "error": error,
+                "success": success,
+                "csrf_token": current_csrf_token(request),
+                "can_update_account": has_permission(current_admin_user(request), "account.update"),
+            }
+        )
+        return templates.TemplateResponse(
+            request,
+            "personnel_governance.html",
+            context,
+            status_code=status_code,
+        )
+
+    def render_personnel_detail_page(
+        request: Request,
+        admin: str,
+        user_id: int,
+        employee_id: int,
+        error: str = "",
+        status_code: int = 200,
+    ) -> HTMLResponse:
+        context = personnel_detail_context(user_id, employee_id)
+        context.update(
+            {
+                "request": request,
+                "admin_user": admin,
+                "current_user": current_admin_user(request),
+                "error": error,
+                "csrf_token": current_csrf_token(request),
+                "can_update_account": has_permission(current_admin_user(request), "account.update"),
+            }
+        )
+        return templates.TemplateResponse(
+            request,
+            "personnel_detail.html",
+            context,
+            status_code=status_code,
+        )
+
     def account_permission_denied(request: Request, admin: str) -> HTMLResponse:
         return render_account_page(
             request,
@@ -10423,6 +10980,136 @@ def create_app() -> FastAPI:
             "password_reset": "密码已重置。",
         }
         return render_account_page(request, admin, success=success_messages.get(success, ""))
+
+    @app.get("/admin/personnel-governance", response_class=HTMLResponse)
+    def admin_personnel_governance(
+        request: Request,
+        current_user: Dict[str, object] = Depends(require_permission("account.view")),
+        success: str = Query(""),
+    ) -> HTMLResponse:
+        admin = str(current_user.get("username") or "")
+        success_messages = {
+            "linked": "人员与账号已关联。",
+            "unlinked": "人员与账号关联已解除。",
+            "ignored": "疑似重复已忽略。",
+            "unignored": "已取消忽略。",
+        }
+        return render_personnel_governance_page(request, admin, success=success_messages.get(success, ""))
+
+    @app.get("/admin/account/detail", response_class=HTMLResponse)
+    def admin_personnel_detail(
+        request: Request,
+        current_user: Dict[str, object] = Depends(require_permission("account.view")),
+        user_id: int = Query(0),
+        employee_id: int = Query(0),
+    ) -> HTMLResponse:
+        admin = str(current_user.get("username") or "")
+        if int(user_id or 0) <= 0 and int(employee_id or 0) <= 0:
+            return render_personnel_detail_page(request, admin, user_id, employee_id, error="请选择要查看的人员。", status_code=400)
+        return render_personnel_detail_page(request, admin, user_id, employee_id)
+
+    @app.post("/admin/personnel-governance/link", response_class=HTMLResponse)
+    def link_personnel_governance(
+        request: Request,
+        current_user: Dict[str, object] = Depends(require_permission("account.update")),
+        csrf_token: str = Form(""),
+        user_id: int = Form(0),
+        employee_id: int = Form(0),
+    ):
+        admin = str(current_user.get("username") or "")
+        require_admin_csrf(request, csrf_token)
+        try:
+            result = link_personnel_records(user_id, employee_id)
+        except ValueError as exc:
+            return render_personnel_governance_page(request, admin, error=form_error_message(exc), status_code=400)
+        except sqlite3.Error:
+            return render_personnel_governance_page(request, admin, error="人员关联保存失败，请稍后重试。", status_code=500)
+        record_operation_log(
+            admin,
+            "personnel.link",
+            "personnel",
+            linked_personnel_target_id(user_id, employee_id),
+            result,
+            request,
+        )
+        return RedirectResponse(url="/admin/personnel-governance?success=linked", status_code=303)
+
+    @app.post("/admin/personnel-governance/unlink", response_class=HTMLResponse)
+    def unlink_personnel_governance(
+        request: Request,
+        current_user: Dict[str, object] = Depends(require_permission("account.update")),
+        csrf_token: str = Form(""),
+        user_id: int = Form(0),
+        employee_id: int = Form(0),
+    ):
+        admin = str(current_user.get("username") or "")
+        require_admin_csrf(request, csrf_token)
+        try:
+            result = unlink_personnel_records(user_id, employee_id)
+        except ValueError as exc:
+            return render_personnel_governance_page(request, admin, error=form_error_message(exc), status_code=400)
+        except sqlite3.Error:
+            return render_personnel_governance_page(request, admin, error="人员关联解除失败，请稍后重试。", status_code=500)
+        record_operation_log(
+            admin,
+            "personnel.unlink",
+            "personnel",
+            linked_personnel_target_id(user_id, employee_id),
+            result,
+            request,
+        )
+        return RedirectResponse(url="/admin/personnel-governance?success=unlinked", status_code=303)
+
+    @app.post("/admin/personnel-governance/ignore", response_class=HTMLResponse)
+    def ignore_personnel_governance(
+        request: Request,
+        current_user: Dict[str, object] = Depends(require_permission("account.update")),
+        csrf_token: str = Form(""),
+        user_id: int = Form(0),
+        employee_id: int = Form(0),
+        reason: str = Form(""),
+    ):
+        admin = str(current_user.get("username") or "")
+        require_admin_csrf(request, csrf_token)
+        try:
+            ignore_personnel_match(user_id, employee_id, reason, admin)
+        except ValueError as exc:
+            return render_personnel_governance_page(request, admin, error=form_error_message(exc), status_code=400)
+        except sqlite3.Error:
+            return render_personnel_governance_page(request, admin, error="忽略记录保存失败，请稍后重试。", status_code=500)
+        record_operation_log(
+            admin,
+            "personnel.match.ignore",
+            "personnel",
+            linked_personnel_target_id(user_id, employee_id),
+            {"reason": reason.strip()},
+            request,
+        )
+        return RedirectResponse(url="/admin/personnel-governance?success=ignored", status_code=303)
+
+    @app.post("/admin/personnel-governance/unignore", response_class=HTMLResponse)
+    def unignore_personnel_governance(
+        request: Request,
+        current_user: Dict[str, object] = Depends(require_permission("account.update")),
+        csrf_token: str = Form(""),
+        user_id: int = Form(0),
+        employee_id: int = Form(0),
+    ):
+        admin = str(current_user.get("username") or "")
+        require_admin_csrf(request, csrf_token)
+        try:
+            unignore_personnel_match(user_id, employee_id, admin)
+        except sqlite3.Error:
+            return render_personnel_governance_page(request, admin, error="取消忽略失败，请稍后重试。", status_code=500)
+        record_operation_log(
+            admin,
+            "personnel.match.unignore",
+            "personnel",
+            linked_personnel_target_id(user_id, employee_id),
+            {},
+            request,
+        )
+        return RedirectResponse(url="/admin/personnel-governance?success=unignored", status_code=303)
 
     @app.post("/admin/account/users", response_class=HTMLResponse)
     def create_admin_account(

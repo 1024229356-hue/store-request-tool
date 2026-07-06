@@ -1,0 +1,182 @@
+{% set page_title = '人员数据治理' %}
+{% set page_subtitle = '发现疑似重复人员，人工确认账号与员工关联，保留历史登录、工单和排班数据。' %}
+{% set page_eyebrow = '人员与账号管理' %}
+{% set current_menu = 'personnel-governance' %}
+{% extends "base_admin.html" %}
+
+{% block topbar_actions %}
+<a class="ghost-button compact" href="/admin/account">人员与账号管理</a>
+<a class="ghost-button compact" href="/admin/permission-overview">权限总览</a>
+{% endblock %}
+
+{% block content %}
+{% if error %}<div class="alert alert-error">{{ error }}</div>{% endif %}
+{% if success %}<div class="alert alert-success">{{ success }}</div>{% endif %}
+
+<section class="stats-section work-card">
+  <div class="stats-grid governance-stats-grid">
+    <article class="stat-card">
+      <span>疑似重复</span>
+      <strong>{{ stats.suspicious_count }}</strong>
+      <small>未处理候选</small>
+    </article>
+    <article class="stat-card">
+      <span>高置信</span>
+      <strong>{{ stats.high_count }}</strong>
+      <small>建议优先确认</small>
+    </article>
+    <article class="stat-card">
+      <span>未关联账号</span>
+      <strong>{{ stats.unlinked_account_count }}</strong>
+      <small>admin_users.employee_id 为空</small>
+    </article>
+    <article class="stat-card">
+      <span>未关联员工</span>
+      <strong>{{ stats.unlinked_employee_count }}</strong>
+      <small>employees.user_id 为空</small>
+    </article>
+    <article class="stat-card">
+      <span>关联异常</span>
+      <strong>{{ stats.anomaly_count }}</strong>
+      <small>只提示，不自动修复</small>
+    </article>
+  </div>
+</section>
+
+<section class="work-card governance-filter-card">
+  <div class="section-heading admin-section-heading">
+    <h2>治理筛选</h2>
+    <p>系统只给出候选和原因，是否合并必须由管理员人工确认。</p>
+  </div>
+  <div class="badge-row">
+    {% for tab in filter_tabs %}
+    <a class="ghost-button compact {% if selected_filter == tab.value %}active{% endif %}" href="/admin/personnel-governance?filter={{ tab.value }}">{{ tab.label }}</a>
+    {% endfor %}
+  </div>
+</section>
+
+<section class="work-card">
+  <div class="section-heading admin-section-heading">
+    <h2>疑似重复候选</h2>
+    <p>关联只会写入双向 id 并补齐空字段，不覆盖手机号、门店、岗位、密码或历史排班。</p>
+  </div>
+  <div class="governance-match-list">
+    {% for candidate in candidates %}
+    <article class="governance-match-card">
+      <div class="governance-match-main">
+        <div>
+          <span class="status-badge confidence-{{ candidate.confidence }}">{{ candidate.confidence_label }}</span>
+          {% if candidate.ignored %}<span class="status-badge muted">已忽略</span>{% endif %}
+          <h3>{{ candidate.user.display_name or candidate.user.username }} ↔ {{ candidate.employee.employee_name }}</h3>
+          <p class="subtle">{{ candidate.reason_text }}</p>
+          {% if candidate.ignored %}
+          <p class="subtle">忽略原因：{{ candidate.ignore.reason or '未填写' }} · {{ candidate.ignore.ignored_by or '-' }} · {{ candidate.ignore.ignored_at or '-' }}</p>
+          {% endif %}
+        </div>
+        <div class="governance-pair-grid">
+          <dl>
+            <dt>登录账号</dt>
+            <dd>{{ candidate.user.username }}</dd>
+            <dt>系统角色</dt>
+            <dd>{{ candidate.user.role_name }}</dd>
+            <dt>数据范围</dt>
+            <dd>{{ candidate.user.data_scope }}</dd>
+          </dl>
+          <dl>
+            <dt>员工姓名</dt>
+            <dd>{{ candidate.employee.employee_name }}</dd>
+            <dt>手机号</dt>
+            <dd>{{ candidate.employee.phone or '-' }}</dd>
+            <dt>主门店</dt>
+            <dd>{{ candidate.employee.primary_store_name or candidate.employee.store_name or '-' }}</dd>
+          </dl>
+        </div>
+      </div>
+      <div class="table-actions compact-actions">
+        <a class="ghost-button compact" href="/admin/account/detail?user_id={{ candidate.user_id }}&employee_id={{ candidate.employee_id }}">查看详情</a>
+        {% if can_update_account and not candidate.ignored %}
+        <form method="post" action="/admin/personnel-governance/link">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="user_id" value="{{ candidate.user_id }}">
+          <input type="hidden" name="employee_id" value="{{ candidate.employee_id }}">
+          <button class="primary-button compact" type="submit">确认关联</button>
+        </form>
+        <form method="post" action="/admin/personnel-governance/ignore" class="inline-form">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="user_id" value="{{ candidate.user_id }}">
+          <input type="hidden" name="employee_id" value="{{ candidate.employee_id }}">
+          <input class="compact-input" name="reason" placeholder="忽略原因">
+          <button class="ghost-button compact" type="submit">忽略</button>
+        </form>
+        {% elif can_update_account and candidate.ignored %}
+        <form method="post" action="/admin/personnel-governance/unignore">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="user_id" value="{{ candidate.user_id }}">
+          <input type="hidden" name="employee_id" value="{{ candidate.employee_id }}">
+          <button class="ghost-button compact" type="submit">取消忽略</button>
+        </form>
+        {% endif %}
+      </div>
+    </article>
+    {% else %}
+    <p class="empty-note">当前筛选下暂无疑似重复候选。</p>
+    {% endfor %}
+  </div>
+</section>
+
+<section class="governance-two-column">
+  <article class="work-card">
+    <div class="section-heading admin-section-heading">
+      <h2>未关联账号</h2>
+      <p>这些账号仍可按原权限登录；可以在候选区人工关联员工。</p>
+    </div>
+    <div class="compact-list">
+      {% for user in unlinked_users %}
+      <div class="compact-list-row">
+        <strong>{{ user.display_name or user.username }}</strong>
+        <span>{{ user.username }} · {{ user.role_name }}</span>
+        <a class="ghost-button compact" href="/admin/account/detail?user_id={{ user.id }}">详情</a>
+      </div>
+      {% else %}
+      <p class="empty-note">暂无未关联账号。</p>
+      {% endfor %}
+    </div>
+  </article>
+
+  <article class="work-card">
+    <div class="section-heading admin-section-heading">
+      <h2>未关联员工</h2>
+      <p>这些员工仍按排班规则生效；创建登录账号请回到人员与账号管理。</p>
+    </div>
+    <div class="compact-list">
+      {% for employee in unlinked_employees %}
+      <div class="compact-list-row">
+        <strong>{{ employee.employee_name }}</strong>
+        <span>{{ employee.primary_store_name or employee.store_name or '-' }} · {{ employee.role or '-' }}</span>
+        <a class="ghost-button compact" href="/admin/account/detail?employee_id={{ employee.id }}">详情</a>
+        <a class="ghost-button compact" href="/admin/account?prefill_employee_id={{ employee.id }}">创建登录账号</a>
+      </div>
+      {% else %}
+      <p class="empty-note">暂无未关联员工。</p>
+      {% endfor %}
+    </div>
+  </article>
+</section>
+
+<section class="work-card">
+  <div class="section-heading admin-section-heading">
+    <h2>关联异常</h2>
+    <p>异常只展示风险，不自动修复，避免误改真实人员数据。</p>
+  </div>
+  <div class="compact-list">
+    {% for anomaly in anomalies %}
+    <div class="compact-list-row">
+      <span class="status-badge {% if anomaly.level == 'danger' %}danger{% else %}warning{% endif %}">{{ anomaly.level }}</span>
+      <strong>{{ anomaly.message }}</strong>
+    </div>
+    {% else %}
+    <p class="empty-note">未发现一对多或双向不一致异常。</p>
+    {% endfor %}
+  </div>
+</section>
+{% endblock %}

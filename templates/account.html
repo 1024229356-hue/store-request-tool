@@ -18,6 +18,7 @@
 {%- endmacro %}
 
 {% block topbar_actions %}
+  <a class="ghost-button compact" href="/admin/personnel-governance">人员数据治理</a>
   {% if can_create_account and not permission_denied %}
   <button class="primary-button compact" type="button" data-drawer-open="account-create">新增人员 / 新增账号</button>
   {% endif %}

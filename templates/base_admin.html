@@ -94,6 +94,9 @@
         <a class="sidebar-link {% if current_menu == 'account' %}active{% endif %}" href="/admin/account">
           <span>账号设置</span>
         </a>
+        <a class="sidebar-link {% if current_menu == 'personnel-governance' %}active{% endif %}" href="/admin/personnel-governance">
+          <span>人员数据治理</span>
+        </a>
         {% endif %}
         {% if has_perm('role.view') %}
         <a class="sidebar-link {% if current_menu == 'roles' %}active{% endif %}" href="/admin/roles">

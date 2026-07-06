@@ -98,6 +98,7 @@ SESSION_COOKIE_SECURE=true
 - 回收站：http://127.0.0.1:8701/admin/trash
 - 测试数据清理：http://127.0.0.1:8701/admin/cleanup
 - 账号设置：http://127.0.0.1:8701/admin/account
+- 人员数据治理：http://127.0.0.1:8701/admin/personnel-governance
 - 系统设置：http://127.0.0.1:8701/admin/system
 - 后台路由体检：http://127.0.0.1:8701/admin/route-health
 - 运行版本诊断：http://127.0.0.1:8701/__version
@@ -490,6 +491,7 @@ ADMIN_USERS=admin:123456,caigou:123456,yunying:123456
 - 用户名和密码之间用英文冒号分隔。
 - 用户名和密码前后空格会自动去掉。
 - 迁移完成后，日常新增账号、编辑角色、停用账号、重置密码请在 `/admin/account` 维护。
+- 人员与账号疑似重复请在 `/admin/personnel-governance` 人工确认关联、解除关联、忽略或取消忽略；系统只提示候选，不会自动合并真实人员数据。
 - `.env` 不要上传 GitHub，后续仅作为数据库异常或没有有效系统管理员时的应急兜底。
 
 旧的单账号配置仍然兼容：

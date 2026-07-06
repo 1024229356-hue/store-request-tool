@@ -1,0 +1,145 @@
+{% set page_title = '人员详情' %}
+{% set page_subtitle = '核对账号、员工、业务参与和治理记录，支持从治理页返回人工处理。' %}
+{% set page_eyebrow = '人员数据治理' %}
+{% set current_menu = 'personnel-governance' %}
+{% extends "base_admin.html" %}
+
+{% block topbar_actions %}
+<a class="ghost-button compact" href="/admin/personnel-governance">人员数据治理</a>
+<a class="ghost-button compact" href="/admin/account">人员与账号管理</a>
+{% endblock %}
+
+{% block content %}
+{% if error %}<div class="alert alert-error">{{ error }}</div>{% endif %}
+
+<section class="account-overview-grid">
+  <article class="work-card">
+    <div class="section-heading admin-section-heading">
+      <h2>基础信息</h2>
+      <p>这里展示账号与员工两侧的当前值，不做自动覆盖。</p>
+    </div>
+    <dl class="detail-grid account-detail-grid">
+      <div><dt>姓名</dt><dd>{{ employee.employee_name if employee else (user.display_name if user else '-') }}</dd></div>
+      <div><dt>手机号</dt><dd>{{ employee.phone if employee and employee.phone else '-' }}</dd></div>
+      <div><dt>岗位</dt><dd>{{ employee.role if employee and employee.role else '-' }}</dd></div>
+      <div><dt>主门店</dt><dd>{{ employee.primary_store_name if employee and employee.primary_store_name else (employee.store_name if employee else '-') }}</dd></div>
+      <div><dt>绑定门店</dt><dd>{{ employee.store_names_text if employee and employee.store_names_text else '-' }}</dd></div>
+      <div><dt>员工状态</dt><dd>{{ employee.status if employee else '-' }}</dd></div>
+    </dl>
+  </article>
+
+  <article class="work-card">
+    <div class="section-heading admin-section-heading">
+      <h2>治理信息</h2>
+      <p>只显示关系与风险，不删除任何历史记录。</p>
+    </div>
+    <dl class="detail-grid account-detail-grid">
+      <div><dt>账号 ID</dt><dd>{{ user.id if user else '-' }}</dd></div>
+      <div><dt>员工 ID</dt><dd>{{ employee.id if employee else '-' }}</dd></div>
+      <div><dt>关联状态</dt><dd>{% if user and employee and user.employee_id == employee.id and employee.user_id == user.id %}<span class="status-badge active">已双向关联</span>{% else %}<span class="status-badge warning">未双向关联</span>{% endif %}</dd></div>
+      <div><dt>历史工单</dt><dd>{{ ticket_count }}</dd></div>
+      <div><dt>历史排班</dt><dd>{{ schedule_count }}</dd></div>
+      <div><dt>候选数量</dt><dd>{{ governance_candidates|length }}</dd></div>
+    </dl>
+  </article>
+</section>
+
+<section class="governance-two-column">
+  <article class="work-card">
+    <div class="section-heading admin-section-heading">
+      <h2>登录账号信息</h2>
+      <p>角色是系统权限，岗位是业务身份，两者互不替代。</p>
+    </div>
+    {% if user %}
+    <dl class="detail-grid account-detail-grid">
+      <div><dt>用户名</dt><dd>{{ user.username }}</dd></div>
+      <div><dt>显示名</dt><dd>{{ user.display_name or '-' }}</dd></div>
+      <div><dt>角色</dt><dd>{{ user.role_name }}</dd></div>
+      <div><dt>数据范围</dt><dd>{{ user.data_scope }}</dd></div>
+      <div><dt>允许登录</dt><dd>{{ '是' if user.allow_login else '否' }}</dd></div>
+      <div><dt>可作为处理人</dt><dd>{{ '是' if user.is_assignable and user.allow_login and user.is_active else '否' }}</dd></div>
+    </dl>
+    {% else %}
+    <p class="empty-note">当前只选择了员工记录，尚未关联登录账号。</p>
+    {% endif %}
+  </article>
+
+  <article class="work-card">
+    <div class="section-heading admin-section-heading">
+      <h2>业务身份</h2>
+      <p>员工信息决定排班参与和门店归属，不直接决定系统权限。</p>
+    </div>
+    {% if employee %}
+    <dl class="detail-grid account-detail-grid">
+      <div><dt>员工姓名</dt><dd>{{ employee.employee_name }}</dd></div>
+      <div><dt>岗位</dt><dd>{{ employee.role or '-' }}</dd></div>
+      <div><dt>参与排班</dt><dd>{{ '是' if employee.participate_schedule else '否' }}</dd></div>
+      <div><dt>允许登录</dt><dd>{{ '是' if employee.allow_login else '否' }}</dd></div>
+      <div><dt>主门店</dt><dd>{{ employee.primary_store_name or employee.store_name or '-' }}</dd></div>
+      <div><dt>绑定门店</dt><dd>{{ employee.store_names_text or '-' }}</dd></div>
+    </dl>
+    {% else %}
+    <p class="empty-note">当前只选择了账号记录，尚未关联员工资料。</p>
+    {% endif %}
+  </article>
+</section>
+
+{% if can_update_account and user and employee %}
+<section class="work-card">
+  <div class="section-heading admin-section-heading">
+    <h2>风险操作</h2>
+    <p>解除关联不会删除账号、员工、工单或排班历史。</p>
+  </div>
+  <div class="compact-actions">
+    {% if user.employee_id == employee.id or employee.user_id == user.id %}
+    <form method="post" action="/admin/personnel-governance/unlink">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="user_id" value="{{ user.id }}">
+      <input type="hidden" name="employee_id" value="{{ employee.id }}">
+      <button class="ghost-button compact danger" type="submit">解除关联</button>
+    </form>
+    {% else %}
+    <form method="post" action="/admin/personnel-governance/link">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="user_id" value="{{ user.id }}">
+      <input type="hidden" name="employee_id" value="{{ employee.id }}">
+      <button class="primary-button compact" type="submit">确认关联</button>
+    </form>
+    {% endif %}
+  </div>
+</section>
+{% endif %}
+
+<section class="work-card">
+  <div class="section-heading admin-section-heading">
+    <h2>治理记录</h2>
+    <p>关联、解除、忽略和账号操作都记录在 admin_operation_logs。</p>
+  </div>
+  <div class="table-wrap">
+    <table class="ticket-table erp-table">
+      <thead>
+        <tr>
+          <th>时间</th>
+          <th>操作</th>
+          <th>操作者</th>
+          <th>对象</th>
+          <th>详情</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for log in audit_logs %}
+        <tr>
+          <td>{{ log.created_at }}</td>
+          <td>{{ log.action }}</td>
+          <td>{{ log.username }}</td>
+          <td>{{ log.target_type }} {{ log.target_id }}</td>
+          <td>{{ log.detail }}</td>
+        </tr>
+        {% else %}
+        <tr><td class="empty-cell" colspan="5">暂无治理记录。</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}

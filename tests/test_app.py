@@ -831,6 +831,45 @@ def user_id_by_username(tmp_path, username):
     return int(row[0])
 
 
+def create_test_admin_user(
+    tmp_path,
+    username,
+    display_name,
+    password="123456",
+    role_name="运营管理",
+    allow_login=1,
+    is_active=1,
+    is_assignable=0,
+):
+    import main
+
+    role_id = role_id_by_name(tmp_path, role_name)
+    timestamp = "2026-07-06 10:00:00"
+    with sqlite3.connect(tmp_path / "tickets.db") as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO admin_users (
+                username, display_name, password_hash, role_id, employee_id,
+                allow_login, participate_schedule, is_active, is_assignable,
+                data_scope, store_names, created_at, updated_at, created_by, updated_by
+            )
+            VALUES (?, ?, ?, ?, NULL, ?, 0, ?, ?, 'all', '', ?, ?, 'pytest', 'pytest')
+            """,
+            (
+                username,
+                display_name,
+                main.hash_password(password),
+                role_id,
+                int(allow_login),
+                int(is_active),
+                int(is_assignable),
+                timestamp,
+                timestamp,
+            ),
+        )
+        return int(cursor.lastrowid)
+
+
 def create_role_with_permissions(tmp_path, role_name, permissions):
     with sqlite3.connect(tmp_path / "tickets.db") as connection:
         timestamp = "2026-07-06 10:00:00"
@@ -1353,6 +1392,232 @@ def test_employees_page_is_schedule_people_view_with_unified_management_hint(tmp
     assert 'href="/admin/account?filter=participate_schedule"' in page.text
     assert "排班视图员工" not in page.text
     assert 'data-drawer-open="employee-create-drawer"' not in page.text
+
+
+def test_personnel_governance_detects_candidates_and_ignore_roundtrip(tmp_path, monkeypatch):
+    client, main = build_client(tmp_path, monkeypatch, admin_users="admin:123456")
+    logged_in_client(client, "admin", "123456")
+    user_id = create_test_admin_user(tmp_path, "13800003001", "治理店长", is_assignable=1)
+    employee_id = main.create_employee(
+        "治理店长",
+        "南京门东店",
+        "店长",
+        "13800003001",
+        "在职",
+        main.load_app_config(),
+    )
+    create_test_admin_user(tmp_path, "lisi_ops", "李四")
+    main.create_employee("李四", "南昌万寿宫店", "店员", "", "在职", main.load_app_config())
+    create_test_admin_user(tmp_path, "wangwu_3003", "王五")
+    main.create_employee("小王五", "山城巷店", "店员", "13900003003", "在职", main.load_app_config())
+
+    with sqlite3.connect(tmp_path / "tickets.db") as connection:
+        tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    assert "personnel_match_ignores" in tables
+
+    page = client.get("/admin/personnel-governance")
+    assert page.status_code == 200
+    assert "人员数据治理" in page.text
+    assert "高置信" in page.text
+    assert "中置信" in page.text
+    assert "低置信" in page.text
+    assert "治理店长" in page.text
+    assert "13800003001" in page.text
+
+    ignored = client.post(
+        "/admin/personnel-governance/ignore",
+        data={
+            "csrf_token": csrf_token_for(client, "/admin/personnel-governance"),
+            "user_id": str(user_id),
+            "employee_id": str(employee_id),
+            "reason": "测试暂不合并",
+        },
+        follow_redirects=False,
+    )
+    assert ignored.status_code == 303
+    pending_page = client.get("/admin/personnel-governance?filter=unprocessed")
+    assert "测试暂不合并" not in pending_page.text
+    ignored_page = client.get("/admin/personnel-governance?filter=ignored")
+    assert ignored_page.status_code == 200
+    assert "测试暂不合并" in ignored_page.text
+
+    unignored = client.post(
+        "/admin/personnel-governance/unignore",
+        data={
+            "csrf_token": csrf_token_for(client, "/admin/personnel-governance?filter=ignored"),
+            "user_id": str(user_id),
+            "employee_id": str(employee_id),
+        },
+        follow_redirects=False,
+    )
+    assert unignored.status_code == 303
+    assert "治理店长" in client.get("/admin/personnel-governance?filter=unprocessed").text
+    operation_actions = [row["action"] for row in rows_for(tmp_path, "admin_operation_logs")]
+    assert "personnel.match.ignore" in operation_actions
+    assert "personnel.match.unignore" in operation_actions
+
+
+def test_personnel_governance_link_unlink_preserves_data_and_prevents_one_to_many(tmp_path, monkeypatch):
+    client, main = build_client(
+        tmp_path,
+        monkeypatch,
+        admin_users="admin:123456",
+        config_overrides={"handlers.json": ["传统处理人"]},
+    )
+    logged_in_client(client, "admin", "123456")
+    user_id = create_test_admin_user(tmp_path, "governance_manager", "治理店长", password="link123", is_assignable=1)
+    second_user_id = create_test_admin_user(tmp_path, "other_manager", "其他店长", password="other123", is_assignable=1)
+    employee_id = main.create_employee(
+        "治理店长",
+        "南京门东店",
+        "店长",
+        "13800003011",
+        "在职",
+        main.load_app_config(),
+    )
+    second_employee_id = main.create_employee(
+        "其他店长",
+        "南昌万寿宫店",
+        "店长",
+        "13800003012",
+        "在职",
+        main.load_app_config(),
+    )
+    with sqlite3.connect(tmp_path / "tickets.db") as connection:
+        shift_id = connection.execute("SELECT id FROM shift_types ORDER BY id LIMIT 1").fetchone()[0]
+        connection.execute(
+            """
+            INSERT INTO store_schedules (store_name, employee_id, schedule_date, shift_type_id, created_by, created_at, updated_at)
+            VALUES ('南京门东店', ?, '2026-07-06', ?, 'pytest', '2026-07-06 10:00:00', '2026-07-06 10:00:00')
+            """,
+            (employee_id, shift_id),
+        )
+
+    linked = client.post(
+        "/admin/personnel-governance/link",
+        data={
+            "csrf_token": csrf_token_for(client, "/admin/personnel-governance"),
+            "user_id": str(user_id),
+            "employee_id": str(employee_id),
+        },
+        follow_redirects=False,
+    )
+    assert linked.status_code == 303
+    users = {row["username"]: row for row in rows_for(tmp_path, "admin_users")}
+    employees = {row["id"]: row for row in rows_for(tmp_path, "employees")}
+    assert users["governance_manager"]["employee_id"] == employee_id
+    assert employees[employee_id]["user_id"] == user_id
+    people = [
+        person
+        for person in main.fetch_admin_users_for_account_page()
+        if person.get("username") == "governance_manager" or person.get("employee_id") == employee_id
+    ]
+    assert len(people) == 1
+    handlers = client.get("/api/handlers").json()["handlers"]
+    assert handlers.count("governance_manager") == 1
+    schedule_page = client.get("/admin/schedules?store_name=南京门东店&month=2026-07")
+    assert schedule_page.status_code == 200
+    assert schedule_page.text.count("治理店长") >= 1
+
+    one_to_many = client.post(
+        "/admin/personnel-governance/link",
+        data={
+            "csrf_token": csrf_token_for(client, "/admin/personnel-governance"),
+            "user_id": str(second_user_id),
+            "employee_id": str(employee_id),
+        },
+    )
+    assert one_to_many.status_code == 400
+    assert "已关联" in one_to_many.text
+    many_to_one = client.post(
+        "/admin/personnel-governance/link",
+        data={
+            "csrf_token": csrf_token_for(client, "/admin/personnel-governance"),
+            "user_id": str(user_id),
+            "employee_id": str(second_employee_id),
+        },
+    )
+    assert many_to_one.status_code == 400
+    assert "已关联" in many_to_one.text
+
+    unlinked = client.post(
+        "/admin/personnel-governance/unlink",
+        data={
+            "csrf_token": csrf_token_for(client, "/admin/personnel-governance"),
+            "user_id": str(user_id),
+            "employee_id": str(employee_id),
+        },
+        follow_redirects=False,
+    )
+    assert unlinked.status_code == 303
+    users = {row["username"]: row for row in rows_for(tmp_path, "admin_users")}
+    employees = {row["id"]: row for row in rows_for(tmp_path, "employees")}
+    assert users["governance_manager"]["employee_id"] is None
+    assert employees[employee_id]["user_id"] is None
+    assert rows_for(tmp_path, "store_schedules")[0]["employee_id"] == employee_id
+    assert_login_success(login_admin(client, "governance_manager", "link123"))
+    assert_login_success(login_admin(client, "admin", "123456"))
+    assert "治理店长" in client.get("/admin/schedules?store_name=南京门东店&month=2026-07").text
+    operation_actions = [row["action"] for row in rows_for(tmp_path, "admin_operation_logs")]
+    assert "personnel.link" in operation_actions
+    assert "personnel.unlink" in operation_actions
+
+
+def test_personnel_governance_permissions_detail_and_permission_overview(tmp_path, monkeypatch):
+    client, main = build_client(tmp_path, monkeypatch, admin_users="admin:123456,viewer:123456")
+    logged_in_client(client, "admin", "123456")
+    user_id = create_test_admin_user(tmp_path, "detail_user", "详情人员", is_assignable=1)
+    employee_id = main.create_employee(
+        "详情人员",
+        "南京门东店",
+        "店长",
+        "13800003021",
+        "在职",
+        main.load_app_config(),
+    )
+    role_id = create_role_with_permissions(tmp_path, "governance-viewer", ["account.view"])
+    update_admin_user_access(tmp_path, "viewer", role_id)
+    admin_post(client, "/admin/logout", follow_redirects=False)
+    assert_login_success(login_admin(client, "viewer", "123456"))
+
+    page = client.get("/admin/personnel-governance")
+    assert page.status_code == 200
+    assert "人员数据治理" in page.text
+    assert_html_forbidden(
+        client.post(
+            "/admin/personnel-governance/link",
+            data={
+                "csrf_token": csrf_token_for(client, "/admin/personnel-governance"),
+                "user_id": str(user_id),
+                "employee_id": str(employee_id),
+            },
+        )
+    )
+    assert_html_forbidden(
+        client.post(
+            "/admin/personnel-governance/ignore",
+            data={
+                "csrf_token": csrf_token_for(client, "/admin/personnel-governance"),
+                "user_id": str(user_id),
+                "employee_id": str(employee_id),
+                "reason": "无权限测试",
+            },
+        )
+    )
+    assert rows_for(tmp_path, "personnel_match_ignores") == []
+
+    detail = client.get(f"/admin/account/detail?user_id={user_id}&employee_id={employee_id}")
+    assert detail.status_code == 200
+    assert "人员详情" in detail.text
+    assert "登录账号信息" in detail.text
+    assert "业务身份" in detail.text
+    assert "治理记录" in detail.text
+
+    context = main.permission_overview_context(main.app)
+    assert context["high_risk_uncontrolled_count"] == 0
+    route_paths = {item["path"] for item in context["route_items"]}
+    assert "/admin/personnel-governance/link" in route_paths
+    assert "/admin/personnel-governance/ignore" in route_paths
 
 
 def test_account_management_requires_account_permissions(tmp_path, monkeypatch):
@@ -2955,6 +3220,7 @@ def test_base_admin_navigation_uses_only_canonical_admin_paths():
         "/admin/schedules",
         "/admin/settings",
         "/admin/account",
+        "/admin/personnel-governance",
         "/admin/roles",
         "/admin/route-health",
         "/admin/system",
@@ -2992,6 +3258,7 @@ def test_admin_core_pages_return_200_after_login(tmp_path, monkeypatch):
         "/admin/schedules",
         "/admin/settings",
         "/admin/account",
+        "/admin/personnel-governance",
         "/admin/system",
         "/admin/embedded-pages",
         "/admin/route-health",

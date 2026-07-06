@@ -5327,6 +5327,124 @@ button[disabled],
   margin: 0;
 }
 
+.ghost-button.active {
+  color: var(--primary-dark);
+  border-color: rgba(91, 108, 255, 0.32);
+  background: rgba(91, 108, 255, 0.12);
+}
+
+.governance-stats-grid {
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+}
+
+.governance-filter-card,
+.governance-match-list,
+.governance-two-column {
+  margin-bottom: 18px;
+}
+
+.governance-match-list {
+  display: grid;
+  gap: 14px;
+}
+
+.governance-match-card {
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+  border: 1px solid rgba(138, 150, 171, 0.18);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.64);
+  box-shadow: var(--shadow-soft);
+}
+
+.governance-match-main {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(260px, 0.8fr);
+  gap: 16px;
+}
+
+.governance-pair-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.governance-pair-grid dl,
+.compact-list-row {
+  margin: 0;
+  padding: 12px;
+  border: 1px solid rgba(138, 150, 171, 0.16);
+  border-radius: 8px;
+  background: rgba(248, 251, 255, 0.76);
+}
+
+.governance-pair-grid dt {
+  color: var(--muted-text);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.governance-pair-grid dd {
+  margin: 0 0 8px;
+  color: var(--text);
+  font-weight: 800;
+}
+
+.governance-two-column {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.compact-list {
+  display: grid;
+  gap: 10px;
+}
+
+.compact-list-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.compact-list-row span:not(.status-badge) {
+  color: var(--muted-text);
+}
+
+.compact-input {
+  width: min(220px, 100%);
+  min-height: 34px;
+  border-radius: 8px;
+}
+
+.inline-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.confidence-high {
+  color: #2f6f49;
+  background: rgba(62, 190, 121, 0.14);
+  border: 1px solid rgba(62, 190, 121, 0.24);
+}
+
+.confidence-medium {
+  color: #875c18;
+  background: rgba(229, 178, 80, 0.18);
+  border: 1px solid rgba(229, 178, 80, 0.28);
+}
+
+.confidence-low {
+  color: #2f4f8f;
+  background: rgba(97, 132, 210, 0.14);
+  border: 1px solid rgba(97, 132, 210, 0.22);
+}
+
 .muted-inline {
   display: block;
   margin-top: 4px;
@@ -5400,6 +5518,12 @@ button[disabled],
   }
 
   .account-overview-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .governance-match-main,
+  .governance-two-column,
+  .governance-pair-grid {
     grid-template-columns: 1fr;
   }
 }
