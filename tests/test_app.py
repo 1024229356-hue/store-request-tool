@@ -921,6 +921,60 @@ def test_rbac_tables_env_migration_password_hashes_and_login_logs(tmp_path, monk
     assert rows_for(tmp_path, "admin_users")[0]["last_login_at"]
 
 
+def test_admin_access_safeguard_restores_env_first_admin_and_permissions(tmp_path, monkeypatch):
+    client, main = build_client(
+        tmp_path,
+        monkeypatch,
+        admin_users="admin:123456,ops:123456",
+    )
+    system_role_id = role_id_by_name(tmp_path, "系统管理员")
+    ops_role_id = role_id_by_name(tmp_path, "运营管理")
+    with sqlite3.connect(tmp_path / "tickets.db") as connection:
+        connection.execute("DELETE FROM admin_role_permissions WHERE role_id = ?", (system_role_id,))
+        connection.execute(
+            """
+            UPDATE admin_users
+            SET role_id = ?, is_active = 0, is_assignable = 0, data_scope = 'stores', store_names = '南京门东店'
+            WHERE username = 'admin'
+            """,
+            (ops_role_id,),
+        )
+
+    main.ensure_admin_access_safeguard()
+
+    users = {row["username"]: row for row in rows_for(tmp_path, "admin_users")}
+    roles = {row["id"]: row["role_name"] for row in rows_for(tmp_path, "admin_roles")}
+    admin = users["admin"]
+    assert admin["is_active"] == 1
+    assert admin["is_assignable"] == 1
+    assert admin["data_scope"] == "all"
+    assert admin["store_names"] == ""
+    assert roles[admin["role_id"]] == "系统管理员"
+    with sqlite3.connect(tmp_path / "tickets.db") as connection:
+        permissions = {
+            row[0]
+            for row in connection.execute(
+                "SELECT permission_key FROM admin_role_permissions WHERE role_id = ?",
+                (system_role_id,),
+            ).fetchall()
+        }
+    assert permissions == set(main.ADMIN_PERMISSION_KEYS)
+    assert_login_success(login_admin(client, "admin", "123456"))
+    assert client.get("/admin/dashboard").status_code == 200
+    assert client.get("/admin/account").status_code == 200
+    assert client.get("/admin/permission-overview").status_code == 200
+
+
+def test_repair_admin_access_script_is_present_and_secret_safe():
+    script_path = PROJECT_DIR / "repair_admin_access.py"
+    assert script_path.exists()
+    script = script_path.read_text(encoding="utf-8")
+    assert "ensure_admin_access_safeguard" in script
+    assert "reconfigure" in script
+    assert "print(password" not in script
+    assert "DELETE FROM" not in script.upper()
+
+
 def test_account_management_crud_safety_and_password_reset(tmp_path, monkeypatch):
     client, _ = build_client(
         tmp_path,

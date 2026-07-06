@@ -1280,6 +1280,7 @@ def ensure_admin_rbac_schema(connection: sqlite3.Connection) -> None:
     connection.execute("CREATE INDEX IF NOT EXISTS idx_admin_operation_logs_username ON admin_operation_logs(username)")
     seed_default_admin_roles(connection)
     migrate_env_admin_users_if_empty(connection)
+    ensure_admin_access_safeguard(connection)
 
 
 def seed_default_admin_roles(connection: sqlite3.Connection) -> None:
@@ -1380,6 +1381,88 @@ def migrate_env_admin_users_if_empty(connection: sqlite3.Connection) -> None:
                 timestamp,
             ),
         )
+
+
+def ensure_admin_access_safeguard(connection: Optional[sqlite3.Connection] = None) -> Dict[str, object]:
+    if connection is None:
+        with get_connection() as managed_connection:
+            return ensure_admin_access_safeguard(managed_connection)
+
+    timestamp = now_text()
+    system_role_id = role_id_for_name(connection, SYSTEM_ADMIN_ROLE_NAME)
+    connection.execute(
+        """
+        UPDATE admin_roles
+        SET is_system = 1, updated_at = ?
+        WHERE id = ?
+        """,
+        (timestamp, system_role_id),
+    )
+    permissions_added = 0
+    for permission_key in ADMIN_PERMISSION_KEYS:
+        cursor = connection.execute(
+            """
+            INSERT OR IGNORE INTO admin_role_permissions (role_id, permission_key, created_at)
+            VALUES (?, ?, ?)
+            """,
+            (system_role_id, permission_key, timestamp),
+        )
+        permissions_added += int(cursor.rowcount or 0)
+
+    recovered_username = ""
+    account_created = False
+    account_recovered = False
+    if active_system_admin_count(connection) <= 0:
+        credentials = get_env_admin_credentials()
+        if credentials:
+            env_username, env_password = credentials[0]
+            clean_username = env_username.strip()
+            if clean_username and env_password:
+                existing_user = connection.execute(
+                    "SELECT id FROM admin_users WHERE username = ?",
+                    (clean_username,),
+                ).fetchone()
+                password_hash = hash_password(env_password)
+                if existing_user:
+                    connection.execute(
+                        """
+                        UPDATE admin_users
+                        SET password_hash = ?, role_id = ?, is_active = 1, is_assignable = 1,
+                            data_scope = 'all', store_names = '', updated_at = ?, updated_by = 'env:recovery'
+                        WHERE id = ?
+                        """,
+                        (password_hash, system_role_id, timestamp, int(existing_user["id"])),
+                    )
+                    account_recovered = True
+                else:
+                    connection.execute(
+                        """
+                        INSERT INTO admin_users (
+                            username, display_name, password_hash, role_id, is_active, is_assignable,
+                            data_scope, store_names, created_at, updated_at, created_by, updated_by
+                        )
+                        VALUES (?, ?, ?, ?, 1, 1, 'all', '', ?, ?, 'env:recovery', 'env:recovery')
+                        """,
+                        (
+                            clean_username,
+                            clean_username,
+                            password_hash,
+                            system_role_id,
+                            timestamp,
+                            timestamp,
+                        ),
+                    )
+                    account_created = True
+                recovered_username = clean_username
+
+    return {
+        "system_role_id": system_role_id,
+        "permissions_added": permissions_added,
+        "recovered_username": recovered_username,
+        "account_created": account_created,
+        "account_recovered": account_recovered,
+        "active_system_admin_count": active_system_admin_count(connection),
+    }
 
 
 def permissions_for_role(connection: sqlite3.Connection, role_id: object) -> List[str]:
