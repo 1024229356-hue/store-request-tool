@@ -1,23 +1,279 @@
 {% set page_title = '配置管理' %}
-{% set page_subtitle = '当前版本通过本地 config 目录维护配置，后续可升级为在线配置。' %}
+{% set page_subtitle = '门店、品牌、节假日已支持后台维护，旧 config 文件仍作为空表兜底。' %}
 {% set page_eyebrow = '系统配置' %}
 {% set current_menu = 'settings' %}
 {% extends "base_admin.html" %}
 
+{% macro enabled_badge(enabled) -%}
+  <span class="config-status-badge {{ 'is-on' if enabled else 'is-off' }}">{{ '启用' if enabled else '停用' }}</span>
+{%- endmacro %}
+
+{% macro enabled_select(enabled) -%}
+  <select name="enabled">
+    <option value="1" {% if enabled %}selected{% endif %}>启用</option>
+    <option value="0" {% if not enabled %}selected{% endif %}>停用</option>
+  </select>
+{%- endmacro %}
+
 {% block content %}
-<section class="work-card placeholder-panel">
+{% set can_update_config = has_perm('config.update') %}
+
+{% if success %}
+<div class="form-alert success">{{ success }}</div>
+{% endif %}
+{% if error %}
+<div class="form-alert error">{{ error }}</div>
+{% endif %}
+
+<section class="work-card settings-intro-card">
   <div class="section-heading">
-    <h2>当前配置文件</h2>
-    <p>请通过 VS Code 或文本编辑器修改 config 目录下的 JSON 文件，保存后按说明重启或刷新。</p>
+    <h2>基础配置后台化</h2>
+    <p>停用配置只影响新建选择，历史工单和历史排班仍按原名称展示。</p>
   </div>
-  <div class="config-file-grid">
-    {% for filename in config_files %}
-    <div class="config-file-card">
-      <strong>{{ filename }}</strong>
-      <span>config/{{ filename }}</span>
-    </div>
-    {% endfor %}
+  <div class="settings-tab-nav" aria-label="配置分组">
+    <a class="ghost-button compact" href="#stores">门店管理</a>
+    <a class="ghost-button compact" href="#brands">品牌管理</a>
+    <a class="ghost-button compact" href="#holidays">节假日管理</a>
   </div>
-  <p class="empty-note">当前版本请通过 VS Code 修改 config 目录配置文件，后续可升级为在线配置。</p>
+</section>
+
+<section class="work-card settings-panel" id="stores">
+  <div class="section-heading">
+    <h2>门店管理</h2>
+    <p>启用且状态不是“闭店”的门店会出现在 /submit 和新建排班选择中。</p>
+  </div>
+
+  {% if can_update_config %}
+  <form class="settings-create-grid" method="post" action="/admin/settings/stores">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label>门店名称<input name="store_name" required placeholder="例如：南京门东店"></label>
+    <label>区域<input name="area" placeholder="区域"></label>
+    <label>城市<input name="city" placeholder="城市"></label>
+    <label>门店类型<input name="store_type" placeholder="直营 / 加盟"></label>
+    <label>状态
+      <select name="status">
+        {% for status in store_statuses %}
+        <option value="{{ status }}">{{ status }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>启用状态
+      <select name="enabled">
+        <option value="1" selected>启用</option>
+        <option value="0">停用</option>
+      </select>
+    </label>
+    <label>排序<input name="sort_order" type="number" value="100"></label>
+    <label class="settings-wide">备注<input name="note" placeholder="可选"></label>
+    <div class="settings-form-actions"><button class="primary-button compact" type="submit">新增门店</button></div>
+  </form>
+  {% endif %}
+
+  <div class="settings-table-wrap">
+    <table class="settings-table">
+      <thead>
+        <tr>
+          <th>门店</th>
+          <th>区域</th>
+          <th>城市</th>
+          <th>类型</th>
+          <th>状态</th>
+          <th>启用</th>
+          <th>排序</th>
+          <th>备注</th>
+          {% if can_update_config %}<th>操作</th>{% endif %}
+        </tr>
+      </thead>
+      <tbody>
+        {% for store in stores %}
+        <tr>
+          <form method="post" action="/admin/settings/stores/{{ store.id }}/update">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <td><input name="store_name" value="{{ store.store_name }}" required></td>
+            <td><input name="area" value="{{ store.area or '' }}"></td>
+            <td><input name="city" value="{{ store.city or '' }}"></td>
+            <td><input name="store_type" value="{{ store.store_type or '' }}"></td>
+            <td>
+              <select name="status">
+                {% for status in store_statuses %}
+                <option value="{{ status }}" {% if store.status == status %}selected{% endif %}>{{ status }}</option>
+                {% endfor %}
+              </select>
+            </td>
+            <td>
+              {{ enabled_badge(store.enabled) }}
+              {{ enabled_select(store.enabled) }}
+            </td>
+            <td><input name="sort_order" type="number" value="{{ store.sort_order }}"></td>
+            <td><input name="note" value="{{ store.note or '' }}"></td>
+            {% if can_update_config %}
+            <td class="settings-actions">
+              <button class="secondary-button compact" type="submit">保存</button>
+          </form>
+              <form method="post" action="/admin/settings/stores/{{ store.id }}/toggle">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="enabled" value="{{ '0' if store.enabled else '1' }}">
+                <button class="ghost-button compact" type="submit">{{ '停用' if store.enabled else '启用' }}</button>
+              </form>
+            </td>
+            {% else %}
+          </form>
+            {% endif %}
+        </tr>
+        {% else %}
+        <tr><td colspan="9" class="empty-note">暂无门店配置。</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="work-card settings-panel" id="brands">
+  <div class="section-heading">
+    <h2>品牌管理</h2>
+    <p>停用品牌不影响历史工单展示，只从新提交入口隐藏。</p>
+  </div>
+
+  {% if can_update_config %}
+  <form class="settings-create-grid brand-create-grid" method="post" action="/admin/settings/brands">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label>品牌名称<input name="brand_name" required placeholder="例如：自有品牌"></label>
+    <label>启用状态
+      <select name="enabled">
+        <option value="1" selected>启用</option>
+        <option value="0">停用</option>
+      </select>
+    </label>
+    <label>排序<input name="sort_order" type="number" value="100"></label>
+    <label class="settings-wide">备注<input name="note" placeholder="可选"></label>
+    <div class="settings-form-actions"><button class="primary-button compact" type="submit">新增品牌</button></div>
+  </form>
+  {% endif %}
+
+  <div class="settings-table-wrap">
+    <table class="settings-table">
+      <thead>
+        <tr>
+          <th>品牌</th>
+          <th>启用</th>
+          <th>排序</th>
+          <th>备注</th>
+          {% if can_update_config %}<th>操作</th>{% endif %}
+        </tr>
+      </thead>
+      <tbody>
+        {% for brand in brands %}
+        <tr>
+          <form method="post" action="/admin/settings/brands/{{ brand.id }}/update">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <td><input name="brand_name" value="{{ brand.brand_name }}" required></td>
+            <td>
+              {{ enabled_badge(brand.enabled) }}
+              {{ enabled_select(brand.enabled) }}
+            </td>
+            <td><input name="sort_order" type="number" value="{{ brand.sort_order }}"></td>
+            <td><input name="note" value="{{ brand.note or '' }}"></td>
+            {% if can_update_config %}
+            <td class="settings-actions">
+              <button class="secondary-button compact" type="submit">保存</button>
+          </form>
+              <form method="post" action="/admin/settings/brands/{{ brand.id }}/toggle">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="enabled" value="{{ '0' if brand.enabled else '1' }}">
+                <button class="ghost-button compact" type="submit">{{ '停用' if brand.enabled else '启用' }}</button>
+              </form>
+            </td>
+            {% else %}
+          </form>
+            {% endif %}
+        </tr>
+        {% else %}
+        <tr><td colspan="5" class="empty-note">暂无品牌配置。</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="work-card settings-panel" id="holidays">
+  <div class="section-heading">
+    <h2>节假日管理</h2>
+    <p>排班日历优先读取这里的启用节假日；空表时兼容 config/holidays.json。</p>
+  </div>
+
+  {% if can_update_config %}
+  <form class="settings-create-grid holiday-create-grid" method="post" action="/admin/settings/holidays">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label>日期<input name="holiday_date" type="date" required></label>
+    <label>名称<input name="holiday_name" required placeholder="例如：中秋节"></label>
+    <label>类型
+      <select name="holiday_type">
+        {% for holiday_type in holiday_types %}
+        <option value="{{ holiday_type }}">{{ holiday_type }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>启用状态
+      <select name="enabled">
+        <option value="1" selected>启用</option>
+        <option value="0">停用</option>
+      </select>
+    </label>
+    <label class="settings-wide">备注<input name="note" placeholder="可选"></label>
+    <div class="settings-form-actions"><button class="primary-button compact" type="submit">新增节假日</button></div>
+  </form>
+  {% endif %}
+
+  <div class="settings-table-wrap">
+    <table class="settings-table">
+      <thead>
+        <tr>
+          <th>日期</th>
+          <th>名称</th>
+          <th>类型</th>
+          <th>启用</th>
+          <th>备注</th>
+          {% if can_update_config %}<th>操作</th>{% endif %}
+        </tr>
+      </thead>
+      <tbody>
+        {% for holiday in holidays %}
+        <tr>
+          <form method="post" action="/admin/settings/holidays/{{ holiday.id }}/update">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <td><input name="holiday_date" type="date" value="{{ holiday.holiday_date }}" required></td>
+            <td><input name="holiday_name" value="{{ holiday.holiday_name }}" required></td>
+            <td>
+              <select name="holiday_type">
+                {% for holiday_type in holiday_types %}
+                <option value="{{ holiday_type }}" {% if holiday.holiday_type == holiday_type %}selected{% endif %}>{{ holiday_type }}</option>
+                {% endfor %}
+              </select>
+            </td>
+            <td>
+              {{ enabled_badge(holiday.enabled) }}
+              {{ enabled_select(holiday.enabled) }}
+            </td>
+            <td><input name="note" value="{{ holiday.note or '' }}"></td>
+            {% if can_update_config %}
+            <td class="settings-actions">
+              <button class="secondary-button compact" type="submit">保存</button>
+          </form>
+              <form method="post" action="/admin/settings/holidays/{{ holiday.id }}/toggle">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="enabled" value="{{ '0' if holiday.enabled else '1' }}">
+                <button class="ghost-button compact" type="submit">{{ '停用' if holiday.enabled else '启用' }}</button>
+              </form>
+            </td>
+            {% else %}
+          </form>
+            {% endif %}
+        </tr>
+        {% else %}
+        <tr><td colspan="6" class="empty-note">暂无节假日配置。</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
 </section>
 {% endblock %}

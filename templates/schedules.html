@@ -245,7 +245,7 @@
           <div class="schedule-calendar-week-head weekend">周六</div>
           <div class="schedule-calendar-week-head weekend">周日</div>
           {% for day in context.calendar_days %}
-          <label class="schedule-date-card {% if not day.is_current_month %}muted outside-month{% endif %} {% if day.is_weekend %}weekend{% endif %} {% if day.is_holiday %}holiday{% endif %} {% if day.is_today %}today{% endif %}" data-date="{{ day.date }}" data-weekday-label="{{ day.weekday_label }}" data-weekend="{{ '1' if day.is_weekend else '0' }}" data-holiday="{{ '1' if day.is_holiday else '0' }}" data-current-month="{{ '1' if day.is_current_month else '0' }}">
+          <label class="schedule-date-card {% if not day.is_current_month %}muted outside-month{% endif %} {% if day.is_weekend %}weekend{% endif %} {% if day.is_holiday %}holiday {{ day.holiday_type_class }}{% endif %} {% if day.is_today %}today{% endif %}" data-date="{{ day.date }}" data-weekday-label="{{ day.weekday_label }}" data-weekend="{{ '1' if day.is_weekend else '0' }}" data-holiday="{{ '1' if day.is_holiday else '0' }}" data-current-month="{{ '1' if day.is_current_month else '0' }}">
             {% if day.is_current_month %}<input type="checkbox" name="schedule_dates" value="{{ day.date }}">{% endif %}
             <span>{{ day.day }}</span>
             <small>{{ day.weekday_label }}</small>
@@ -459,7 +459,7 @@
       <div class="schedule-calendar-week-head weekend">周日</div>
       {% for item in context.calendar_summary %}
       {% set day = item.day %}
-      <article class="schedule-day-card schedule-calendar-day {% if item.schedule_count %}has-schedule{% endif %} {% if not day.is_current_month %}is-empty outside-month{% endif %} {% if day.is_weekend %}weekend schedule-weekend{% endif %} {% if day.is_holiday %}holiday schedule-holiday{% endif %} {% if day.is_today %}today schedule-today{% endif %}" data-date="{{ day.date }}" data-weekday-label="{{ day.weekday_label }}">
+      <article class="schedule-day-card schedule-calendar-day {% if item.schedule_count %}has-schedule{% endif %} {% if not day.is_current_month %}is-empty outside-month{% endif %} {% if day.is_weekend %}weekend schedule-weekend{% endif %} {% if day.is_holiday %}holiday schedule-holiday {{ day.holiday_type_class }}{% endif %} {% if day.is_today %}today schedule-today{% endif %}" data-date="{{ day.date }}" data-weekday-label="{{ day.weekday_label }}">
         <header>
           <strong>{{ day.day }}</strong>
           <span>{{ day.weekday_label }}</span>
@@ -560,7 +560,7 @@
     <div class="store-summary-calendar" id="store-summary-view">
       {% for item in context.store_summary_calendar %}
       {% set day = item.day %}
-      <article class="schedule-day-card store-summary-day {% if day.is_weekend %}weekend schedule-weekend{% endif %} {% if day.is_today %}today schedule-today{% endif %}">
+      <article class="schedule-day-card store-summary-day {% if day.is_weekend %}weekend schedule-weekend{% endif %} {% if day.is_holiday %}holiday schedule-holiday {{ day.holiday_type_class }}{% endif %} {% if day.is_today %}today schedule-today{% endif %}">
         <header><strong>{{ day.date }}</strong><span>{{ day.weekday }}</span></header>
         <div class="store-summary-counts">
           {% for store_name, count in item.store_counts.items() %}

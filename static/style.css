@@ -5632,6 +5632,116 @@ button[disabled],
   width: auto;
 }
 
+.settings-intro-card,
+.settings-panel {
+  margin-bottom: 18px;
+}
+
+.settings-tab-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.settings-create-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 12px;
+  margin: 14px 0 18px;
+  padding: 14px;
+  border: 1px solid rgba(138, 150, 171, 0.16);
+  border-radius: 8px;
+  background: rgba(248, 251, 255, 0.72);
+}
+
+.settings-create-grid label {
+  display: grid;
+  gap: 6px;
+  color: var(--muted-text);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.settings-wide {
+  grid-column: span 2;
+}
+
+.settings-form-actions {
+  display: flex;
+  align-items: end;
+}
+
+.settings-table-wrap {
+  width: 100%;
+  overflow-x: auto;
+  border: 1px solid rgba(138, 150, 171, 0.14);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.58);
+}
+
+.settings-table {
+  width: 100%;
+  min-width: 860px;
+  border-collapse: collapse;
+}
+
+.settings-table th,
+.settings-table td {
+  padding: 10px;
+  border-bottom: 1px solid rgba(138, 150, 171, 0.12);
+  text-align: left;
+  vertical-align: middle;
+}
+
+.settings-table th {
+  color: var(--muted-text);
+  font-size: 12px;
+  font-weight: 800;
+  background: rgba(248, 251, 255, 0.82);
+}
+
+.settings-table input,
+.settings-table select {
+  min-width: 112px;
+  min-height: 34px;
+  border-radius: 8px;
+}
+
+.settings-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 150px;
+}
+
+.settings-actions form {
+  margin: 0;
+}
+
+.config-status-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 46px;
+  margin-right: 6px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.config-status-badge.is-on {
+  color: #2f6f49;
+  background: rgba(62, 190, 121, 0.14);
+  border: 1px solid rgba(62, 190, 121, 0.24);
+}
+
+.config-status-badge.is-off {
+  color: #6c7480;
+  background: rgba(120, 130, 145, 0.12);
+  border: 1px solid rgba(120, 130, 145, 0.2);
+}
+
 @media (max-width: 1100px) {
   .topbar {
     top: 0;
@@ -5694,5 +5804,9 @@ button[disabled],
   .governance-two-column,
   .governance-pair-grid {
     grid-template-columns: 1fr;
+  }
+
+  .settings-wide {
+    grid-column: auto;
   }
 }

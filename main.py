@@ -1258,6 +1258,15 @@ def table_exists(connection: sqlite3.Connection, table_name: str) -> bool:
     return row is not None
 
 
+def table_names() -> List[str]:
+    try:
+        with get_connection() as connection:
+            rows = connection.execute("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").fetchall()
+        return [str(row["name"]) for row in rows]
+    except sqlite3.Error:
+        return []
+
+
 def column_exists(connection: sqlite3.Connection, table_name: str, column_name: str) -> bool:
     if not table_exists(connection, table_name):
         return False
@@ -3077,6 +3086,15 @@ PERMISSION_ROUTE_RULES: List[Dict[str, str]] = [
     {"method": "GET", "path": "/admin/embed-content/{page_key}", "permission": "embedded.view", "module": "嵌入页", "label": "嵌入页内容"},
     {"method": "GET", "path": "/admin/embed-content/{page_key}/{resource_path:path}", "permission": "embedded.view", "module": "嵌入页", "label": "嵌入页资源"},
     {"method": "GET", "path": "/admin/settings", "permission": "config.view", "module": "配置", "label": "配置中心"},
+    {"method": "POST", "path": "/admin/settings/stores", "permission": "config.update", "module": "配置", "label": "新增门店"},
+    {"method": "POST", "path": "/admin/settings/stores/{store_id}/update", "permission": "config.update", "module": "配置", "label": "编辑门店"},
+    {"method": "POST", "path": "/admin/settings/stores/{store_id}/toggle", "permission": "config.update", "module": "配置", "label": "启停门店"},
+    {"method": "POST", "path": "/admin/settings/brands", "permission": "config.update", "module": "配置", "label": "新增品牌"},
+    {"method": "POST", "path": "/admin/settings/brands/{brand_id}/update", "permission": "config.update", "module": "配置", "label": "编辑品牌"},
+    {"method": "POST", "path": "/admin/settings/brands/{brand_id}/toggle", "permission": "config.update", "module": "配置", "label": "启停品牌"},
+    {"method": "POST", "path": "/admin/settings/holidays", "permission": "config.update", "module": "配置", "label": "新增节假日"},
+    {"method": "POST", "path": "/admin/settings/holidays/{holiday_id}/update", "permission": "config.update", "module": "配置", "label": "编辑节假日"},
+    {"method": "POST", "path": "/admin/settings/holidays/{holiday_id}/toggle", "permission": "config.update", "module": "配置", "label": "启停节假日"},
     {"method": "GET", "path": "/admin/ticket-rules", "permission": "ticket.assignment_rule.view", "module": "工单规则", "label": "工单规则配置"},
     {"method": "POST", "path": "/admin/ticket-rules/assignment", "permission": "ticket.assignment_rule.update", "module": "工单规则", "label": "保存自动分派规则"},
     {"method": "POST", "path": "/admin/ticket-rules/assignment/{rule_id}/toggle", "permission": "ticket.assignment_rule.update", "module": "工单规则", "label": "启停自动分派规则"},
@@ -3749,9 +3767,132 @@ def ensure_schedule_schema_migrations(connection: sqlite3.Connection) -> None:
     recreate_store_schedules_with_store_date_unique(connection)
 
 
+STORE_STATUSES = ["营业", "筹备", "暂停", "闭店"]
+HOLIDAY_TYPES = ["法定节假日", "调休日", "公司特殊日"]
+
+
+def ensure_managed_config_schema(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS stores (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            store_name TEXT NOT NULL UNIQUE,
+            area TEXT,
+            city TEXT,
+            store_type TEXT,
+            status TEXT NOT NULL DEFAULT '营业',
+            enabled INTEGER NOT NULL DEFAULT 1,
+            sort_order INTEGER NOT NULL DEFAULT 100,
+            note TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            created_by TEXT,
+            updated_by TEXT
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS brands (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            brand_name TEXT NOT NULL UNIQUE,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            sort_order INTEGER NOT NULL DEFAULT 100,
+            note TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            created_by TEXT,
+            updated_by TEXT
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS holidays (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            holiday_date TEXT NOT NULL UNIQUE,
+            holiday_name TEXT NOT NULL,
+            holiday_type TEXT NOT NULL DEFAULT '法定节假日',
+            enabled INTEGER NOT NULL DEFAULT 1,
+            note TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            created_by TEXT,
+            updated_by TEXT
+        )
+        """
+    )
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_stores_enabled ON stores(enabled)")
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_stores_status ON stores(status)")
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_brands_enabled ON brands(enabled)")
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_holidays_date ON holidays(holiday_date)")
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_holidays_enabled ON holidays(enabled)")
+
+
+def normalized_holiday_items(raw_holidays: object) -> List[Tuple[str, str, str]]:
+    if isinstance(raw_holidays, dict):
+        holiday_items = raw_holidays.items()
+    elif isinstance(raw_holidays, list):
+        holiday_items = []
+        for item in raw_holidays:
+            if isinstance(item, str):
+                holiday_items.append((item, "节假日"))
+            elif isinstance(item, dict):
+                holiday_items.append((item.get("date") or item.get("day"), item.get("name") or item.get("label") or "节假日", item.get("type") or item.get("holiday_type") or "法定节假日"))
+    else:
+        holiday_items = []
+    result: List[Tuple[str, str, str]] = []
+    for item in holiday_items:
+        raw_date = item[0]
+        raw_name = item[1] if len(item) > 1 else "节假日"
+        raw_type = item[2] if len(item) > 2 else "法定节假日"
+        try:
+            date_text = normalize_schedule_date(str(raw_date or ""))
+        except ValueError:
+            continue
+        holiday_name = str(raw_name or "").strip() or "节假日"
+        holiday_type = str(raw_type or "").strip() or "法定节假日"
+        if holiday_type not in HOLIDAY_TYPES:
+            holiday_type = "法定节假日"
+        result.append((date_text, holiday_name, holiday_type))
+    return result
+
+
+def seed_managed_config_from_files(connection: sqlite3.Connection) -> None:
+    timestamp = now_text()
+    if int(connection.execute("SELECT COUNT(*) AS total FROM stores").fetchone()["total"] or 0) == 0:
+        for index, store_name in enumerate(load_list_config("stores.json", DEFAULT_STORES), start=1):
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO stores (store_name, status, enabled, sort_order, created_at, updated_at, created_by, updated_by)
+                VALUES (?, '营业', 1, ?, ?, ?, 'system', 'system')
+                """,
+                (store_name, index * 10, timestamp, timestamp),
+            )
+    if int(connection.execute("SELECT COUNT(*) AS total FROM brands").fetchone()["total"] or 0) == 0:
+        for index, brand_name in enumerate(load_list_config("brands.json", DEFAULT_BRANDS, allow_empty=True), start=1):
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO brands (brand_name, enabled, sort_order, created_at, updated_at, created_by, updated_by)
+                VALUES (?, 1, ?, ?, ?, 'system', 'system')
+                """,
+                (brand_name, index * 10, timestamp, timestamp),
+            )
+    if int(connection.execute("SELECT COUNT(*) AS total FROM holidays").fetchone()["total"] or 0) == 0:
+        for holiday_date, holiday_name, holiday_type in normalized_holiday_items(load_json_file("holidays.json", {})):
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO holidays (holiday_date, holiday_name, holiday_type, enabled, created_at, updated_at, created_by, updated_by)
+                VALUES (?, ?, ?, 1, ?, ?, 'system', 'system')
+                """,
+                (holiday_date, holiday_name, holiday_type, timestamp, timestamp),
+            )
+
+
 def init_db() -> None:
     ensure_directories()
     with get_connection() as connection:
+        ensure_managed_config_schema(connection)
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS tickets (
@@ -4204,6 +4345,7 @@ def init_db() -> None:
         backfill_person_account_links(connection)
         seed_default_request_type_templates(connection)
         ensure_default_shift_types(connection)
+        seed_managed_config_from_files(connection)
 
 
 def clean_string_list(value: object, default: List[str], allow_empty: bool = False) -> List[str]:
@@ -4311,15 +4453,334 @@ def load_system_config(statuses: List[str]) -> Dict[str, object]:
     return system
 
 
+def fetch_managed_store_rows(include_disabled: bool = True) -> List[Dict[str, object]]:
+    try:
+        with get_connection() as connection:
+            if not table_exists(connection, "stores"):
+                return []
+            clause = "" if include_disabled else "WHERE enabled = 1 AND status != '闭店'"
+            rows = connection.execute(
+                f"""
+                SELECT *
+                FROM stores
+                {clause}
+                ORDER BY sort_order, store_name, id
+                """
+            ).fetchall()
+        return [dict(row) for row in rows]
+    except sqlite3.Error:
+        return []
+
+
+def fetch_managed_brand_rows(include_disabled: bool = True) -> List[Dict[str, object]]:
+    try:
+        with get_connection() as connection:
+            if not table_exists(connection, "brands"):
+                return []
+            clause = "" if include_disabled else "WHERE enabled = 1"
+            rows = connection.execute(
+                f"""
+                SELECT *
+                FROM brands
+                {clause}
+                ORDER BY sort_order, brand_name, id
+                """
+            ).fetchall()
+        return [dict(row) for row in rows]
+    except sqlite3.Error:
+        return []
+
+
+def managed_config_table_has_rows(table_name: str) -> bool:
+    if table_name not in {"stores", "brands", "holidays"}:
+        return False
+    try:
+        with get_connection() as connection:
+            if not table_exists(connection, table_name):
+                return False
+            row = connection.execute(f"SELECT COUNT(*) AS total FROM {table_name}").fetchone()
+            return int(row["total"] or 0) > 0 if row else False
+    except sqlite3.Error:
+        return False
+
+
+def get_active_stores() -> List[str]:
+    rows = fetch_managed_store_rows(include_disabled=False)
+    if rows or managed_config_table_has_rows("stores"):
+        return [str(row["store_name"]) for row in rows]
+    return load_list_config("stores.json", DEFAULT_STORES)
+
+
+def get_all_stores() -> List[str]:
+    rows = fetch_managed_store_rows(include_disabled=True)
+    if rows:
+        return [str(row["store_name"]) for row in rows]
+    return load_list_config("stores.json", DEFAULT_STORES)
+
+
+def get_active_brands() -> List[str]:
+    rows = fetch_managed_brand_rows(include_disabled=False)
+    if rows or managed_config_table_has_rows("brands"):
+        return [str(row["brand_name"]) for row in rows]
+    return load_list_config("brands.json", DEFAULT_BRANDS, allow_empty=True)
+
+
+def get_all_brands() -> List[str]:
+    rows = fetch_managed_brand_rows(include_disabled=True)
+    if rows:
+        return [str(row["brand_name"]) for row in rows]
+    return load_list_config("brands.json", DEFAULT_BRANDS, allow_empty=True)
+
+
+def fetch_managed_holiday_rows(enabled_only: bool = True, year: Optional[int] = None, month: Optional[int] = None) -> List[Dict[str, object]]:
+    clauses: List[str] = []
+    params: List[object] = []
+    if enabled_only:
+        clauses.append("enabled = 1")
+    if year and month:
+        prefix = f"{int(year):04d}-{int(month):02d}-%"
+        clauses.append("holiday_date LIKE ?")
+        params.append(prefix)
+    elif year:
+        prefix = f"{int(year):04d}-%"
+        clauses.append("holiday_date LIKE ?")
+        params.append(prefix)
+    where_sql = "WHERE " + " AND ".join(clauses) if clauses else ""
+    try:
+        with get_connection() as connection:
+            if not table_exists(connection, "holidays"):
+                return []
+            rows = connection.execute(
+                f"""
+                SELECT *
+                FROM holidays
+                {where_sql}
+                ORDER BY holiday_date, id
+                """,
+                params,
+            ).fetchall()
+        return [dict(row) for row in rows]
+    except sqlite3.Error:
+        return []
+
+
+def get_active_holidays(year: Optional[int] = None, month: Optional[int] = None) -> Dict[str, Dict[str, str]]:
+    rows = fetch_managed_holiday_rows(enabled_only=True, year=year, month=month)
+    if rows or managed_config_table_has_rows("holidays"):
+        return {
+            str(row["holiday_date"]): {
+                "name": str(row["holiday_name"] or "节假日"),
+                "type": str(row["holiday_type"] or "法定节假日"),
+            }
+            for row in rows
+        }
+    return {
+        holiday_date: {"name": holiday_name, "type": holiday_type}
+        for holiday_date, holiday_name, holiday_type in normalized_holiday_items(load_json_file("holidays.json", {}))
+    }
+
+
+def parse_sort_order(value: object, default: int = 100) -> int:
+    try:
+        return int(str(value or "").strip() or default)
+    except ValueError:
+        return default
+
+
+def create_or_update_store_config(
+    store_name: str,
+    area: str,
+    city: str,
+    store_type: str,
+    status: str,
+    enabled: bool,
+    sort_order: object,
+    note: str,
+    operator: str,
+    store_id: Optional[int] = None,
+) -> int:
+    clean_name = str(store_name or "").strip()
+    if not clean_name:
+        raise ValueError("请填写门店名称。")
+    clean_status = str(status or "").strip() or "营业"
+    if clean_status not in STORE_STATUSES:
+        raise ValueError("门店状态不正确。")
+    timestamp = now_text()
+    with get_connection() as connection:
+        duplicate = connection.execute(
+            "SELECT id FROM stores WHERE store_name = ? AND id != ?",
+            (clean_name, int(store_id or 0)),
+        ).fetchone()
+        if duplicate:
+            raise ValueError("门店名称已存在。")
+        if store_id:
+            row = connection.execute("SELECT id FROM stores WHERE id = ?", (int(store_id),)).fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="门店不存在")
+            connection.execute(
+                """
+                UPDATE stores
+                SET store_name = ?, area = ?, city = ?, store_type = ?, status = ?,
+                    enabled = ?, sort_order = ?, note = ?, updated_at = ?, updated_by = ?
+                WHERE id = ?
+                """,
+                (
+                    clean_name,
+                    area.strip(),
+                    city.strip(),
+                    store_type.strip(),
+                    clean_status,
+                    1 if enabled else 0,
+                    parse_sort_order(sort_order),
+                    note.strip(),
+                    timestamp,
+                    operator,
+                    int(store_id),
+                ),
+            )
+            return int(store_id)
+        cursor = connection.execute(
+            """
+            INSERT INTO stores (
+                store_name, area, city, store_type, status, enabled, sort_order, note,
+                created_at, updated_at, created_by, updated_by
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                clean_name,
+                area.strip(),
+                city.strip(),
+                store_type.strip(),
+                clean_status,
+                1 if enabled else 0,
+                parse_sort_order(sort_order),
+                note.strip(),
+                timestamp,
+                timestamp,
+                operator,
+                operator,
+            ),
+        )
+        return int(cursor.lastrowid)
+
+
+def toggle_store_config(store_id: int, enabled: bool, operator: str) -> None:
+    with get_connection() as connection:
+        row = connection.execute("SELECT id FROM stores WHERE id = ?", (int(store_id),)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="门店不存在")
+        connection.execute("UPDATE stores SET enabled = ?, updated_at = ?, updated_by = ? WHERE id = ?", (1 if enabled else 0, now_text(), operator, int(store_id)))
+
+
+def create_or_update_brand_config(
+    brand_name: str,
+    enabled: bool,
+    sort_order: object,
+    note: str,
+    operator: str,
+    brand_id: Optional[int] = None,
+) -> int:
+    clean_name = str(brand_name or "").strip()
+    if not clean_name:
+        raise ValueError("请填写品牌名称。")
+    timestamp = now_text()
+    with get_connection() as connection:
+        duplicate = connection.execute("SELECT id FROM brands WHERE brand_name = ? AND id != ?", (clean_name, int(brand_id or 0))).fetchone()
+        if duplicate:
+            raise ValueError("品牌名称已存在。")
+        if brand_id:
+            row = connection.execute("SELECT id FROM brands WHERE id = ?", (int(brand_id),)).fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="品牌不存在")
+            connection.execute(
+                """
+                UPDATE brands
+                SET brand_name = ?, enabled = ?, sort_order = ?, note = ?, updated_at = ?, updated_by = ?
+                WHERE id = ?
+                """,
+                (clean_name, 1 if enabled else 0, parse_sort_order(sort_order), note.strip(), timestamp, operator, int(brand_id)),
+            )
+            return int(brand_id)
+        cursor = connection.execute(
+            """
+            INSERT INTO brands (brand_name, enabled, sort_order, note, created_at, updated_at, created_by, updated_by)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (clean_name, 1 if enabled else 0, parse_sort_order(sort_order), note.strip(), timestamp, timestamp, operator, operator),
+        )
+        return int(cursor.lastrowid)
+
+
+def toggle_brand_config(brand_id: int, enabled: bool, operator: str) -> None:
+    with get_connection() as connection:
+        row = connection.execute("SELECT id FROM brands WHERE id = ?", (int(brand_id),)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="品牌不存在")
+        connection.execute("UPDATE brands SET enabled = ?, updated_at = ?, updated_by = ? WHERE id = ?", (1 if enabled else 0, now_text(), operator, int(brand_id)))
+
+
+def create_or_update_holiday_config(
+    holiday_date: str,
+    holiday_name: str,
+    holiday_type: str,
+    enabled: bool,
+    note: str,
+    operator: str,
+    holiday_id: Optional[int] = None,
+) -> int:
+    clean_date = normalize_schedule_date(holiday_date)
+    clean_name = str(holiday_name or "").strip()
+    if not clean_name:
+        raise ValueError("请填写节假日名称。")
+    clean_type = str(holiday_type or "").strip() or "法定节假日"
+    if clean_type not in HOLIDAY_TYPES:
+        raise ValueError("节假日类型不正确。")
+    timestamp = now_text()
+    with get_connection() as connection:
+        duplicate = connection.execute("SELECT id FROM holidays WHERE holiday_date = ? AND id != ?", (clean_date, int(holiday_id or 0))).fetchone()
+        if duplicate:
+            raise ValueError("节假日日期已存在。")
+        if holiday_id:
+            row = connection.execute("SELECT id FROM holidays WHERE id = ?", (int(holiday_id),)).fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="节假日不存在")
+            connection.execute(
+                """
+                UPDATE holidays
+                SET holiday_date = ?, holiday_name = ?, holiday_type = ?, enabled = ?, note = ?, updated_at = ?, updated_by = ?
+                WHERE id = ?
+                """,
+                (clean_date, clean_name, clean_type, 1 if enabled else 0, note.strip(), timestamp, operator, int(holiday_id)),
+            )
+            return int(holiday_id)
+        cursor = connection.execute(
+            """
+            INSERT INTO holidays (holiday_date, holiday_name, holiday_type, enabled, note, created_at, updated_at, created_by, updated_by)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (clean_date, clean_name, clean_type, 1 if enabled else 0, note.strip(), timestamp, timestamp, operator, operator),
+        )
+        return int(cursor.lastrowid)
+
+
+def toggle_holiday_config(holiday_id: int, enabled: bool, operator: str) -> None:
+    with get_connection() as connection:
+        row = connection.execute("SELECT id FROM holidays WHERE id = ?", (int(holiday_id),)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="节假日不存在")
+        connection.execute("UPDATE holidays SET enabled = ?, updated_at = ?, updated_by = ? WHERE id = ?", (1 if enabled else 0, now_text(), operator, int(holiday_id)))
+
+
 def load_app_config() -> AppConfig:
     statuses = load_list_config("statuses.json", DEFAULT_STATUSES)
     system = load_system_config(statuses)
     return AppConfig(
-        stores=load_list_config("stores.json", DEFAULT_STORES),
+        stores=get_active_stores(),
         request_types=load_list_config("request_types.json", DEFAULT_REQUEST_TYPES),
         urgency_levels=load_list_config("urgency_levels.json", DEFAULT_URGENCY_LEVELS),
         statuses=statuses,
-        brands=load_list_config("brands.json", DEFAULT_BRANDS, allow_empty=True),
+        brands=get_active_brands(),
         handlers=load_handlers(),
         app_name=str(system["app_name"]),
         port=int(system["port"]),
@@ -5938,28 +6399,8 @@ def weekday_label(date_text: str) -> str:
     return WEEKDAY_LABELS[parsed.weekday()]
 
 
-def load_holiday_map() -> Dict[str, str]:
-    raw_holidays = load_json_file("holidays.json", {})
-    holiday_map: Dict[str, str] = {}
-    if isinstance(raw_holidays, dict):
-        holiday_items = raw_holidays.items()
-    elif isinstance(raw_holidays, list):
-        holiday_items = []
-        for item in raw_holidays:
-            if isinstance(item, str):
-                holiday_items.append((item, "节假日"))
-            elif isinstance(item, dict):
-                holiday_items.append((item.get("date") or item.get("day"), item.get("name") or item.get("label") or "节假日"))
-    else:
-        holiday_items = []
-    for raw_date, raw_name in holiday_items:
-        try:
-            date_text = normalize_schedule_date(str(raw_date or ""))
-        except ValueError:
-            continue
-        holiday_name = str(raw_name or "").strip() or "节假日"
-        holiday_map[date_text] = holiday_name
-    return holiday_map
+def load_holiday_map(year: Optional[int] = None, month: Optional[int] = None) -> Dict[str, Dict[str, str]]:
+    return get_active_holidays(year=year, month=month)
 
 
 def build_month_calendar(year: int, month: int) -> List[Dict[str, object]]:
@@ -5969,12 +6410,14 @@ def build_month_calendar(year: int, month: int) -> List[Dict[str, object]]:
     cursor = first_day - timedelta(days=first_day.weekday())
     end_day = last_day + timedelta(days=6 - last_day.weekday())
     today_text = date.today().isoformat()
-    holiday_map = load_holiday_map()
+    holiday_map = load_holiday_map(year, month)
     days: List[Dict[str, object]] = []
     while cursor <= end_day:
         date_text = cursor.isoformat()
         weekday_index = cursor.weekday()
-        holiday_name = holiday_map.get(date_text, "")
+        holiday_info = holiday_map.get(date_text, {})
+        holiday_name = str(holiday_info.get("name") or "")
+        holiday_type = str(holiday_info.get("type") or "")
         is_current_month = cursor.year == year and cursor.month == month
         days.append(
             {
@@ -5988,6 +6431,8 @@ def build_month_calendar(year: int, month: int) -> List[Dict[str, object]]:
                 "is_today": date_text == today_text,
                 "is_holiday": bool(holiday_name),
                 "holiday_name": holiday_name,
+                "holiday_type": holiday_type,
+                "holiday_type_class": f"holiday-type-{holiday_type}" if holiday_type else "",
                 "is_current_month": is_current_month,
             }
         )
@@ -12694,8 +13139,13 @@ def create_app() -> FastAPI:
             },
         )
 
-    @app.get("/admin/settings", response_class=HTMLResponse)
-    def admin_settings(request: Request, current_user: Dict[str, object] = Depends(require_permission("config.view"))) -> HTMLResponse:
+    def render_settings_page(
+        request: Request,
+        current_user: Dict[str, object],
+        success: str = "",
+        error: str = "",
+        status_code: int = 200,
+    ) -> HTMLResponse:
         return templates.TemplateResponse(
             request,
             "settings.html",
@@ -12703,6 +13153,13 @@ def create_app() -> FastAPI:
                 "request": request,
                 "admin_user": str(current_user.get("username") or ""),
                 "csrf_token": current_csrf_token(request),
+                "stores": fetch_managed_store_rows(include_disabled=True),
+                "brands": fetch_managed_brand_rows(include_disabled=True),
+                "holidays": fetch_managed_holiday_rows(enabled_only=False),
+                "store_statuses": STORE_STATUSES,
+                "holiday_types": HOLIDAY_TYPES,
+                "success": success,
+                "error": error,
                 "config_files": [
                     "stores.json",
                     "request_types.json",
@@ -12714,7 +13171,206 @@ def create_app() -> FastAPI:
                     "request_type_rules.json",
                 ],
             },
+            status_code=status_code,
         )
+
+    @app.get("/admin/settings", response_class=HTMLResponse)
+    def admin_settings(
+        request: Request,
+        current_user: Dict[str, object] = Depends(require_permission("config.view")),
+        success: str = Query(""),
+        error: str = Query(""),
+    ) -> HTMLResponse:
+        success_messages = {
+            "store_created": "门店已新增。",
+            "store_updated": "门店已保存。",
+            "store_toggled": "门店启用状态已更新。",
+            "brand_created": "品牌已新增。",
+            "brand_updated": "品牌已保存。",
+            "brand_toggled": "品牌启用状态已更新。",
+            "holiday_created": "节假日已新增。",
+            "holiday_updated": "节假日已保存。",
+            "holiday_toggled": "节假日启用状态已更新。",
+        }
+        return render_settings_page(request, current_user, success=success_messages.get(success, ""), error=error)
+
+    @app.post("/admin/settings/stores", response_class=HTMLResponse)
+    def create_store_setting_route(
+        request: Request,
+        current_user: Dict[str, object] = Depends(require_permission("config.update")),
+        csrf_token: str = Form(""),
+        store_name: str = Form(""),
+        area: str = Form(""),
+        city: str = Form(""),
+        store_type: str = Form(""),
+        status: str = Form("营业"),
+        enabled: str = Form(""),
+        sort_order: str = Form("100"),
+        note: str = Form(""),
+    ) -> HTMLResponse:
+        admin = str(current_user.get("username") or "")
+        require_admin_csrf(request, csrf_token)
+        try:
+            store_id = create_or_update_store_config(store_name, area, city, store_type, status, enabled in {"1", "true", "on", "yes"}, sort_order, note, admin)
+        except (ValueError, HTTPException) as exc:
+            return render_settings_page(request, current_user, error=form_error_message(exc), status_code=400)
+        record_operation_log(admin, "config.store.create", "store", store_id, {"store_name": store_name}, request)
+        return RedirectResponse(url="/admin/settings?success=store_created#stores", status_code=303)
+
+    @app.post("/admin/settings/stores/{store_id}/update", response_class=HTMLResponse)
+    def update_store_setting_route(
+        request: Request,
+        store_id: int,
+        current_user: Dict[str, object] = Depends(require_permission("config.update")),
+        csrf_token: str = Form(""),
+        store_name: str = Form(""),
+        area: str = Form(""),
+        city: str = Form(""),
+        store_type: str = Form(""),
+        status: str = Form("营业"),
+        enabled: str = Form(""),
+        sort_order: str = Form("100"),
+        note: str = Form(""),
+    ) -> HTMLResponse:
+        admin = str(current_user.get("username") or "")
+        require_admin_csrf(request, csrf_token)
+        try:
+            create_or_update_store_config(store_name, area, city, store_type, status, enabled in {"1", "true", "on", "yes"}, sort_order, note, admin, store_id=store_id)
+        except (ValueError, HTTPException) as exc:
+            return render_settings_page(request, current_user, error=form_error_message(exc), status_code=400)
+        record_operation_log(admin, "config.store.update", "store", store_id, {"store_name": store_name}, request)
+        return RedirectResponse(url="/admin/settings?success=store_updated#stores", status_code=303)
+
+    @app.post("/admin/settings/stores/{store_id}/toggle", response_class=HTMLResponse)
+    def toggle_store_setting_route(
+        request: Request,
+        store_id: int,
+        current_user: Dict[str, object] = Depends(require_permission("config.update")),
+        csrf_token: str = Form(""),
+        enabled: str = Form(""),
+    ) -> HTMLResponse:
+        admin = str(current_user.get("username") or "")
+        require_admin_csrf(request, csrf_token)
+        try:
+            toggle_store_config(store_id, enabled in {"1", "true", "on", "yes"}, admin)
+        except (ValueError, HTTPException) as exc:
+            return render_settings_page(request, current_user, error=form_error_message(exc), status_code=400)
+        record_operation_log(admin, "config.store.toggle", "store", store_id, {"enabled": enabled}, request)
+        return RedirectResponse(url="/admin/settings?success=store_toggled#stores", status_code=303)
+
+    @app.post("/admin/settings/brands", response_class=HTMLResponse)
+    def create_brand_setting_route(
+        request: Request,
+        current_user: Dict[str, object] = Depends(require_permission("config.update")),
+        csrf_token: str = Form(""),
+        brand_name: str = Form(""),
+        enabled: str = Form(""),
+        sort_order: str = Form("100"),
+        note: str = Form(""),
+    ) -> HTMLResponse:
+        admin = str(current_user.get("username") or "")
+        require_admin_csrf(request, csrf_token)
+        try:
+            brand_id = create_or_update_brand_config(brand_name, enabled in {"1", "true", "on", "yes"}, sort_order, note, admin)
+        except (ValueError, HTTPException) as exc:
+            return render_settings_page(request, current_user, error=form_error_message(exc), status_code=400)
+        record_operation_log(admin, "config.brand.create", "brand", brand_id, {"brand_name": brand_name}, request)
+        return RedirectResponse(url="/admin/settings?success=brand_created#brands", status_code=303)
+
+    @app.post("/admin/settings/brands/{brand_id}/update", response_class=HTMLResponse)
+    def update_brand_setting_route(
+        request: Request,
+        brand_id: int,
+        current_user: Dict[str, object] = Depends(require_permission("config.update")),
+        csrf_token: str = Form(""),
+        brand_name: str = Form(""),
+        enabled: str = Form(""),
+        sort_order: str = Form("100"),
+        note: str = Form(""),
+    ) -> HTMLResponse:
+        admin = str(current_user.get("username") or "")
+        require_admin_csrf(request, csrf_token)
+        try:
+            create_or_update_brand_config(brand_name, enabled in {"1", "true", "on", "yes"}, sort_order, note, admin, brand_id=brand_id)
+        except (ValueError, HTTPException) as exc:
+            return render_settings_page(request, current_user, error=form_error_message(exc), status_code=400)
+        record_operation_log(admin, "config.brand.update", "brand", brand_id, {"brand_name": brand_name}, request)
+        return RedirectResponse(url="/admin/settings?success=brand_updated#brands", status_code=303)
+
+    @app.post("/admin/settings/brands/{brand_id}/toggle", response_class=HTMLResponse)
+    def toggle_brand_setting_route(
+        request: Request,
+        brand_id: int,
+        current_user: Dict[str, object] = Depends(require_permission("config.update")),
+        csrf_token: str = Form(""),
+        enabled: str = Form(""),
+    ) -> HTMLResponse:
+        admin = str(current_user.get("username") or "")
+        require_admin_csrf(request, csrf_token)
+        try:
+            toggle_brand_config(brand_id, enabled in {"1", "true", "on", "yes"}, admin)
+        except (ValueError, HTTPException) as exc:
+            return render_settings_page(request, current_user, error=form_error_message(exc), status_code=400)
+        record_operation_log(admin, "config.brand.toggle", "brand", brand_id, {"enabled": enabled}, request)
+        return RedirectResponse(url="/admin/settings?success=brand_toggled#brands", status_code=303)
+
+    @app.post("/admin/settings/holidays", response_class=HTMLResponse)
+    def create_holiday_setting_route(
+        request: Request,
+        current_user: Dict[str, object] = Depends(require_permission("config.update")),
+        csrf_token: str = Form(""),
+        holiday_date: str = Form(""),
+        holiday_name: str = Form(""),
+        holiday_type: str = Form("法定节假日"),
+        enabled: str = Form(""),
+        note: str = Form(""),
+    ) -> HTMLResponse:
+        admin = str(current_user.get("username") or "")
+        require_admin_csrf(request, csrf_token)
+        try:
+            holiday_id = create_or_update_holiday_config(holiday_date, holiday_name, holiday_type, enabled in {"1", "true", "on", "yes"}, note, admin)
+        except (ValueError, HTTPException) as exc:
+            return render_settings_page(request, current_user, error=form_error_message(exc), status_code=400)
+        record_operation_log(admin, "config.holiday.create", "holiday", holiday_id, {"holiday_date": holiday_date}, request)
+        return RedirectResponse(url="/admin/settings?success=holiday_created#holidays", status_code=303)
+
+    @app.post("/admin/settings/holidays/{holiday_id}/update", response_class=HTMLResponse)
+    def update_holiday_setting_route(
+        request: Request,
+        holiday_id: int,
+        current_user: Dict[str, object] = Depends(require_permission("config.update")),
+        csrf_token: str = Form(""),
+        holiday_date: str = Form(""),
+        holiday_name: str = Form(""),
+        holiday_type: str = Form("法定节假日"),
+        enabled: str = Form(""),
+        note: str = Form(""),
+    ) -> HTMLResponse:
+        admin = str(current_user.get("username") or "")
+        require_admin_csrf(request, csrf_token)
+        try:
+            create_or_update_holiday_config(holiday_date, holiday_name, holiday_type, enabled in {"1", "true", "on", "yes"}, note, admin, holiday_id=holiday_id)
+        except (ValueError, HTTPException) as exc:
+            return render_settings_page(request, current_user, error=form_error_message(exc), status_code=400)
+        record_operation_log(admin, "config.holiday.update", "holiday", holiday_id, {"holiday_date": holiday_date}, request)
+        return RedirectResponse(url="/admin/settings?success=holiday_updated#holidays", status_code=303)
+
+    @app.post("/admin/settings/holidays/{holiday_id}/toggle", response_class=HTMLResponse)
+    def toggle_holiday_setting_route(
+        request: Request,
+        holiday_id: int,
+        current_user: Dict[str, object] = Depends(require_permission("config.update")),
+        csrf_token: str = Form(""),
+        enabled: str = Form(""),
+    ) -> HTMLResponse:
+        admin = str(current_user.get("username") or "")
+        require_admin_csrf(request, csrf_token)
+        try:
+            toggle_holiday_config(holiday_id, enabled in {"1", "true", "on", "yes"}, admin)
+        except (ValueError, HTTPException) as exc:
+            return render_settings_page(request, current_user, error=form_error_message(exc), status_code=400)
+        record_operation_log(admin, "config.holiday.toggle", "holiday", holiday_id, {"enabled": enabled}, request)
+        return RedirectResponse(url="/admin/settings?success=holiday_toggled#holidays", status_code=303)
 
     def render_ticket_rules_page(
         request: Request,

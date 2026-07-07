@@ -7272,6 +7272,126 @@ def test_config_files_drive_options_validation_images_and_export_name(tmp_path, 
     assert "%E9%85%8D%E7%BD%AE%E5%AF%BC%E5%87%BA_" in export_response.headers["content-disposition"]
 
 
+def test_admin_managed_store_brand_holiday_settings_schema_ui_and_history(tmp_path, monkeypatch):
+    client, main = build_client(
+        tmp_path,
+        monkeypatch,
+        {
+            "stores.json": ["配置门店A", "配置门店B"],
+            "brands.json": ["配置品牌A", "配置品牌B"],
+            "holidays.json": {"2026-07-15": "配置节日"},
+        },
+    )
+
+    assert {"stores", "brands", "holidays"}.issubset(set(main.table_names()))
+    assert [row["store_name"] for row in rows_for(tmp_path, "stores")] == ["配置门店A", "配置门店B"]
+    assert [row["brand_name"] for row in rows_for(tmp_path, "brands")] == ["配置品牌A", "配置品牌B"]
+    assert rows_for(tmp_path, "holidays")[0]["holiday_date"] == "2026-07-15"
+
+    submit_page = client.get("/submit")
+    assert "配置门店A" in submit_page.text
+    assert "配置品牌A" in submit_page.text
+
+    response = client.post(
+        "/submit",
+        data={
+            "store_names": ["配置门店A"],
+            "submitter": "配置治理",
+            "request_type": "建单需求",
+            "urgency": "普通",
+            "brands": ["配置品牌A"],
+            "description": "历史配置展示",
+        },
+    )
+    assert response.status_code == 200
+
+    logged_in_client(client)
+    settings = client.get("/admin/settings")
+    assert settings.status_code == 200
+    assert "门店管理" in settings.text
+    assert "品牌管理" in settings.text
+    assert "节假日管理" in settings.text
+
+    disable_store = admin_post(client, "/admin/settings/stores/1/toggle", data={"enabled": "0"}, follow_redirects=False)
+    disable_brand = admin_post(client, "/admin/settings/brands/1/toggle", data={"enabled": "0"}, follow_redirects=False)
+    assert disable_store.status_code == 303
+    assert disable_brand.status_code == 303
+    submit_after_disable = client.get("/submit")
+    assert "配置门店A" not in submit_after_disable.text
+    assert "配置品牌A" not in submit_after_disable.text
+
+    admin_page = client.get("/admin")
+    assert "配置门店A" in admin_page.text
+    assert "配置品牌A" in admin_page.text
+
+    schedule_page = client.get("/admin/schedules?store_names=配置门店B&month=2026-07&view_mode=calendar")
+    assert "配置节日" in schedule_page.text
+    assert "holiday-type-法定节假日" in schedule_page.text
+    disable_holiday = admin_post(client, "/admin/settings/holidays/1/toggle", data={"enabled": "0"}, follow_redirects=False)
+    assert disable_holiday.status_code == 303
+    schedule_after_disable = client.get("/admin/schedules?store_names=配置门店B&month=2026-07&view_mode=calendar")
+    assert "配置节日" not in schedule_after_disable.text
+
+
+def test_admin_config_update_permission_and_audit_for_managed_settings(tmp_path, monkeypatch):
+    client, main = build_client(tmp_path, monkeypatch)
+    logged_in_client(client)
+    view_only_role = create_role_with_permissions(tmp_path, "config-view-only", ["config.view"])
+    update_admin_user_access(tmp_path, ADMIN_AUTH[0], view_only_role)
+    denied = admin_post(
+        client,
+        "/admin/settings/stores",
+        data={"store_name": "无权门店", "csrf_token": csrf_token_for(client, "/admin/settings")},
+    )
+    assert_html_forbidden(denied)
+
+    system_role_id = next(row["id"] for row in rows_for(tmp_path, "admin_roles") if row["role_name"] == "系统管理员")
+    update_admin_user_access(tmp_path, ADMIN_AUTH[0], system_role_id)
+    create_store = admin_post(
+        client,
+        "/admin/settings/stores",
+        data={"store_name": "后台门店", "area": "华东", "city": "南京", "status": "营业", "enabled": "1", "sort_order": "5", "note": "新增"},
+        follow_redirects=False,
+    )
+    create_brand = admin_post(
+        client,
+        "/admin/settings/brands",
+        data={"brand_name": "后台品牌", "enabled": "1", "sort_order": "8", "note": "新增"},
+        follow_redirects=False,
+    )
+    create_holiday = admin_post(
+        client,
+        "/admin/settings/holidays",
+        data={"holiday_date": "2026-08-01", "holiday_name": "公司活动日", "holiday_type": "公司特殊日", "enabled": "1", "note": "新增"},
+        follow_redirects=False,
+    )
+    assert create_store.status_code == 303
+    assert create_brand.status_code == 303
+    assert create_holiday.status_code == 303
+
+    store_id = rows_for(tmp_path, "stores")[-1]["id"]
+    brand_id = rows_for(tmp_path, "brands")[-1]["id"]
+    holiday_id = rows_for(tmp_path, "holidays")[-1]["id"]
+    edit_store = admin_post(client, f"/admin/settings/stores/{store_id}/update", data={"store_name": "后台门店改", "status": "筹备", "enabled": "1", "sort_order": "6"}, follow_redirects=False)
+    edit_brand = admin_post(client, f"/admin/settings/brands/{brand_id}/update", data={"brand_name": "后台品牌改", "enabled": "1", "sort_order": "9"}, follow_redirects=False)
+    edit_holiday = admin_post(client, f"/admin/settings/holidays/{holiday_id}/update", data={"holiday_date": "2026-08-02", "holiday_name": "公司特殊日改", "holiday_type": "公司特殊日", "enabled": "1"}, follow_redirects=False)
+    assert edit_store.status_code == 303
+    assert edit_brand.status_code == 303
+    assert edit_holiday.status_code == 303
+
+    operations = rows_for(tmp_path, "admin_operation_logs")
+    actions = [row["action"] for row in operations]
+    assert "config.store.create" in actions
+    assert "config.store.update" in actions
+    assert "config.brand.create" in actions
+    assert "config.brand.update" in actions
+    assert "config.holiday.create" in actions
+    assert "config.holiday.update" in actions
+
+    overview = client.get("/admin/permission-overview")
+    assert "高风险 POST 未接入：0" in overview.text
+
+
 def test_missing_and_invalid_config_files_fall_back_to_defaults(tmp_path, monkeypatch):
     client, main = build_client(tmp_path, monkeypatch, write_configs=False)
     submit_page = client.get("/submit")
