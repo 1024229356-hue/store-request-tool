@@ -8651,6 +8651,108 @@ def test_notification_ui_hooks_are_rendered_on_admin_pages(tmp_path, monkeypatch
     assert ".notification-badge[hidden]" in style
 
 
+def test_p5a_system_check_page_access_and_permission_guard(tmp_path, monkeypatch):
+    client, main = build_client(tmp_path, monkeypatch, admin_users="admin:123456")
+    assert_login_success(login_admin(client, "admin", "123456"))
+
+    page = client.get("/admin/system-check")
+    assert page.status_code == 200
+    assert "系统正式使用检查" in page.text
+    assert "运行态" in page.text
+    assert "数据库" in page.text
+    assert "权限" in page.text
+    assert "配置" in page.text
+    assert "工单" in page.text
+    assert "排班" in page.text
+
+    limited_role = create_role_with_permissions(tmp_path, "p5a-no-system", ["ticket.view"])
+    update_admin_user_access(tmp_path, "admin", limited_role)
+    denied = client.get("/admin/system-check")
+    assert_html_forbidden(denied)
+
+    health_role = create_role_with_permissions(tmp_path, "p5a-health-only", ["system.health"])
+    update_admin_user_access(tmp_path, "admin", health_role)
+    health_only = client.get("/admin/system-check")
+    assert health_only.status_code == 200
+
+
+def test_p5a_system_check_readiness_counts_and_gaps(tmp_path, monkeypatch):
+    client, main = build_client(
+        tmp_path,
+        monkeypatch,
+        config_overrides={
+            "stores.json": ["验收门店A", "验收门店B"],
+            "brands.json": ["验收品牌A", "验收品牌B"],
+            "request_types.json": ["验收类型A", "验收类型B"],
+            "holidays.json": {"2026-07-08": "验收节日"},
+        },
+        admin_users="admin:123456",
+    )
+    create_test_admin_user(tmp_path, "second_admin", "第二管理员", role_name="系统管理员")
+    insert_assignment_rule(tmp_path, request_type="验收类型A", default_handler="admin")
+    insert_sla_rule(tmp_path, request_type="验收类型A", due_hours=24)
+    insert_request_type_template(tmp_path, request_type="验收类型A")
+    with sqlite3.connect(tmp_path / "tickets.db") as connection:
+        connection.execute("UPDATE stores SET enabled = 0 WHERE store_name = ?", ("验收门店B",))
+        connection.execute("UPDATE brands SET enabled = 0 WHERE brand_name = ?", ("验收品牌B",))
+
+    context = main.system_check_context(main.app)
+    checks_by_key = {item["key"]: item for section in context["system_checks"] for item in section["items"]}
+    init = context["initialization_check"]
+
+    assert checks_by_key["active_system_admin_count"]["value"] == 2
+    assert checks_by_key["active_system_admin_count"]["level"] == "ok"
+    assert checks_by_key["high_risk_uncontrolled_post_count"]["value"] == 0
+    assert checks_by_key["active_store_count"]["value"] == 1
+    assert checks_by_key["active_brand_count"]["value"] == 1
+    assert checks_by_key["active_request_type_count"]["value"] == 2
+    assert checks_by_key["request_types_missing_assignment_count"]["value"] == 1
+    assert checks_by_key["request_types_missing_sla_count"]["value"] == 1
+    assert checks_by_key["request_types_missing_template_count"]["value"] == 1
+    assert init["stores"]["active_count"] == 1
+    assert init["stores"]["inactive_count"] == 1
+    assert init["brands"]["active_count"] == 1
+    assert init["brands"]["inactive_count"] == 1
+    assert init["request_types"]["active_count"] == 2
+    assert init["request_types"]["missing_assignment_count"] == 1
+    assert init["request_types"]["missing_sla_count"] == 1
+    assert init["request_types"]["missing_template_count"] == 1
+
+
+def test_p5a_permission_overview_role_acceptance_checklist_and_excel_export(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch, admin_users="admin:123456")
+    assert_login_success(login_admin(client, "admin", "123456"))
+
+    overview = client.get("/admin/permission-overview")
+    assert overview.status_code == 200
+    assert "角色验收清单" in overview.text
+    assert "导出验收清单" in overview.text
+    assert "/admin/permission-overview/role-checklist/export" in overview.text
+
+    export = client.get("/admin/permission-overview/role-checklist/export")
+    assert export.status_code == 200
+    assert "spreadsheetml.sheet" in export.headers["content-type"]
+    workbook = load_workbook(BytesIO(export.content))
+    rows = list(workbook.active.iter_rows(values_only=True))
+    assert rows[0] == ("角色", "验收类型", "检查项", "建议权限", "当前状态", "人工验收记录")
+    assert ("系统管理员", "应能访问", "账号管理", "account.view", "已授权", None) in rows
+    assert ("运营管理", "不应访问", "账号管理", "account.view", "符合", None) in rows
+    assert ("只读账号", "不应看到", "导出", "ticket.export / schedule.export", "符合", None) in rows
+
+
+def test_p5a_backup_script_exists_and_backups_remain_untracked(tmp_path, monkeypatch):
+    backup_script = PROJECT_DIR / "backup.bat"
+    gitignore = (PROJECT_DIR / ".gitignore").read_text(encoding="utf-8")
+
+    assert backup_script.exists()
+    backup_text = backup_script.read_text(encoding="utf-8")
+    assert "data\\tickets.db" in backup_text or "data/tickets.db" in backup_text
+    assert "data\\embedded_pages" in backup_text or "data/embedded_pages" in backup_text
+    assert "uploads" in backup_text
+    assert "backups" in backup_text
+    assert "backups/" in gitignore
+
+
 def test_nginx_https_example_and_navigation_files_are_present(tmp_path, monkeypatch):
     nginx = PROJECT_DIR / "deploy" / "nginx-store-request-tool.conf.example"
     assert nginx.exists()

@@ -7,6 +7,7 @@
 {% block topbar_actions %}
 <a class="ghost-button compact" href="/admin/roles">角色权限</a>
 <a class="ghost-button compact" href="/admin/account">账号管理</a>
+<a class="ghost-button compact" href="/admin/permission-overview/role-checklist/export">导出验收清单</a>
 {% endblock %}
 
 {% block content %}
@@ -37,6 +38,51 @@
       <strong>{{ high_risk_uncontrolled_count }}</strong>
       <small>写操作必须为 0</small>
     </article>
+  </div>
+</section>
+
+<section class="section-heading admin-section-heading">
+  <h2>角色验收清单</h2>
+  <p>仅生成上线前人工测试清单，不模拟登录、不自动修改权限。</p>
+</section>
+
+<section class="work-card">
+  <div class="form-actions align-right">
+    <a class="secondary-button compact" href="/admin/permission-overview/role-checklist/export">导出验收清单</a>
+  </div>
+  <div class="table-wrapper">
+    <table class="admin-table role-checklist-table">
+      <thead>
+        <tr>
+          <th>角色</th>
+          <th>验收类型</th>
+          <th>检查项</th>
+          <th>建议权限</th>
+          <th>当前状态</th>
+          <th>人工验收记录</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for role in role_acceptance_checklist %}
+          {% for item in role.checks %}
+          <tr>
+            <td>{{ item.role_name }}</td>
+            <td>{{ item.expectation }}</td>
+            <td>{{ item.label }}</td>
+            <td><small>{{ item.permissions }}</small></td>
+            <td>
+              {% if item.status in ['已授权', '符合'] %}
+              <span class="status-badge assignable-badge">{{ item.status }}</span>
+              {% else %}
+              <span class="status-badge inactive-badge">{{ item.status }}</span>
+              {% endif %}
+            </td>
+            <td class="muted-cell">人工确认</td>
+          </tr>
+          {% endfor %}
+        {% endfor %}
+      </tbody>
+    </table>
   </div>
 </section>
 

@@ -618,3 +618,45 @@ deploy/nginx-store-request-tool.conf.example
 ## 备份说明
 
 项目提供 `backup.sh`，用于备份 `data/tickets.db`、`uploads/` 和 `data/embedded_pages/`。正式使用后建议每天定时执行一次，例如通过 crontab 调度。图片和普通文件都保存在 `uploads/`，嵌入 HTML 页面保存在 `data/embedded_pages/`，因此都会进入备份。
+
+Windows 本地运行可执行：
+
+```bat
+backup.bat
+```
+
+备份会输出到：
+
+```text
+backups\yyyyMMdd_HHmmss\
+```
+
+目录内包含 `data\tickets.db`、`data\embedded_pages\` 和 `uploads\`。`backups/` 已加入 `.gitignore`，不要提交到 GitHub。
+
+## 备份与恢复指引
+
+恢复生产数据前必须先人工确认目标备份目录，第一版不提供自动恢复脚本，避免误覆盖正式数据。
+
+1. 停止服务：Windows 执行 `stop.bat`；Linux/systemd 执行 `sudo systemctl stop store-request-tool`。
+2. 先做一份当前现场备份：Windows 执行 `backup.bat`；Linux 执行 `./backup.sh`。
+3. 恢复数据库：把目标备份中的 `data\tickets.db` 复制回项目的 `data\tickets.db`。
+4. 恢复附件：把目标备份中的 `uploads\` 复制回项目的 `uploads\`。
+5. 恢复嵌入页面：把目标备份中的 `data\embedded_pages\` 复制回项目的 `data\embedded_pages\`。
+6. 重启服务：Windows 执行 `restart.bat`；Linux/systemd 执行 `sudo systemctl start store-request-tool`。
+7. 检查运行状态：打开 `/healthz`，确认 `ok=true`；打开 `/__version`，确认运行版本和端口正确。
+
+## 正式部署前检查
+
+1. 修改 `.env` 默认密码。
+2. `admin` 兜底账号设置强密码。
+3. 创建 `liuhao` 日常管理员账号。
+4. 至少保留 2 个系统管理员。
+5. 配置门店、品牌、需求类型。
+6. 配置自动分派规则。
+7. 配置 SLA。
+8. 配置工单类型模板。
+9. 配置人员与排班员工。
+10. 执行 `backup.bat`。
+11. 执行 `check_runtime.bat`。
+12. 打开 `/admin/system-check`，确认系统正式使用检查没有未处理风险。
+13. 打开 `/admin/permission-overview`，确认高风险 POST 未接入为 0，并按角色验收清单人工测试。

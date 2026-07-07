@@ -10,6 +10,7 @@ import secrets
 import shutil
 import sqlite3
 import subprocess
+import sys
 import uuid
 import zipfile
 from collections import Counter
@@ -3159,7 +3160,9 @@ PERMISSION_ROUTE_RULES: List[Dict[str, str]] = [
     {"method": "GET", "path": "/admin/roles", "permission": "role.view", "module": "角色", "label": "角色管理"},
     {"method": "POST", "path": "/admin/roles/{role_id}/permissions", "permission": "role.update", "module": "角色", "label": "编辑角色权限"},
     {"method": "GET", "path": "/admin/permission-overview", "permission": "role.view", "module": "角色", "label": "权限概览"},
+    {"method": "GET", "path": "/admin/permission-overview/role-checklist/export", "permission": "role.view", "module": "角色", "label": "导出角色验收清单"},
     {"method": "GET", "path": "/admin/system", "permission": "system.view", "module": "系统", "label": "系统信息"},
+    {"method": "GET", "path": "/admin/system-check", "permission": "system.health", "module": "系统", "label": "系统正式使用检查"},
     {"method": "GET", "path": "/admin/route-health", "permission": "system.route_health", "module": "系统", "label": "路由健康"},
 ]
 
@@ -3287,12 +3290,486 @@ def permission_overview_context(app: FastAPI) -> Dict[str, object]:
         "uncontrolled_routes": uncontrolled_routes,
         "remaining_uncontrolled_count": len(uncontrolled_routes),
         "high_risk_uncontrolled_count": len(high_risk_uncontrolled_routes),
+        "role_acceptance_checklist": role_acceptance_checklist(),
         "data_scope_rules": [
             {"key": "all", "label": "全部数据", "description": "不追加业务数据过滤。"},
             {"key": "stores", "label": "指定门店", "description": "按账号 store_names 限制门店数据。"},
             {"key": "assigned", "label": "仅本人处理", "description": "按 assigned_to = 当前账号限制工单。"},
         ],
     }
+
+
+def readiness_level_label(level: str) -> str:
+    return {"ok": "正常", "warning": "警告", "risk": "风险"}.get(level, "警告")
+
+
+def readiness_item(key: str, label: str, value: object, level: str, detail: str = "") -> Dict[str, object]:
+    normalized_level = level if level in {"ok", "warning", "risk"} else "warning"
+    return {
+        "key": key,
+        "label": label,
+        "value": value,
+        "level": normalized_level,
+        "level_label": readiness_level_label(normalized_level),
+        "detail": detail,
+    }
+
+
+def latest_backup_time() -> str:
+    backup_root = BASE_DIR / "backups"
+    if not backup_root.is_dir():
+        return ""
+    candidates: List[Path] = []
+    for child in backup_root.iterdir():
+        if not child.is_dir():
+            continue
+        if (child / "data" / "tickets.db").is_file() or (child / "tickets.db").is_file():
+            candidates.append(child)
+    if not candidates:
+        return ""
+    latest = max(candidates, key=lambda path: path.stat().st_mtime)
+    return datetime.fromtimestamp(latest.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def database_read_write_ok() -> bool:
+    try:
+        with get_connection() as connection:
+            connection.execute("SELECT 1").fetchone()
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute("CREATE TEMP TABLE IF NOT EXISTS system_check_write_probe (id INTEGER)")
+            connection.execute("INSERT INTO system_check_write_probe (id) VALUES (1)")
+            connection.rollback()
+        return True
+    except sqlite3.Error:
+        return False
+
+
+def count_rows(connection: sqlite3.Connection, table_name: str, where_sql: str = "", params: Tuple[object, ...] = ()) -> int:
+    if not table_exists(connection, table_name):
+        return 0
+    clause = f" WHERE {where_sql}" if where_sql else ""
+    row = connection.execute(f"SELECT COUNT(*) AS count FROM {table_name}{clause}", params).fetchone()
+    return int(row["count"] or 0) if row else 0
+
+
+def active_role_user_count(connection: sqlite3.Connection, role_name: str) -> int:
+    if not table_exists(connection, "admin_users") or not table_exists(connection, "admin_roles"):
+        return 0
+    row = connection.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM admin_users
+        JOIN admin_roles ON admin_roles.id = admin_users.role_id
+        WHERE admin_users.is_active = 1
+          AND COALESCE(admin_users.allow_login, 1) = 1
+          AND admin_roles.role_name = ?
+        """,
+        (role_name,),
+    ).fetchone()
+    return int(row["count"] or 0)
+
+
+def configured_request_type_gaps() -> Dict[str, object]:
+    active_request_types = get_active_request_types()
+    assignment_rules = fetch_assignment_rules(include_disabled=False)
+    sla_rules = fetch_sla_rules(include_disabled=False)
+    templates = fetch_request_type_templates(include_disabled=False)
+    has_global_assignment = any(not normalize_rule_text(rule.get("request_type")) for rule in assignment_rules)
+    has_global_sla = any(not normalize_rule_text(rule.get("request_type")) for rule in sla_rules)
+    assignment_types = {normalize_rule_text(rule.get("request_type")) for rule in assignment_rules if normalize_rule_text(rule.get("request_type"))}
+    sla_types = {normalize_rule_text(rule.get("request_type")) for rule in sla_rules if normalize_rule_text(rule.get("request_type"))}
+    template_types = {normalize_rule_text(template.get("request_type")) for template in templates if normalize_rule_text(template.get("request_type"))}
+    missing_assignment = [
+        request_type
+        for request_type in active_request_types
+        if not has_global_assignment and request_type not in assignment_types
+    ]
+    missing_sla = [
+        request_type
+        for request_type in active_request_types
+        if not has_global_sla and request_type not in sla_types
+    ]
+    missing_template = [request_type for request_type in active_request_types if request_type not in template_types]
+    return {
+        "active_request_types": active_request_types,
+        "missing_assignment": missing_assignment,
+        "missing_sla": missing_sla,
+        "missing_template": missing_template,
+    }
+
+
+def ticket_readiness_counts(config: Optional[AppConfig] = None) -> Dict[str, int]:
+    config = config or load_app_config()
+    tickets = fetch_tickets({}, "newest", config)
+    open_tickets = [ticket for ticket in tickets if str(ticket.get("status") or "") != COMPLETED_STATUS]
+    return {
+        "unassigned_count": sum(1 for ticket in open_tickets if not str(ticket.get("assigned_to") or "").strip()),
+        "overdue_count": sum(1 for ticket in open_tickets if ticket.get("due_status") == "已超时"),
+        "due_today_count": sum(1 for ticket in open_tickets if ticket.get("due_status") == "今日到期"),
+    }
+
+
+def fetch_all_schedule_rows_for_check() -> List[Dict[str, object]]:
+    if "store_schedules" not in table_names():
+        return []
+    try:
+        with get_connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT
+                    schedules.id, schedules.store_name, schedules.employee_id, schedules.schedule_date,
+                    schedules.shift_type_id, schedules.note, schedules.created_by,
+                    COALESCE(schedules.is_custom_time, 0) AS is_custom_time,
+                    schedules.custom_start_time, schedules.custom_end_time,
+                    schedules.custom_duration_hours, schedules.custom_label,
+                    employees.employee_name, employees.role, employees.status AS employee_status,
+                    shift_types.shift_name, shift_types.start_time, shift_types.end_time,
+                    shift_types.duration_hours, shift_types.color, shift_types.is_active,
+                    shift_types.store_name AS shift_store_name, shift_types.is_global AS shift_is_global
+                FROM store_schedules AS schedules
+                JOIN employees ON employees.id = schedules.employee_id
+                LEFT JOIN shift_types ON shift_types.id = schedules.shift_type_id
+                ORDER BY schedules.schedule_date, schedules.store_name, employees.employee_name
+                """
+            ).fetchall()
+    except sqlite3.Error:
+        return []
+    result = [dict(row) for row in rows]
+    for row in result:
+        if int(row.get("is_custom_time") or 0) == 1:
+            row["shift_name"] = str(row.get("custom_label") or "").strip() or "自定义"
+            row["start_time"] = row.get("custom_start_time") or ""
+            row["end_time"] = row.get("custom_end_time") or ""
+            row["duration_hours"] = float(row.get("custom_duration_hours") or 0)
+        else:
+            row["shift_name"] = row.get("shift_name") or "未设置班次"
+            row["duration_hours"] = float(row.get("duration_hours") or 0)
+    return result
+
+
+def schedule_readiness_counts() -> Dict[str, int]:
+    rows = fetch_all_schedule_rows_for_check()
+    current_month = datetime.now().strftime("%Y-%m")
+    quality = schedule_validation_service.build_schedule_quality(rows, current_month) if rows else {"rows": [], "conflict_count": 0}
+    serious_warning_count = 0
+    for row in quality.get("rows", []):
+        for warning in row.get("warnings", []):
+            if warning.get("level") == "danger":
+                serious_warning_count += 1
+    return {
+        "conflict_count": int(quality.get("conflict_count") or 0),
+        "serious_workhour_warning_count": serious_warning_count,
+        "former_employee_schedule_count": sum(1 for row in rows if str(row.get("employee_status") or "") == "离职"),
+    }
+
+
+def initialization_check_context() -> Dict[str, object]:
+    gaps = configured_request_type_gaps()
+    store_rows = fetch_managed_store_rows(include_disabled=True)
+    active_store_names = get_active_stores()
+    brand_rows = fetch_managed_brand_rows(include_disabled=True)
+    active_brand_names = get_active_brands()
+    request_type_rows = fetch_managed_request_type_rows(include_disabled=True)
+    active_request_types = list(gaps["active_request_types"])
+    current_month = datetime.now().strftime("%Y-%m")
+    with get_connection() as connection:
+        people = {
+            "system_admin_count": active_role_user_count(connection, SYSTEM_ADMIN_ROLE_NAME),
+            "operations_count": active_role_user_count(connection, OPERATIONS_ROLE_NAME),
+            "buyer_count": active_role_user_count(connection, "商品采购"),
+            "schedule_admin_count": active_role_user_count(connection, "排班管理员"),
+            "readonly_count": active_role_user_count(connection, "只读账号"),
+            "schedule_employee_count": count_rows(
+                connection,
+                "employees",
+                "COALESCE(participate_schedule, 0) = 1 AND status = '在职' AND deleted_at IS NULL AND archived_at IS NULL",
+            ),
+        }
+        shift_count = count_rows(connection, "shift_types", "COALESCE(is_active, 0) = 1 AND deleted_at IS NULL AND archived_at IS NULL")
+        this_month_schedule_count = count_rows(connection, "store_schedules", "schedule_date LIKE ?", (f"{current_month}%",))
+    return {
+        "people": people,
+        "stores": {
+            "active_count": len(active_store_names),
+            "inactive_count": max(len(store_rows) - len(active_store_names), 0),
+        },
+        "brands": {
+            "active_count": len(active_brand_names),
+            "inactive_count": max(len(brand_rows) - len(active_brand_names), 0),
+        },
+        "request_types": {
+            "active_count": len(active_request_types),
+            "inactive_count": max(len(request_type_rows) - len(active_request_types), 0),
+            "missing_assignment_count": len(gaps["missing_assignment"]),
+            "missing_sla_count": len(gaps["missing_sla"]),
+            "missing_template_count": len(gaps["missing_template"]),
+        },
+        "schedule_base": {
+            "schedule_employee_count": people["schedule_employee_count"],
+            "shift_count": shift_count,
+            "this_month_has_schedule": this_month_schedule_count > 0,
+            "this_month_schedule_count": this_month_schedule_count,
+        },
+    }
+
+
+def system_check_context(app: FastAPI) -> Dict[str, object]:
+    local_commit = current_git_commit()
+    commit_matches = APP_GIT_COMMIT == local_commit
+    db_path = get_db_path()
+    database_exists = db_path.is_file()
+    database_rw_ok = database_read_write_ok()
+    required_tables = [
+        "tickets",
+        "admin_users",
+        "admin_roles",
+        "admin_role_permissions",
+        "stores",
+        "brands",
+        "request_types",
+        "ticket_assignment_rules",
+        "ticket_sla_rules",
+        "request_type_templates",
+        "employees",
+        "shift_types",
+        "store_schedules",
+    ]
+    existing_tables = set(table_names())
+    missing_tables = [table for table in required_tables if table not in existing_tables]
+    backup_time = latest_backup_time()
+    gaps = configured_request_type_gaps()
+    ticket_counts = ticket_readiness_counts()
+    schedule_counts = schedule_readiness_counts()
+    overview = permission_overview_context(app)
+    initialization = initialization_check_context()
+    active_store_count = initialization["stores"]["active_count"]
+    active_brand_count = initialization["brands"]["active_count"]
+    active_request_type_count = initialization["request_types"]["active_count"]
+    with get_connection() as connection:
+        active_admin_count = active_system_admin_count(connection)
+        system_role_id = role_id_for_name(connection, SYSTEM_ADMIN_ROLE_NAME)
+        system_permissions = set(permissions_for_role(connection, system_role_id))
+        missing_system_permissions = [permission for permission in ADMIN_PERMISSION_KEYS if permission not in system_permissions]
+        disabled_can_login_count = count_rows(connection, "admin_users", "COALESCE(is_active, 0) = 0 AND COALESCE(allow_login, 1) = 1")
+        no_login_assignable_count = count_rows(connection, "admin_users", "COALESCE(allow_login, 1) = 0 AND COALESCE(is_assignable, 0) = 1")
+        holiday_count = count_rows(connection, "holidays", "COALESCE(enabled, 0) = 1")
+    sections = [
+        {
+            "key": "runtime",
+            "title": "运行态",
+            "items": [
+                readiness_item("running_commit", "当前运行 commit", APP_GIT_COMMIT, "ok"),
+                readiness_item("local_commit", "本地 commit", local_commit, "ok"),
+                readiness_item("commit_matches", "是否一致", "一致" if commit_matches else "不一致", "ok" if commit_matches else "risk"),
+                readiness_item("started_at", "服务启动时间", APP_STARTED_AT, "ok"),
+                readiness_item("python_path", "Python 路径", sys.executable, "ok"),
+                readiness_item("database_path", "数据库路径", str(db_path), "ok" if database_exists else "risk"),
+            ],
+        },
+        {
+            "key": "database",
+            "title": "数据库",
+            "items": [
+                readiness_item("database_exists", "tickets.db 是否存在", "存在" if database_exists else "不存在", "ok" if database_exists else "risk"),
+                readiness_item("database_read_write", "数据库可读写", "可读写" if database_rw_ok else "异常", "ok" if database_rw_ok else "risk"),
+                readiness_item("critical_tables", "关键表是否存在", f"缺失 {len(missing_tables)} 个", "ok" if not missing_tables else "risk", "、".join(missing_tables) if missing_tables else "关键表完整"),
+                readiness_item("latest_backup_time", "最近备份时间", backup_time or "暂无备份", "ok" if backup_time else "warning"),
+            ],
+        },
+        {
+            "key": "permission",
+            "title": "权限",
+            "items": [
+                readiness_item("active_system_admin_count", "active 系统管理员数量", active_admin_count, "ok" if active_admin_count >= 2 else "risk", "正式启用建议至少保留 2 个。"),
+                readiness_item("system_admin_permission_missing_count", "系统管理员权限是否完整", len(missing_system_permissions), "ok" if not missing_system_permissions else "risk", "完整" if not missing_system_permissions else "缺少：" + "、".join(missing_system_permissions)),
+                readiness_item("disabled_can_login_count", "停用但仍可登录账号", disabled_can_login_count, "ok" if disabled_can_login_count == 0 else "risk"),
+                readiness_item("no_login_assignable_count", "allow_login=0 但 is_assignable=1", no_login_assignable_count, "ok" if no_login_assignable_count == 0 else "risk"),
+                readiness_item("high_risk_uncontrolled_post_count", "高风险 POST 未接入", overview["high_risk_uncontrolled_count"], "ok" if overview["high_risk_uncontrolled_count"] == 0 else "risk"),
+            ],
+        },
+        {
+            "key": "config",
+            "title": "配置",
+            "items": [
+                readiness_item("active_store_count", "启用门店数量", active_store_count, "ok" if active_store_count > 0 else "risk"),
+                readiness_item("active_brand_count", "启用品牌数量", active_brand_count, "ok" if active_brand_count > 0 else "risk"),
+                readiness_item("active_request_type_count", "启用需求类型数量", active_request_type_count, "ok" if active_request_type_count > 0 else "risk"),
+                readiness_item("holiday_count", "节假日配置数量", holiday_count, "ok" if holiday_count > 0 else "warning"),
+                readiness_item("request_types_missing_assignment_count", "缺自动分派的启用需求类型", len(gaps["missing_assignment"]), "ok" if not gaps["missing_assignment"] else "risk", "、".join(gaps["missing_assignment"])),
+                readiness_item("request_types_missing_sla_count", "缺 SLA 的启用需求类型", len(gaps["missing_sla"]), "ok" if not gaps["missing_sla"] else "risk", "、".join(gaps["missing_sla"])),
+                readiness_item("request_types_missing_template_count", "缺工单类型模板的启用需求类型", len(gaps["missing_template"]), "ok" if not gaps["missing_template"] else "risk", "、".join(gaps["missing_template"])),
+            ],
+        },
+        {
+            "key": "ticket",
+            "title": "工单",
+            "items": [
+                readiness_item("unassigned_ticket_count", "未分派工单", ticket_counts["unassigned_count"], "ok" if ticket_counts["unassigned_count"] == 0 else "warning"),
+                readiness_item("overdue_ticket_count", "已超时工单", ticket_counts["overdue_count"], "ok" if ticket_counts["overdue_count"] == 0 else "risk"),
+                readiness_item("due_today_ticket_count", "今日到期工单", ticket_counts["due_today_count"], "ok" if ticket_counts["due_today_count"] == 0 else "warning"),
+            ],
+        },
+        {
+            "key": "schedule",
+            "title": "排班",
+            "items": [
+                readiness_item("schedule_conflict_count", "冲突排班", schedule_counts["conflict_count"], "ok" if schedule_counts["conflict_count"] == 0 else "risk"),
+                readiness_item("serious_workhour_warning_count", "严重工时异常", schedule_counts["serious_workhour_warning_count"], "ok" if schedule_counts["serious_workhour_warning_count"] == 0 else "risk"),
+                readiness_item("former_employee_schedule_count", "离职员工仍参与排班", schedule_counts["former_employee_schedule_count"], "ok" if schedule_counts["former_employee_schedule_count"] == 0 else "risk"),
+            ],
+        },
+    ]
+    totals = Counter(item["level"] for section in sections for item in section["items"])
+    return {
+        "system_checks": sections,
+        "initialization_check": initialization,
+        "summary_counts": {
+            "ok": int(totals.get("ok", 0)),
+            "warning": int(totals.get("warning", 0)),
+            "risk": int(totals.get("risk", 0)),
+        },
+        "backup_root": str(BASE_DIR / "backups"),
+    }
+
+
+ROLE_ACCEPTANCE_REQUIREMENTS: List[Dict[str, object]] = [
+    {
+        "role_name": SYSTEM_ADMIN_ROLE_NAME,
+        "must_have": [
+            ("账号管理", ["account.view"]),
+            ("角色权限", ["role.view"]),
+            ("系统设置", ["system.view"]),
+            ("配置管理", ["config.view"]),
+            ("工单管理", ["ticket.view"]),
+            ("排班管理", ["schedule.view"]),
+            ("数据导出", ["ticket.export", "schedule.export"]),
+            ("永久删除", ["ticket.hard_delete"]),
+        ],
+        "must_not_have": [],
+    },
+    {
+        "role_name": OPERATIONS_ROLE_NAME,
+        "must_have": [
+            ("工单管理", ["ticket.view", "ticket.assign"]),
+            ("工单处理", ["ticket.update", "ticket.comment"]),
+            ("工单看板", ["ticket.view"]),
+        ],
+        "must_not_have": [
+            ("账号管理", ["account.view"]),
+            ("角色权限", ["role.view", "role.update"]),
+            ("系统设置", ["system.view", "system.health"]),
+            ("永久删除", ["ticket.hard_delete", "employee.hard_delete", "embedded.hard_delete"]),
+        ],
+    },
+    {
+        "role_name": "商品采购",
+        "must_have": [
+            ("工单处理", ["ticket.view", "ticket.update", "ticket.comment"]),
+            ("我的待办", ["ticket.view"]),
+        ],
+        "must_not_have": [
+            ("排班管理", ["schedule.view", "schedule.create", "schedule.update"]),
+            ("员工管理", ["employee.view", "employee.update"]),
+            ("账号管理", ["account.view"]),
+        ],
+    },
+    {
+        "role_name": "排班管理员",
+        "must_have": [
+            ("人员排班视图", ["schedule.view", "employee.view"]),
+            ("班次设置", ["shift.view", "shift.create", "shift.update"]),
+            ("门店排班", ["schedule.create", "schedule.update"]),
+            ("排班看板", ["schedule.view"]),
+        ],
+        "must_not_have": [
+            ("账号管理", ["account.view"]),
+            ("永久删除工单", ["ticket.hard_delete"]),
+        ],
+    },
+    {
+        "role_name": "只读账号",
+        "must_have_label": "应能查看",
+        "must_not_label": "不应看到",
+        "must_have": [
+            ("被授权数据", ["ticket.view", "schedule.view", "employee.view", "shift.view", "embedded.view"]),
+        ],
+        "must_not_have": [
+            ("新增", ["ticket.create", "employee.create", "shift.create", "embedded.create", "role.create"]),
+            ("编辑", ["ticket.update", "employee.update", "shift.update", "embedded.update", "config.update"]),
+            ("删除", ["ticket.delete", "ticket.hard_delete", "employee.delete", "shift.delete", "embedded.delete"]),
+            ("导出", ["ticket.export", "schedule.export"]),
+            ("排班保存", ["schedule.create", "schedule.update", "schedule.delete", "schedule.copy"]),
+            ("权限设置", ["role.update"]),
+        ],
+    },
+]
+
+
+def permission_status_for_requirement(role_permissions: set[str], expected_type: str, permissions: List[str]) -> str:
+    if expected_type == "must_have":
+        missing = [permission for permission in permissions if permission not in role_permissions]
+        return "已授权" if not missing else "缺少：" + " / ".join(missing)
+    present = [permission for permission in permissions if permission in role_permissions]
+    return "符合" if not present else "需复核：" + " / ".join(present)
+
+
+def role_acceptance_checklist() -> List[Dict[str, object]]:
+    roles = {str(role["role_name"]): role for role in fetch_admin_roles()}
+    checklist: List[Dict[str, object]] = []
+    for definition in ROLE_ACCEPTANCE_REQUIREMENTS:
+        role_name = str(definition["role_name"])
+        role = roles.get(role_name, {"permissions": []})
+        role_permissions = set(str(permission) for permission in role.get("permissions", []))
+        role_rows: List[Dict[str, str]] = []
+        expected_labels = {
+            "must_have": str(definition.get("must_have_label") or "应能访问"),
+            "must_not_have": str(definition.get("must_not_label") or "不应访问"),
+        }
+        for expected_type in ("must_have", "must_not_have"):
+            for label, permissions in definition.get(expected_type, []):
+                permission_keys = [str(permission) for permission in permissions]
+                role_rows.append(
+                    {
+                        "role_name": role_name,
+                        "expectation": expected_labels[expected_type],
+                        "label": str(label),
+                        "permissions": " / ".join(permission_keys),
+                        "status": permission_status_for_requirement(role_permissions, expected_type, permission_keys),
+                    }
+                )
+        checklist.append({"role_name": role_name, "checks": role_rows})
+    return checklist
+
+
+def build_role_acceptance_workbook(checklist: List[Dict[str, object]]) -> BytesIO:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "角色验收清单"
+    headers = ("角色", "验收类型", "检查项", "建议权限", "当前状态", "人工验收记录")
+    sheet.append(headers)
+    for cell in sheet[1]:
+        cell.font = Font(bold=True)
+        cell.fill = PatternFill("solid", fgColor="EAF2FF")
+        cell.alignment = Alignment(horizontal="center")
+    for role in checklist:
+        for item in role["checks"]:
+            sheet.append(
+                (
+                    item["role_name"],
+                    item["expectation"],
+                    item["label"],
+                    item["permissions"],
+                    item["status"],
+                    "",
+                )
+            )
+    widths = [18, 14, 22, 44, 28, 22]
+    for index, width in enumerate(widths, start=1):
+        sheet.column_dimensions[get_column_letter(index)].width = width
+    output = BytesIO()
+    workbook.save(output)
+    output.seek(0)
+    return output
 
 
 def normalize_admin_data_scope(value: str) -> str:
@@ -15317,6 +15794,18 @@ def create_app() -> FastAPI:
             },
         )
 
+    @app.get("/admin/permission-overview/role-checklist/export")
+    def export_role_acceptance_checklist(
+        current_user: Dict[str, object] = Depends(require_permission("role.view")),
+    ) -> StreamingResponse:
+        output = build_role_acceptance_workbook(role_acceptance_checklist())
+        filename = quote(f"角色权限验收清单-{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx")
+        return StreamingResponse(
+            output,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"},
+        )
+
     @app.get("/admin/system", response_class=HTMLResponse)
     def admin_system(request: Request, current_user: Dict[str, object] = Depends(require_permission("system.view"))) -> HTMLResponse:
         return templates.TemplateResponse(
@@ -15329,6 +15818,22 @@ def create_app() -> FastAPI:
                 "database_path": str(get_db_path()),
                 "upload_dir": str(get_upload_dir()),
                 "config_dir": str(get_config_dir()),
+            },
+        )
+
+    @app.get("/admin/system-check", response_class=HTMLResponse)
+    def admin_system_check(
+        request: Request,
+        current_user: Dict[str, object] = Depends(require_any_permission(["system.view", "system.health"])),
+    ) -> HTMLResponse:
+        return templates.TemplateResponse(
+            request,
+            "system_check.html",
+            {
+                "request": request,
+                "admin_user": str(current_user.get("username") or ""),
+                "csrf_token": current_csrf_token(request),
+                **system_check_context(app),
             },
         )
 

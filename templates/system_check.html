@@ -1,0 +1,128 @@
+{% set page_title = '系统正式使用检查' %}
+{% set page_subtitle = '正式启用前集中核对运行态、数据库、权限、配置、工单和排班风险。' %}
+{% set page_eyebrow = 'P5A 封板验收' %}
+{% set current_menu = 'system-check' %}
+{% extends "base_admin.html" %}
+
+{% block topbar_actions %}
+<a class="ghost-button compact" href="/admin/system">系统设置</a>
+<a class="ghost-button compact" href="/admin/permission-overview">权限总览</a>
+{% endblock %}
+
+{% block content %}
+<section class="stats-section work-card">
+  <div class="stats-grid">
+    <article class="stat-card">
+      <span>正常</span>
+      <strong>{{ summary_counts.ok }}</strong>
+      <small>绿色检查项</small>
+    </article>
+    <article class="stat-card">
+      <span>警告</span>
+      <strong>{{ summary_counts.warning }}</strong>
+      <small>需要上线前确认</small>
+    </article>
+    <article class="stat-card">
+      <span>风险</span>
+      <strong>{{ summary_counts.risk }}</strong>
+      <small>建议处理后再正式启用</small>
+    </article>
+  </div>
+</section>
+
+<section class="section-heading admin-section-heading">
+  <h2>系统正式使用检查</h2>
+  <p>检查结果只读展示，不会修改数据库或触发备份恢复。</p>
+</section>
+
+{% for section in system_checks %}
+<section class="work-card readiness-section" id="check-{{ section['key'] }}">
+  <div class="section-heading">
+    <h2>{{ section['title'] }}</h2>
+  </div>
+  <div class="table-wrapper">
+    <table class="admin-table readiness-table">
+      <thead>
+        <tr>
+          <th>检查项</th>
+          <th>结果</th>
+          <th>状态</th>
+          <th>说明</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for item in section['items'] %}
+        <tr>
+          <td>{{ item.label }}</td>
+          <td><strong>{{ item.value }}</strong></td>
+          <td><span class="readiness-badge readiness-{{ item.level }}">{{ item.level_label }}</span></td>
+          <td>{{ item.detail or '-' }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endfor %}
+
+<section class="section-heading admin-section-heading">
+  <h2>正式启用前数据清单</h2>
+  <p>用于管理员按上线清单人工核对基础数据是否配置完整。</p>
+</section>
+
+<div class="readiness-grid">
+  <article class="work-card readiness-card">
+    <h3>人员</h3>
+    <dl class="detail-grid compact-detail-grid">
+      <div><dt>系统管理员</dt><dd>{{ initialization_check.people.system_admin_count }}</dd></div>
+      <div><dt>运营管理</dt><dd>{{ initialization_check.people.operations_count }}</dd></div>
+      <div><dt>商品采购</dt><dd>{{ initialization_check.people.buyer_count }}</dd></div>
+      <div><dt>排班管理员</dt><dd>{{ initialization_check.people.schedule_admin_count }}</dd></div>
+      <div><dt>只读账号</dt><dd>{{ initialization_check.people.readonly_count }}</dd></div>
+      <div><dt>排班员工</dt><dd>{{ initialization_check.people.schedule_employee_count }}</dd></div>
+    </dl>
+  </article>
+  <article class="work-card readiness-card">
+    <h3>门店</h3>
+    <dl class="detail-grid compact-detail-grid">
+      <div><dt>启用门店数量</dt><dd>{{ initialization_check.stores.active_count }}</dd></div>
+      <div><dt>停用门店数量</dt><dd>{{ initialization_check.stores.inactive_count }}</dd></div>
+    </dl>
+  </article>
+  <article class="work-card readiness-card">
+    <h3>品牌</h3>
+    <dl class="detail-grid compact-detail-grid">
+      <div><dt>启用品牌数量</dt><dd>{{ initialization_check.brands.active_count }}</dd></div>
+      <div><dt>停用品牌数量</dt><dd>{{ initialization_check.brands.inactive_count }}</dd></div>
+    </dl>
+  </article>
+  <article class="work-card readiness-card">
+    <h3>需求类型</h3>
+    <dl class="detail-grid compact-detail-grid">
+      <div><dt>启用需求类型数量</dt><dd>{{ initialization_check.request_types.active_count }}</dd></div>
+      <div><dt>缺自动分派数量</dt><dd>{{ initialization_check.request_types.missing_assignment_count }}</dd></div>
+      <div><dt>缺 SLA 数量</dt><dd>{{ initialization_check.request_types.missing_sla_count }}</dd></div>
+      <div><dt>缺模板数量</dt><dd>{{ initialization_check.request_types.missing_template_count }}</dd></div>
+    </dl>
+  </article>
+  <article class="work-card readiness-card">
+    <h3>排班基础</h3>
+    <dl class="detail-grid compact-detail-grid">
+      <div><dt>参与排班员工数量</dt><dd>{{ initialization_check.schedule_base.schedule_employee_count }}</dd></div>
+      <div><dt>班次数量</dt><dd>{{ initialization_check.schedule_base.shift_count }}</dd></div>
+      <div><dt>本月是否已有排班</dt><dd>{{ '是' if initialization_check.schedule_base.this_month_has_schedule else '否' }}</dd></div>
+    </dl>
+  </article>
+</div>
+
+<section class="work-card placeholder-panel">
+  <div class="section-heading">
+    <h2>备份信息</h2>
+    <p>后台只展示备份位置，不执行备份或恢复。</p>
+  </div>
+  <dl class="detail-grid">
+    <div><dt>备份目录</dt><dd>{{ backup_root }}</dd></div>
+    <div><dt>本地脚本</dt><dd>backup.bat</dd></div>
+  </dl>
+</section>
+{% endblock %}
