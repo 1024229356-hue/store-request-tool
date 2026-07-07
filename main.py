@@ -2706,6 +2706,7 @@ def save_assignment_rule(
         "enabled": 1 if str(data.get("enabled") or "").strip() in {"1", "true", "on", "yes"} else 0,
         "note": normalize_rule_text(data.get("note")),
     }
+    ensure_request_type_allowed_for_rule(values["request_type"], "ticket_assignment_rules", int(rule_id or 0), allow_blank=True)
     if not values["default_handler"] and not values["default_role_id"]:
         raise ValueError("请至少设置具体处理人或兜底角色。")
     with get_connection() as connection:
@@ -2794,6 +2795,7 @@ def save_sla_rule(rule_id: int, data: Dict[str, object], admin: str) -> Dict[str
         "enabled": 1 if str(data.get("enabled") or "").strip() in {"1", "true", "on", "yes"} else 0,
         "note": normalize_rule_text(data.get("note")),
     }
+    ensure_request_type_allowed_for_rule(values["request_type"], "ticket_sla_rules", int(rule_id or 0), allow_blank=True)
     with get_connection() as connection:
         if rule_id > 0:
             rule = connection.execute("SELECT id FROM ticket_sla_rules WHERE id = ?", (int(rule_id),)).fetchone()
@@ -2862,6 +2864,7 @@ def save_request_type_template(template_id: int, data: Dict[str, object], admin:
     request_type = normalize_rule_text(data.get("request_type"))
     if not request_type:
         raise ValueError("请选择需求类型。")
+    ensure_request_type_allowed_for_rule(request_type, "request_type_templates", int(template_id or 0), allow_blank=False)
     try:
         sort_order = int(data.get("sort_order") or 100)
     except (TypeError, ValueError):
@@ -2957,6 +2960,35 @@ def set_request_type_template_enabled(template_id: int, enabled: bool, admin: st
             (1 if enabled else 0, timestamp, admin, int(template_id)),
         )
     return {"id": int(template_id), "enabled": 1 if enabled else 0}
+
+
+def request_type_is_active(value: object) -> bool:
+    clean_value = normalize_rule_text(value)
+    return bool(clean_value and clean_value in active_request_type_option_values())
+
+
+def existing_rule_request_type(table_name: str, record_id: int) -> str:
+    if table_name not in {"ticket_assignment_rules", "ticket_sla_rules", "request_type_templates"} or int(record_id or 0) <= 0:
+        return ""
+    try:
+        with get_connection() as connection:
+            row = connection.execute(f"SELECT request_type FROM {table_name} WHERE id = ?", (int(record_id),)).fetchone()
+        return normalize_rule_text(row["request_type"]) if row else ""
+    except sqlite3.Error:
+        return ""
+
+
+def ensure_request_type_allowed_for_rule(request_type: object, table_name: str, record_id: int = 0, allow_blank: bool = True) -> None:
+    clean_value = normalize_rule_text(request_type)
+    if not clean_value:
+        if allow_blank:
+            return
+        raise ValueError("请选择需求类型。")
+    if request_type_is_active(clean_value):
+        return
+    if int(record_id or 0) > 0 and clean_value == existing_rule_request_type(table_name, int(record_id)):
+        return
+    raise ValueError("需求类型已停用或不存在，不能用于新增规则。")
 
 
 def ticket_rule_match_preview(store_name: str, request_type: str, brand: str, urgency_level: str) -> Dict[str, object]:
@@ -3095,6 +3127,9 @@ PERMISSION_ROUTE_RULES: List[Dict[str, str]] = [
     {"method": "POST", "path": "/admin/settings/holidays", "permission": "config.update", "module": "配置", "label": "新增节假日"},
     {"method": "POST", "path": "/admin/settings/holidays/{holiday_id}/update", "permission": "config.update", "module": "配置", "label": "编辑节假日"},
     {"method": "POST", "path": "/admin/settings/holidays/{holiday_id}/toggle", "permission": "config.update", "module": "配置", "label": "启停节假日"},
+    {"method": "POST", "path": "/admin/settings/request-types", "permission": "config.update", "module": "配置", "label": "新增需求类型"},
+    {"method": "POST", "path": "/admin/settings/request-types/{request_type_id}/update", "permission": "config.update", "module": "配置", "label": "编辑需求类型"},
+    {"method": "POST", "path": "/admin/settings/request-types/{request_type_id}/toggle", "permission": "config.update", "module": "配置", "label": "启停需求类型"},
     {"method": "GET", "path": "/admin/ticket-rules", "permission": "ticket.assignment_rule.view", "module": "工单规则", "label": "工单规则配置"},
     {"method": "POST", "path": "/admin/ticket-rules/assignment", "permission": "ticket.assignment_rule.update", "module": "工单规则", "label": "保存自动分派规则"},
     {"method": "POST", "path": "/admin/ticket-rules/assignment/{rule_id}/toggle", "permission": "ticket.assignment_rule.update", "module": "工单规则", "label": "启停自动分派规则"},
@@ -3822,11 +3857,31 @@ def ensure_managed_config_schema(connection: sqlite3.Connection) -> None:
         )
         """
     )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS request_types (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            request_type TEXT NOT NULL UNIQUE,
+            module TEXT,
+            category TEXT,
+            default_urgency TEXT,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            sort_order INTEGER NOT NULL DEFAULT 100,
+            note TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            created_by TEXT,
+            updated_by TEXT
+        )
+        """
+    )
     connection.execute("CREATE INDEX IF NOT EXISTS idx_stores_enabled ON stores(enabled)")
     connection.execute("CREATE INDEX IF NOT EXISTS idx_stores_status ON stores(status)")
     connection.execute("CREATE INDEX IF NOT EXISTS idx_brands_enabled ON brands(enabled)")
     connection.execute("CREATE INDEX IF NOT EXISTS idx_holidays_date ON holidays(holiday_date)")
     connection.execute("CREATE INDEX IF NOT EXISTS idx_holidays_enabled ON holidays(enabled)")
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_request_types_enabled ON request_types(enabled)")
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_request_types_sort ON request_types(sort_order)")
 
 
 def normalized_holiday_items(raw_holidays: object) -> List[Tuple[str, str, str]]:
@@ -3886,6 +3941,18 @@ def seed_managed_config_from_files(connection: sqlite3.Connection) -> None:
                 VALUES (?, ?, ?, 1, ?, ?, 'system', 'system')
                 """,
                 (holiday_date, holiday_name, holiday_type, timestamp, timestamp),
+            )
+    if int(connection.execute("SELECT COUNT(*) AS total FROM request_types").fetchone()["total"] or 0) == 0:
+        for index, request_type in enumerate(load_list_config("request_types.json", DEFAULT_REQUEST_TYPES), start=1):
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO request_types (
+                    request_type, module, category, enabled, sort_order,
+                    created_at, updated_at, created_by, updated_by
+                )
+                VALUES (?, '工单', '', 1, ?, ?, ?, 'system', 'system')
+                """,
+                (request_type, index * 10, timestamp, timestamp),
             )
 
 
@@ -4491,8 +4558,27 @@ def fetch_managed_brand_rows(include_disabled: bool = True) -> List[Dict[str, ob
         return []
 
 
+def fetch_managed_request_type_rows(include_disabled: bool = True) -> List[Dict[str, object]]:
+    try:
+        with get_connection() as connection:
+            if not table_exists(connection, "request_types"):
+                return []
+            clause = "" if include_disabled else "WHERE enabled = 1"
+            rows = connection.execute(
+                f"""
+                SELECT *
+                FROM request_types
+                {clause}
+                ORDER BY sort_order, request_type, id
+                """
+            ).fetchall()
+        return [dict(row) for row in rows]
+    except sqlite3.Error:
+        return []
+
+
 def managed_config_table_has_rows(table_name: str) -> bool:
-    if table_name not in {"stores", "brands", "holidays"}:
+    if table_name not in {"stores", "brands", "holidays", "request_types"}:
         return False
     try:
         with get_connection() as connection:
@@ -4523,6 +4609,95 @@ def get_active_brands() -> List[str]:
     if rows or managed_config_table_has_rows("brands"):
         return [str(row["brand_name"]) for row in rows]
     return load_list_config("brands.json", DEFAULT_BRANDS, allow_empty=True)
+
+
+def get_active_request_types() -> List[str]:
+    rows = fetch_managed_request_type_rows(include_disabled=False)
+    if rows or managed_config_table_has_rows("request_types"):
+        return [str(row["request_type"]) for row in rows]
+    return load_list_config("request_types.json", DEFAULT_REQUEST_TYPES)
+
+
+def get_all_request_types() -> List[str]:
+    rows = fetch_managed_request_type_rows(include_disabled=True)
+    if rows:
+        return [str(row["request_type"]) for row in rows]
+    return load_list_config("request_types.json", DEFAULT_REQUEST_TYPES)
+
+
+def referenced_request_type_values() -> List[str]:
+    values: List[str] = []
+    queries = [
+        "SELECT DISTINCT request_type FROM tickets WHERE COALESCE(request_type, '') != ''",
+        "SELECT DISTINCT request_type FROM ticket_assignment_rules WHERE COALESCE(request_type, '') != ''",
+        "SELECT DISTINCT request_type FROM ticket_sla_rules WHERE COALESCE(request_type, '') != ''",
+        "SELECT DISTINCT request_type FROM request_type_templates WHERE COALESCE(request_type, '') != ''",
+    ]
+    try:
+        with get_connection() as connection:
+            for query in queries:
+                try:
+                    rows = connection.execute(query).fetchall()
+                except sqlite3.Error:
+                    continue
+                values.extend(str(row["request_type"] or "").strip() for row in rows)
+    except sqlite3.Error:
+        return []
+    return unique_clean_values(values)
+
+
+def get_request_type_options(include_inactive_used_values: bool = True) -> List[Dict[str, object]]:
+    rows = fetch_managed_request_type_rows(include_disabled=True)
+    if not rows and not managed_config_table_has_rows("request_types"):
+        rows = [
+            {
+                "request_type": request_type,
+                "enabled": 1,
+                "sort_order": index * 10,
+                "is_known": True,
+            }
+            for index, request_type in enumerate(load_list_config("request_types.json", DEFAULT_REQUEST_TYPES), start=1)
+        ]
+    options: List[Dict[str, object]] = []
+    seen: set[str] = set()
+    for row in rows:
+        value = str(row.get("request_type") or "").strip()
+        if not value:
+            continue
+        enabled = int(row.get("enabled") or 0) == 1
+        options.append(
+            {
+                "value": value,
+                "label": value if enabled else f"{value}（已停用）",
+                "enabled": enabled,
+                "is_known": True,
+                "sort_order": int(row.get("sort_order") or 100),
+            }
+        )
+        seen.add(value)
+    if include_inactive_used_values:
+        for value in referenced_request_type_values():
+            if value and value not in seen:
+                options.append(
+                    {
+                        "value": value,
+                        "label": f"{value}（历史类型）",
+                        "enabled": False,
+                        "is_known": False,
+                        "sort_order": 9999,
+                    }
+                )
+                seen.add(value)
+    options.sort(key=lambda item: (0 if item.get("enabled") else 1, int(item.get("sort_order") or 100), str(item.get("value") or "")))
+    return options
+
+
+def active_request_type_option_values() -> set[str]:
+    return set(get_active_request_types())
+
+
+def request_type_label_map() -> Dict[str, str]:
+    return {str(option["value"]): str(option["label"]) for option in get_request_type_options(include_inactive_used_values=True)}
 
 
 def get_all_brands() -> List[str]:
@@ -4772,12 +4947,163 @@ def toggle_holiday_config(holiday_id: int, enabled: bool, operator: str) -> None
         connection.execute("UPDATE holidays SET enabled = ?, updated_at = ?, updated_by = ? WHERE id = ?", (1 if enabled else 0, now_text(), operator, int(holiday_id)))
 
 
+def request_type_usage_count(request_type: str) -> int:
+    clean_type = str(request_type or "").strip()
+    if not clean_type:
+        return 0
+    try:
+        with get_connection() as connection:
+            row = connection.execute("SELECT COUNT(*) AS total FROM tickets WHERE request_type = ?", (clean_type,)).fetchone()
+            return int(row["total"] or 0) if row else 0
+    except sqlite3.Error:
+        return 0
+
+
+def request_type_health_status(rows: Optional[List[Dict[str, object]]] = None) -> Tuple[List[Dict[str, object]], Dict[str, int]]:
+    request_type_rows = rows if rows is not None else fetch_managed_request_type_rows(include_disabled=True)
+    try:
+        with get_connection() as connection:
+            assignment_types = {
+                str(row["request_type"])
+                for row in connection.execute(
+                    "SELECT DISTINCT request_type FROM ticket_assignment_rules WHERE enabled = 1 AND COALESCE(request_type, '') != ''"
+                ).fetchall()
+            }
+            sla_types = {
+                str(row["request_type"])
+                for row in connection.execute(
+                    "SELECT DISTINCT request_type FROM ticket_sla_rules WHERE enabled = 1 AND COALESCE(request_type, '') != ''"
+                ).fetchall()
+            }
+            template_types = {
+                str(row["request_type"])
+                for row in connection.execute(
+                    "SELECT DISTINCT request_type FROM request_type_templates WHERE enabled = 1 AND COALESCE(request_type, '') != ''"
+                ).fetchall()
+            }
+    except sqlite3.Error:
+        assignment_types, sla_types, template_types = set(), set(), set()
+    enriched: List[Dict[str, object]] = []
+    stats = {"total": 0, "enabled": 0, "disabled": 0, "complete": 0, "missing": 0}
+    for row in request_type_rows:
+        item = dict(row)
+        value = str(item.get("request_type") or "").strip()
+        enabled = int(item.get("enabled") or 0) == 1
+        missing: List[str] = []
+        if value not in assignment_types:
+            missing.append("缺自动分派")
+        if value not in sla_types:
+            missing.append("缺 SLA")
+        if value not in template_types:
+            missing.append("缺模板")
+        item["has_assignment_rule"] = value in assignment_types
+        item["has_sla_rule"] = value in sla_types
+        item["has_template"] = value in template_types
+        item["health_missing"] = missing
+        item["health_label"] = "配置完整" if not missing else "、".join(missing)
+        item["ticket_usage_count"] = request_type_usage_count(value)
+        enriched.append(item)
+        stats["total"] += 1
+        stats["enabled" if enabled else "disabled"] += 1
+        if enabled and not missing:
+            stats["complete"] += 1
+        if enabled and missing:
+            stats["missing"] += 1
+    return enriched, stats
+
+
+def create_or_update_request_type_config(
+    request_type: str,
+    module: str,
+    category: str,
+    default_urgency: str,
+    enabled: bool,
+    sort_order: object,
+    note: str,
+    operator: str,
+    request_type_id: Optional[int] = None,
+) -> int:
+    clean_type = str(request_type or "").strip()
+    if not clean_type:
+        raise ValueError("请填写需求类型名称。")
+    clean_urgency = str(default_urgency or "").strip()
+    if clean_urgency and clean_urgency not in load_app_config().urgency_levels:
+        raise ValueError("默认紧急程度不正确。")
+    timestamp = now_text()
+    with get_connection() as connection:
+        duplicate = connection.execute(
+            "SELECT id FROM request_types WHERE request_type = ? AND id != ?",
+            (clean_type, int(request_type_id or 0)),
+        ).fetchone()
+        if duplicate:
+            raise ValueError("需求类型名称已存在。")
+        if request_type_id:
+            row = connection.execute("SELECT id FROM request_types WHERE id = ?", (int(request_type_id),)).fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="需求类型不存在")
+            connection.execute(
+                """
+                UPDATE request_types
+                SET request_type = ?, module = ?, category = ?, default_urgency = ?,
+                    enabled = ?, sort_order = ?, note = ?, updated_at = ?, updated_by = ?
+                WHERE id = ?
+                """,
+                (
+                    clean_type,
+                    module.strip(),
+                    category.strip(),
+                    clean_urgency,
+                    1 if enabled else 0,
+                    parse_sort_order(sort_order),
+                    note.strip(),
+                    timestamp,
+                    operator,
+                    int(request_type_id),
+                ),
+            )
+            return int(request_type_id)
+        cursor = connection.execute(
+            """
+            INSERT INTO request_types (
+                request_type, module, category, default_urgency, enabled, sort_order,
+                note, created_at, updated_at, created_by, updated_by
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                clean_type,
+                module.strip(),
+                category.strip(),
+                clean_urgency,
+                1 if enabled else 0,
+                parse_sort_order(sort_order),
+                note.strip(),
+                timestamp,
+                timestamp,
+                operator,
+                operator,
+            ),
+        )
+        return int(cursor.lastrowid)
+
+
+def toggle_request_type_config(request_type_id: int, enabled: bool, operator: str) -> None:
+    with get_connection() as connection:
+        row = connection.execute("SELECT id FROM request_types WHERE id = ?", (int(request_type_id),)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="需求类型不存在")
+        connection.execute(
+            "UPDATE request_types SET enabled = ?, updated_at = ?, updated_by = ? WHERE id = ?",
+            (1 if enabled else 0, now_text(), operator, int(request_type_id)),
+        )
+
+
 def load_app_config() -> AppConfig:
     statuses = load_list_config("statuses.json", DEFAULT_STATUSES)
     system = load_system_config(statuses)
     return AppConfig(
         stores=get_active_stores(),
-        request_types=load_list_config("request_types.json", DEFAULT_REQUEST_TYPES),
+        request_types=get_active_request_types(),
         urgency_levels=load_list_config("urgency_levels.json", DEFAULT_URGENCY_LEVELS),
         statuses=statuses,
         brands=get_active_brands(),
@@ -13146,6 +13472,7 @@ def create_app() -> FastAPI:
         error: str = "",
         status_code: int = 200,
     ) -> HTMLResponse:
+        request_type_rows, request_type_stats = request_type_health_status(fetch_managed_request_type_rows(include_disabled=True))
         return templates.TemplateResponse(
             request,
             "settings.html",
@@ -13156,8 +13483,11 @@ def create_app() -> FastAPI:
                 "stores": fetch_managed_store_rows(include_disabled=True),
                 "brands": fetch_managed_brand_rows(include_disabled=True),
                 "holidays": fetch_managed_holiday_rows(enabled_only=False),
+                "request_types": request_type_rows,
+                "request_type_stats": request_type_stats,
                 "store_statuses": STORE_STATUSES,
                 "holiday_types": HOLIDAY_TYPES,
+                "urgency_levels": load_app_config().urgency_levels,
                 "success": success,
                 "error": error,
                 "config_files": [
@@ -13191,6 +13521,9 @@ def create_app() -> FastAPI:
             "holiday_created": "节假日已新增。",
             "holiday_updated": "节假日已保存。",
             "holiday_toggled": "节假日启用状态已更新。",
+            "request_type_created": "需求类型已新增。",
+            "request_type_updated": "需求类型已保存。",
+            "request_type_toggled": "需求类型启用状态已更新。",
         }
         return render_settings_page(request, current_user, success=success_messages.get(success, ""), error=error)
 
@@ -13372,6 +13705,87 @@ def create_app() -> FastAPI:
         record_operation_log(admin, "config.holiday.toggle", "holiday", holiday_id, {"enabled": enabled}, request)
         return RedirectResponse(url="/admin/settings?success=holiday_toggled#holidays", status_code=303)
 
+    @app.post("/admin/settings/request-types", response_class=HTMLResponse)
+    def create_request_type_setting_route(
+        request: Request,
+        current_user: Dict[str, object] = Depends(require_permission("config.update")),
+        csrf_token: str = Form(""),
+        request_type: str = Form(""),
+        module: str = Form(""),
+        category: str = Form(""),
+        default_urgency: str = Form(""),
+        enabled: str = Form(""),
+        sort_order: str = Form("100"),
+        note: str = Form(""),
+    ) -> HTMLResponse:
+        admin = str(current_user.get("username") or "")
+        require_admin_csrf(request, csrf_token)
+        try:
+            request_type_id = create_or_update_request_type_config(
+                request_type,
+                module,
+                category,
+                default_urgency,
+                enabled in {"1", "true", "on", "yes"},
+                sort_order,
+                note,
+                admin,
+            )
+        except (ValueError, HTTPException) as exc:
+            return render_settings_page(request, current_user, error=form_error_message(exc), status_code=400)
+        record_operation_log(admin, "config.request_type.create", "request_type", request_type_id, {"request_type": request_type}, request)
+        return RedirectResponse(url="/admin/settings?success=request_type_created#request-types", status_code=303)
+
+    @app.post("/admin/settings/request-types/{request_type_id}/update", response_class=HTMLResponse)
+    def update_request_type_setting_route(
+        request: Request,
+        request_type_id: int,
+        current_user: Dict[str, object] = Depends(require_permission("config.update")),
+        csrf_token: str = Form(""),
+        request_type: str = Form(""),
+        module: str = Form(""),
+        category: str = Form(""),
+        default_urgency: str = Form(""),
+        enabled: str = Form(""),
+        sort_order: str = Form("100"),
+        note: str = Form(""),
+    ) -> HTMLResponse:
+        admin = str(current_user.get("username") or "")
+        require_admin_csrf(request, csrf_token)
+        try:
+            create_or_update_request_type_config(
+                request_type,
+                module,
+                category,
+                default_urgency,
+                enabled in {"1", "true", "on", "yes"},
+                sort_order,
+                note,
+                admin,
+                request_type_id=request_type_id,
+            )
+        except (ValueError, HTTPException) as exc:
+            return render_settings_page(request, current_user, error=form_error_message(exc), status_code=400)
+        record_operation_log(admin, "config.request_type.update", "request_type", request_type_id, {"request_type": request_type, "default_urgency": default_urgency, "sort_order": sort_order}, request)
+        return RedirectResponse(url="/admin/settings?success=request_type_updated#request-types", status_code=303)
+
+    @app.post("/admin/settings/request-types/{request_type_id}/toggle", response_class=HTMLResponse)
+    def toggle_request_type_setting_route(
+        request: Request,
+        request_type_id: int,
+        current_user: Dict[str, object] = Depends(require_permission("config.update")),
+        csrf_token: str = Form(""),
+        enabled: str = Form(""),
+    ) -> HTMLResponse:
+        admin = str(current_user.get("username") or "")
+        require_admin_csrf(request, csrf_token)
+        try:
+            toggle_request_type_config(request_type_id, enabled in {"1", "true", "on", "yes"}, admin)
+        except (ValueError, HTTPException) as exc:
+            return render_settings_page(request, current_user, error=form_error_message(exc), status_code=400)
+        record_operation_log(admin, "config.request_type.toggle", "request_type", request_type_id, {"enabled": enabled}, request)
+        return RedirectResponse(url="/admin/settings?success=request_type_toggled#request-types", status_code=303)
+
     def render_ticket_rules_page(
         request: Request,
         current_user: Dict[str, object],
@@ -13381,6 +13795,25 @@ def create_app() -> FastAPI:
         status_code: int = 200,
     ) -> HTMLResponse:
         config = load_app_config()
+        request_type_options = get_request_type_options(include_inactive_used_values=True)
+        active_request_type_options = [option for option in request_type_options if option.get("enabled")]
+        request_type_labels = request_type_label_map()
+        inactive_request_types = {str(option["value"]) for option in request_type_options if not option.get("enabled")}
+        assignment_rules = fetch_assignment_rules()
+        sla_rules = fetch_sla_rules()
+        request_type_templates = fetch_request_type_templates()
+        for row in assignment_rules:
+            value = normalize_rule_text(row.get("request_type"))
+            row["request_type_label"] = request_type_labels.get(value, value) if value else "通用"
+            row["request_type_inactive"] = bool(value and value in inactive_request_types)
+        for row in sla_rules:
+            value = normalize_rule_text(row.get("request_type"))
+            row["request_type_label"] = request_type_labels.get(value, value) if value else "通用"
+            row["request_type_inactive"] = bool(value and value in inactive_request_types)
+        for row in request_type_templates:
+            value = normalize_rule_text(row.get("request_type"))
+            row["request_type_label"] = request_type_labels.get(value, value)
+            row["request_type_inactive"] = bool(value and value in inactive_request_types)
         return templates.TemplateResponse(
             request,
             "ticket_rules.html",
@@ -13388,13 +13821,15 @@ def create_app() -> FastAPI:
                 "request": request,
                 "admin_user": str(current_user.get("username") or ""),
                 "csrf_token": current_csrf_token(request),
-                "assignment_rules": fetch_assignment_rules(),
-                "sla_rules": fetch_sla_rules(),
-                "request_type_templates": fetch_request_type_templates(),
+                "assignment_rules": assignment_rules,
+                "sla_rules": sla_rules,
+                "request_type_templates": request_type_templates,
                 "roles": fetch_admin_roles(),
                 "handlers": config.handlers,
                 "stores": config.stores,
                 "request_types": config.request_types,
+                "request_type_options": request_type_options,
+                "active_request_type_options": active_request_type_options,
                 "brands": config.brands,
                 "urgency_levels": config.urgency_levels,
                 "success": success,

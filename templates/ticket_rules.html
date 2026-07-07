@@ -65,8 +65,8 @@
       <span>需求类型</span>
       <select name="request_type">
         <option value="">通用</option>
-        {% for item in request_types %}
-        <option value="{{ item }}">{{ item }}</option>
+        {% for item in active_request_type_options %}
+        <option value="{{ item.value }}">{{ item.value }}</option>
         {% endfor %}
       </select>
     </label>
@@ -131,7 +131,10 @@
         <tr>
           <td>{{ rule.id }}</td>
           <td>{{ rule.store_name or '通用' }}</td>
-          <td>{{ rule.request_type or '通用' }}</td>
+          <td>
+            {{ rule.request_type_label or '通用' }}
+            {% if rule.request_type_inactive %}<span class="badge archive-badge">历史保留</span>{% endif %}
+          </td>
           <td>{{ rule.brand or '通用' }}</td>
           <td>{{ rule.default_handler or '-' }}</td>
           <td>{{ rule.default_role_name or '-' }}</td>
@@ -180,8 +183,8 @@
       <span>需求类型</span>
       <select name="request_type">
         <option value="">通用</option>
-        {% for item in request_types %}
-        <option value="{{ item }}">{{ item }}</option>
+        {% for item in active_request_type_options %}
+        <option value="{{ item.value }}">{{ item.value }}</option>
         {% endfor %}
       </select>
     </label>
@@ -229,7 +232,10 @@
         {% for rule in sla_rules %}
         <tr>
           <td>{{ rule.id }}</td>
-          <td>{{ rule.request_type or '通用' }}</td>
+          <td>
+            {{ rule.request_type_label or '通用' }}
+            {% if rule.request_type_inactive %}<span class="badge archive-badge">历史保留</span>{% endif %}
+          </td>
           <td>{{ rule.urgency_level or '通用' }}</td>
           <td>{{ rule.due_hours }}</td>
           <td>
@@ -282,8 +288,8 @@
           <span>需求类型 <strong>*</strong></span>
           <select name="request_type" required>
             <option value="">请选择</option>
-            {% for item in request_types %}
-            <option value="{{ item }}">{{ item }}</option>
+            {% for item in active_request_type_options %}
+            <option value="{{ item.value }}">{{ item.value }}</option>
             {% endfor %}
           </select>
         </label>
@@ -377,7 +383,10 @@
         {% for template in request_type_templates %}
         <tr>
           <td>{{ template.id }}</td>
-          <td>{{ template.request_type }}</td>
+          <td>
+            {{ template.request_type_label or template.request_type }}
+            {% if template.request_type_inactive %}<span class="badge archive-badge">历史保留</span>{% endif %}
+          </td>
           <td>{{ template.template_name }}</td>
           <td>
             <div class="tag-list">
@@ -447,8 +456,8 @@
       <span>需求类型</span>
       <select name="request_type">
         <option value="">不指定</option>
-        {% for item in request_types %}
-        <option value="{{ item }}">{{ item }}</option>
+        {% for item in active_request_type_options %}
+        <option value="{{ item.value }}">{{ item.value }}</option>
         {% endfor %}
       </select>
     </label>

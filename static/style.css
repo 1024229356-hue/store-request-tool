@@ -5685,6 +5685,14 @@ button[disabled],
   border-collapse: collapse;
 }
 
+.request-type-settings-table {
+  min-width: 1180px;
+}
+
+.settings-summary-card {
+  margin: 12px 0 16px;
+}
+
 .settings-table th,
 .settings-table td {
   padding: 10px;

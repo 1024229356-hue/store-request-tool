@@ -34,6 +34,137 @@
     <a class="ghost-button compact" href="#stores">门店管理</a>
     <a class="ghost-button compact" href="#brands">品牌管理</a>
     <a class="ghost-button compact" href="#holidays">节假日管理</a>
+    <a class="ghost-button compact" href="#request-types">需求类型管理</a>
+  </div>
+</section>
+
+<section class="work-card settings-panel" id="request-types">
+  <div class="section-heading">
+    <h2>需求类型管理</h2>
+    <p>停用需求类型只影响新提交和新规则配置，历史工单、规则、SLA 和模板继续保留展示。</p>
+  </div>
+
+  <div class="detail-summary-card settings-summary-card">
+    <div><span>总需求类型数</span><strong>{{ request_type_stats.total }}</strong></div>
+    <div><span>启用数</span><strong>{{ request_type_stats.enabled }}</strong></div>
+    <div><span>停用数</span><strong>{{ request_type_stats.disabled }}</strong></div>
+    <div><span>配置完整数</span><strong>{{ request_type_stats.complete }}</strong></div>
+    <div><span>缺规则数</span><strong>{{ request_type_stats.missing }}</strong></div>
+  </div>
+
+  {% if can_update_config %}
+  <form class="settings-create-grid request-type-create-grid" method="post" action="/admin/settings/request-types">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label>需求类型名称<input name="request_type" required placeholder="例如：缺货补货"></label>
+    <label>所属模块<input name="module" placeholder="工单 / 商品 / 排班"></label>
+    <label>类型分组<input name="category" placeholder="商品类 / 运营类"></label>
+    <label>默认紧急程度
+      <select name="default_urgency">
+        <option value="">不设置</option>
+        {% for urgency in urgency_levels %}
+        <option value="{{ urgency }}">{{ urgency }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>启用状态
+      <select name="enabled">
+        <option value="1" selected>启用</option>
+        <option value="0">停用</option>
+      </select>
+    </label>
+    <label>排序<input name="sort_order" type="number" value="100"></label>
+    <label class="settings-wide">备注<input name="note" placeholder="可选"></label>
+    <div class="settings-form-actions"><button class="primary-button compact" type="submit">新增需求类型</button></div>
+  </form>
+  {% endif %}
+
+  <div class="settings-table-wrap">
+    <table class="settings-table request-type-settings-table">
+      <thead>
+        <tr>
+          <th>需求类型</th>
+          <th>模块</th>
+          <th>分组</th>
+          <th>默认紧急程度</th>
+          <th>启用</th>
+          <th>排序</th>
+          <th>自动分派状态</th>
+          <th>SLA 状态</th>
+          <th>模板状态</th>
+          <th>备注</th>
+          {% if can_update_config %}<th>操作</th>{% endif %}
+        </tr>
+      </thead>
+      <tbody>
+        {% for item in request_types %}
+        <tr>
+          <form method="post" action="/admin/settings/request-types/{{ item.id }}/update">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <td>
+              <input name="request_type" value="{{ item.request_type }}" required>
+              {% if item.ticket_usage_count %}
+              <small class="muted-inline">已被历史工单使用，停用后仅不再出现在新提交中。</small>
+              {% endif %}
+            </td>
+            <td><input name="module" value="{{ item.module or '' }}"></td>
+            <td><input name="category" value="{{ item.category or '' }}"></td>
+            <td>
+              <select name="default_urgency">
+                <option value="">不设置</option>
+                {% for urgency in urgency_levels %}
+                <option value="{{ urgency }}" {% if item.default_urgency == urgency %}selected{% endif %}>{{ urgency }}</option>
+                {% endfor %}
+              </select>
+            </td>
+            <td>
+              {{ enabled_badge(item.enabled) }}
+              {{ enabled_select(item.enabled) }}
+            </td>
+            <td><input name="sort_order" type="number" value="{{ item.sort_order }}"></td>
+            <td>
+              {% if item.has_assignment_rule %}
+              <span class="config-status-badge is-on">已配置</span>
+              {% else %}
+              <span class="config-status-badge is-off">缺自动分派</span>
+              {% endif %}
+            </td>
+            <td>
+              {% if item.has_sla_rule %}
+              <span class="config-status-badge is-on">已配置</span>
+              {% else %}
+              <span class="config-status-badge is-off">缺 SLA</span>
+              {% endif %}
+            </td>
+            <td>
+              {% if item.has_template %}
+              <span class="config-status-badge is-on">已配置</span>
+              {% else %}
+              <span class="config-status-badge is-off">缺模板</span>
+              {% endif %}
+              {% if item.health_label == '配置完整' %}
+              <span class="config-status-badge is-on">配置完整</span>
+              {% endif %}
+            </td>
+            <td><input name="note" value="{{ item.note or '' }}"></td>
+            {% if can_update_config %}
+            <td class="settings-actions">
+              <button class="secondary-button compact" type="submit">保存</button>
+          </form>
+              <form method="post" action="/admin/settings/request-types/{{ item.id }}/toggle">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="enabled" value="{{ '0' if item.enabled else '1' }}">
+                <button class="ghost-button compact" type="submit">{{ '停用' if item.enabled else '启用' }}</button>
+              </form>
+            </td>
+            {% else %}
+          </form>
+            {% endif %}
+        </tr>
+        {% else %}
+        <tr><td colspan="11" class="empty-note">暂无需求类型配置。</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
   </div>
 </section>
 

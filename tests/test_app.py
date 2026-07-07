@@ -7392,6 +7392,181 @@ def test_admin_config_update_permission_and_audit_for_managed_settings(tmp_path,
     assert "高风险 POST 未接入：0" in overview.text
 
 
+def test_admin_managed_request_type_schema_seed_and_no_duplicate_import(tmp_path, monkeypatch):
+    client, main = build_client(
+        tmp_path,
+        monkeypatch,
+        {
+            "request_types.json": ["配置类型A", "配置类型B"],
+            "urgency_levels.json": ["普通", "加急"],
+        },
+    )
+
+    assert "request_types" in main.table_names()
+    assert [row["request_type"] for row in rows_for(tmp_path, "request_types")] == ["配置类型A", "配置类型B"]
+    assert [row["request_type"] for row in rows_for(tmp_path, "request_types")] == ["配置类型A", "配置类型B"]
+
+    with sqlite3.connect(tmp_path / "tickets.db") as connection:
+        connection.execute(
+            """
+            INSERT INTO request_types (
+                request_type, module, category, default_urgency, enabled, sort_order,
+                note, created_at, updated_at, created_by, updated_by
+            )
+            VALUES ('手动类型', '工单', '运营类', '普通', 1, 1, '', 'now', 'now', 'test', 'test')
+            """
+        )
+        connection.commit()
+    main.init_db()
+
+    assert [row["request_type"] for row in rows_for(tmp_path, "request_types")] == ["配置类型A", "配置类型B", "手动类型"]
+    submit_page = client.get("/submit")
+    assert "配置类型A" in submit_page.text
+
+
+def test_admin_request_type_settings_crud_submit_history_and_audit(tmp_path, monkeypatch):
+    client, main = build_client(
+        tmp_path,
+        monkeypatch,
+        {
+            "request_types.json": ["旧类型", "启用类型"],
+            "urgency_levels.json": ["普通", "加急"],
+        },
+    )
+    logged_in_client(client)
+
+    settings = client.get("/admin/settings")
+    assert settings.status_code == 200
+    assert "需求类型管理" in settings.text
+    assert "总需求类型数" in settings.text
+
+    view_only_role = create_role_with_permissions(tmp_path, "request-type-view-only", ["config.view"])
+    update_admin_user_access(tmp_path, ADMIN_AUTH[0], view_only_role)
+    denied = admin_post(
+        client,
+        "/admin/settings/request-types",
+        data={"request_type": "无权类型", "csrf_token": csrf_token_for(client, "/admin/settings")},
+    )
+    assert_html_forbidden(denied)
+
+    system_role_id = next(row["id"] for row in rows_for(tmp_path, "admin_roles") if row["role_name"] == "系统管理员")
+    update_admin_user_access(tmp_path, ADMIN_AUTH[0], system_role_id)
+    create_response = admin_post(
+        client,
+        "/admin/settings/request-types",
+        data={
+            "request_type": "后台类型",
+            "module": "工单",
+            "category": "运营类",
+            "default_urgency": "普通",
+            "enabled": "1",
+            "sort_order": "3",
+            "note": "新增",
+        },
+        follow_redirects=False,
+    )
+    assert create_response.status_code == 303
+
+    request_type_id = rows_for(tmp_path, "request_types")[-1]["id"]
+    edit_response = admin_post(
+        client,
+        f"/admin/settings/request-types/{request_type_id}/update",
+        data={
+            "request_type": "后台类型改",
+            "module": "商品",
+            "category": "商品类",
+            "default_urgency": "加急",
+            "enabled": "1",
+            "sort_order": "2",
+            "note": "编辑",
+        },
+        follow_redirects=False,
+    )
+    assert edit_response.status_code == 303
+    assert rows_for(tmp_path, "request_types")[-1]["default_urgency"] == "加急"
+
+    response = client.post(
+        "/submit",
+        data={
+            "store_names": ["南京门东店"],
+            "submitter": "历史类型",
+            "request_type": "后台类型改",
+            "urgency": "普通",
+            "description": "停用后仍需展示",
+        },
+    )
+    assert response.status_code == 200
+
+    toggle_response = admin_post(client, f"/admin/settings/request-types/{request_type_id}/toggle", data={"enabled": "0"}, follow_redirects=False)
+    assert toggle_response.status_code == 303
+    assert "后台类型改" not in client.get("/submit").text
+    assert "后台类型改" in client.get("/admin").text
+
+    operations = rows_for(tmp_path, "admin_operation_logs")
+    actions = [row["action"] for row in operations]
+    assert "config.request_type.create" in actions
+    assert "config.request_type.update" in actions
+    assert "config.request_type.toggle" in actions
+
+    overview = client.get("/admin/permission-overview")
+    assert "高风险 POST 未接入：0" in overview.text
+
+
+def test_request_types_link_ticket_rules_options_and_health(tmp_path, monkeypatch):
+    client, main = build_client(
+        tmp_path,
+        monkeypatch,
+        {
+            "request_types.json": ["启用类型", "缺规则类型", "停用类型"],
+            "urgency_levels.json": ["普通", "加急"],
+        },
+    )
+    logged_in_client(client)
+    with sqlite3.connect(tmp_path / "tickets.db") as connection:
+        connection.execute("UPDATE request_types SET enabled = 0 WHERE request_type = '停用类型'")
+        connection.execute(
+            """
+            INSERT INTO ticket_assignment_rules (
+                request_type, brand, store_name, default_handler, default_role_id, priority,
+                enabled, note, created_at, updated_at, created_by, updated_by
+            )
+            VALUES ('停用类型', '', '', ?, NULL, 10, 1, '', 'now', 'now', 'test', 'test')
+            """,
+            (ADMIN_AUTH[0],),
+        )
+        connection.execute(
+            """
+            INSERT INTO ticket_sla_rules (
+                request_type, urgency_level, due_hours, enabled, note, created_at, updated_at, created_by, updated_by
+            )
+            VALUES ('停用类型', '普通', 24, 1, '', 'now', 'now', 'test', 'test')
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO request_type_templates (
+                request_type, template_name, description, recommended_fields,
+                required_description, image_required, file_required, expected_finish_required,
+                field_help_text, enabled, sort_order, created_at, updated_at, created_by, updated_by
+            )
+            VALUES ('停用类型', '停用模板', '', '', 1, 0, 0, 0, '', 1, 10, 'now', 'now', 'test', 'test')
+            """
+        )
+        connection.commit()
+
+    rules_page = client.get("/admin/ticket-rules")
+    assert rules_page.status_code == 200
+    assert '<option value="启用类型">启用类型</option>' in rules_page.text
+    assert "停用类型（已停用）" in rules_page.text
+    assert "停用类型" in rules_page.text
+
+    settings = client.get("/admin/settings")
+    assert "缺规则类型" in settings.text
+    assert "缺自动分派" in settings.text
+    assert "缺 SLA" in settings.text
+    assert "缺模板" in settings.text
+
+
 def test_missing_and_invalid_config_files_fall_back_to_defaults(tmp_path, monkeypatch):
     client, main = build_client(tmp_path, monkeypatch, write_configs=False)
     submit_page = client.get("/submit")

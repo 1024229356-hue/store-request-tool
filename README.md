@@ -403,7 +403,7 @@ config/holidays.json
 ```
 
 如果配置文件不存在、JSON 格式错误或核心配置为空，系统会自动使用内置默认值兜底，不会因为配置问题启动失败。
-门店、品牌、节假日已经支持在 `/admin/settings` 后台维护。系统首次启动会把 `stores.json`、`brands.json`、`holidays.json` 导入数据库配置表；如果对应配置表已有数据，不会重复导入。后续停用门店或品牌只影响新提交和新排班选择，不影响历史工单或历史排班展示。
+门店、品牌、节假日和需求类型已经支持在 `/admin/settings` 后台维护。系统首次启动会把 `stores.json`、`brands.json`、`holidays.json`、`request_types.json` 导入数据库配置表；如果对应配置表已有数据，不会重复导入。后续停用门店、品牌或需求类型只影响新提交、新排班选择或新规则配置，不影响历史工单或历史排班展示。
 `config/holidays.json` 是可选节假日兜底配置，只在 `holidays` 表为空时生效，不会阻断启动。
 
 ### 如何新增门店
@@ -414,17 +414,11 @@ config/holidays.json
 
 ### 如何新增需求类型
 
-编辑 `config/request_types.json`，按 JSON 数组格式增加需求类型，例如：
+优先在后台 `/admin/settings` 的“需求类型管理”中新增、编辑、启用或停用需求类型，并维护所属模块、类型分组、默认紧急程度、排序和备注。启用需求类型会出现在门店提报页，也会用于自动分派、SLA 和工单类型模板的新增配置选项。
 
-```json
-[
-  "建单需求",
-  "审单需求",
-  "门店陈列需求"
-]
-```
+停用需求类型不会修改历史工单，也不会删除既有自动分派规则、SLA 规则或工单类型模板；这些历史引用会继续在规则页显示并标记为已停用或历史类型。
 
-新增后，门店提报页和后台筛选会使用新的需求类型；提交校验也会按这个文件判断。
+`config/request_types.json` 仍保留为首次初始化和空表兜底，不建议作为日常维护入口。
 
 ### 如何维护需求类型必填规则
 
@@ -605,6 +599,7 @@ ADMIN_PASSWORD=change-me
 - `stores`
 - `brands`
 - `holidays`
+- `request_types`
 
 升级过程是兼容式迁移，不会清空 `tickets`、`ticket_images`，也不会删除 `uploads/` 或 `data/embedded_pages/`。上线前仍建议先备份数据库、附件和嵌入 HTML 运行数据。
 
