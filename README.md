@@ -471,7 +471,7 @@ config/holidays.json
 
 ### 后台多账号配置
 
-后台账号已升级为数据库账号。首次启动且 `admin_users` 表为空时，系统会从 `.env` 中的 `ADMIN_USERS` 自动迁移账号：第一个账号默认为“系统管理员”，其他账号默认为“运营管理”，密码会保存为 `password_hash`，不会保存明文。
+后台账号已升级为数据库账号。首次启动且 `admin_users` 表为空时，系统会从 `.env` 中的 `ADMIN_USERS` 自动迁移账号：第一个账号默认为“系统管理员”，其他账号默认为“运营经理”，密码会保存为 `password_hash`，不会保存明文。
 
 ```text
 ADMIN_USERS=admin:123456,caigou:123456,yunying:123456

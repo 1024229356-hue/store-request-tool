@@ -80,6 +80,10 @@ function initializeStoreRequestApp() {
   const customScheduleModeInputs = Array.from(document.querySelectorAll("[data-custom-schedule-mode]"));
   const customScheduleFields = document.querySelector("[data-custom-schedule-fields]");
   const recalculateCustomDurationButton = document.querySelector("[data-recalculate-custom-duration]");
+  const rolePermissionToolbar = document.querySelector("[data-role-permission-toolbar]");
+  const rolePermissionSearch = document.querySelector("[data-role-permission-search]");
+  const roleModuleFilterButtons = Array.from(document.querySelectorAll("[data-role-module-filter]"));
+  const rolePermissionCards = Array.from(document.querySelectorAll("[data-role-permission-card]"));
 
   let selectedImages = [];
   let selectedFiles = [];
@@ -88,6 +92,7 @@ function initializeStoreRequestApp() {
   let notificationLatestId = 0;
   let notificationInitialLoaded = false;
   let notificationDesktopEnabled = safeLocalStorageGet("storeRequestDesktopNotifications") === "1";
+  let activeRolePermissionModule = "all";
 
   function formatFileSize(bytes) {
     if (bytes >= 1024 * 1024) {
@@ -477,6 +482,74 @@ function initializeStoreRequestApp() {
       syncScheduleDateCard(input);
     });
     updateScheduleBulkSummary();
+  }
+
+  function rolePermissionMatchesSearch(item, query) {
+    if (!query) {
+      return true;
+    }
+    return String(item.dataset.permissionSearch || "").toLowerCase().includes(query);
+  }
+
+  function updateRolePermissionMatrix() {
+    if (!rolePermissionCards.length) {
+      return;
+    }
+    const query = rolePermissionSearch ? rolePermissionSearch.value.trim().toLowerCase() : "";
+    rolePermissionCards.forEach((card) => {
+      card.querySelectorAll("[data-permission-item]").forEach((item) => {
+        const moduleName = item.dataset.permissionModule || "";
+        const moduleMatches = activeRolePermissionModule === "all" || moduleName === activeRolePermissionModule;
+        item.hidden = !(moduleMatches && rolePermissionMatchesSearch(item, query));
+      });
+      card.querySelectorAll("[data-permission-module-group]").forEach((group) => {
+        const visibleItems = Array.from(group.querySelectorAll("[data-permission-item]")).filter((item) => !item.hidden);
+        group.hidden = visibleItems.length === 0;
+      });
+    });
+  }
+
+  function escapeCssValue(value) {
+    if (window.CSS && typeof window.CSS.escape === "function") {
+      return window.CSS.escape(value);
+    }
+    return String(value).replace(/["\\]/g, "\\$&");
+  }
+
+  function syncRolePermissionCheckboxes(sourceInput) {
+    if (!sourceInput || !sourceInput.form) {
+      return;
+    }
+    const selector = `input[name="permissions"][value="${escapeCssValue(sourceInput.value)}"]`;
+    sourceInput.form.querySelectorAll(selector).forEach((input) => {
+      input.checked = sourceInput.checked;
+    });
+  }
+
+  function currentRoleModuleItems(form) {
+    if (!form) {
+      return [];
+    }
+    return Array.from(form.querySelectorAll("[data-permission-item]")).filter((item) => {
+      const moduleName = item.dataset.permissionModule || "";
+      return activeRolePermissionModule === "all" || moduleName === activeRolePermissionModule;
+    });
+  }
+
+  function setCurrentRoleModuleChecked(form, checked) {
+    const changedValues = new Set();
+    currentRoleModuleItems(form).forEach((item) => {
+      const input = item.querySelector('input[name="permissions"]');
+      if (input) {
+        input.checked = checked;
+        changedValues.add(input.value);
+      }
+    });
+    changedValues.forEach((value) => {
+      form.querySelectorAll(`input[name="permissions"][value="${escapeCssValue(value)}"]`).forEach((input) => {
+        input.checked = checked;
+      });
+    });
   }
 
   function updateRequestTypeHint() {
@@ -1335,6 +1408,34 @@ function initializeStoreRequestApp() {
       }
     });
   });
+
+  if (rolePermissionToolbar) {
+    roleModuleFilterButtons.forEach((button) => {
+      button.addEventListener("click", () => {
+        activeRolePermissionModule = button.dataset.roleModuleFilter || "all";
+        roleModuleFilterButtons.forEach((item) => item.classList.toggle("active", item === button));
+        updateRolePermissionMatrix();
+      });
+    });
+    if (rolePermissionSearch) {
+      rolePermissionSearch.addEventListener("input", updateRolePermissionMatrix);
+    }
+    rolePermissionCards.forEach((card) => {
+      card.querySelectorAll("[data-role-permission-checkbox]").forEach((input) => {
+        input.addEventListener("change", () => syncRolePermissionCheckboxes(input));
+      });
+      const form = card.querySelector("form");
+      const selectModuleButton = card.querySelector("[data-role-select-module]");
+      const clearModuleButton = card.querySelector("[data-role-clear-module]");
+      if (selectModuleButton) {
+        selectModuleButton.addEventListener("click", () => setCurrentRoleModuleChecked(form, true));
+      }
+      if (clearModuleButton) {
+        clearModuleButton.addEventListener("click", () => setCurrentRoleModuleChecked(form, false));
+      }
+    });
+    updateRolePermissionMatrix();
+  }
 
   feedbackForms.forEach((form) => {
     form.addEventListener("submit", (event) => {

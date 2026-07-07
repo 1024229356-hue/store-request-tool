@@ -822,6 +822,16 @@ def role_id_by_name(tmp_path, role_name):
     return int(row[0])
 
 
+def permission_keys_for_role(tmp_path, role_name):
+    role_id = role_id_by_name(tmp_path, role_name)
+    with sqlite3.connect(tmp_path / "tickets.db") as connection:
+        rows = connection.execute(
+            "SELECT permission_key FROM admin_role_permissions WHERE role_id = ? ORDER BY permission_key",
+            (role_id,),
+        ).fetchall()
+    return {row[0] for row in rows}
+
+
 def user_id_by_username(tmp_path, username):
     with sqlite3.connect(tmp_path / "tickets.db") as connection:
         row = connection.execute(
@@ -837,7 +847,7 @@ def create_test_admin_user(
     username,
     display_name,
     password="123456",
-    role_name="运营管理",
+    role_name="运营经理",
     allow_login=1,
     is_active=1,
     is_assignable=0,
@@ -1050,7 +1060,7 @@ def test_rbac_tables_env_migration_password_hashes_and_login_logs(tmp_path, monk
     roles = {row["id"]: row["role_name"] for row in rows_for(tmp_path, "admin_roles")}
     users = {row["username"]: row for row in rows_for(tmp_path, "admin_users")}
     assert roles[users["admin"]["role_id"]] == "系统管理员"
-    assert roles[users["caigou"]["role_id"]] == "运营管理"
+    assert roles[users["caigou"]["role_id"]] == "运营经理"
     assert users["admin"]["password_hash"].startswith("pbkdf2_sha256$")
     assert users["admin"]["password_hash"] != "123456"
     assert users["admin"]["is_active"] == 1
@@ -1073,6 +1083,131 @@ def test_rbac_tables_env_migration_password_hashes_and_login_logs(tmp_path, monk
     assert rows_for(tmp_path, "admin_users")[0]["last_login_at"]
 
 
+def test_default_organization_roles_permissions_and_roles_matrix_controls(tmp_path, monkeypatch):
+    client, main = build_client(tmp_path, monkeypatch, admin_users="admin:123456")
+    assert_login_success(login_admin(client, "admin", "123456"))
+
+    expected_roles = [
+        "系统管理员",
+        "总部管理层",
+        "采购",
+        "财务",
+        "设计",
+        "运营经理",
+        "区域经理",
+        "店长",
+        "店员",
+        "兼职",
+    ]
+    roles = rows_for(tmp_path, "admin_roles")
+    assert [role["role_name"] for role in roles] == expected_roles
+
+    permission_map = {
+        role["role_name"]: set(main.permission_service.get_role_permissions(role["id"]))
+        for role in roles
+    }
+    assert permission_map["系统管理员"] == set(main.ADMIN_PERMISSION_KEYS)
+    assert {"ticket.view", "schedule.view", "system.health", "config.view"}.issubset(permission_map["总部管理层"])
+    assert {"account.view", "role.view", "ticket.hard_delete"}.isdisjoint(permission_map["总部管理层"])
+    assert {"ticket.view", "ticket.update", "ticket.comment"}.issubset(permission_map["采购"])
+    assert {"account.view", "role.view", "schedule.view", "employee.view"}.isdisjoint(permission_map["采购"])
+    assert permission_map["店员"] == set()
+    assert permission_map["兼职"] == set()
+
+    roles_page = client.get("/admin/roles")
+    assert roles_page.status_code == 200
+    assert "权限矩阵" in roles_page.text
+    assert 'data-role-permission-card' in roles_page.text
+    assert 'data-role-permission-search' in roles_page.text
+    assert 'data-role-module-filter="工单"' in roles_page.text
+    assert 'data-role-module-filter="看板"' in roles_page.text
+    assert 'data-role-select-module' in roles_page.text
+    assert 'data-role-clear-module' in roles_page.text
+    assert 'name="restore_defaults"' in roles_page.text
+
+
+def test_legacy_default_roles_are_preserved_as_non_system_roles(tmp_path, monkeypatch):
+    _, main = build_client(tmp_path, monkeypatch, admin_users="admin:123456")
+    with main.get_connection() as connection:
+        timestamp = "2026-07-06 10:00:00"
+        connection.execute(
+            """
+            INSERT INTO admin_roles (role_name, description, is_system, created_at, updated_at)
+            VALUES ('运营管理', '历史旧角色', 1, ?, ?)
+            """,
+            (timestamp, timestamp),
+        )
+        main.seed_default_admin_roles(connection)
+
+    roles = {row["role_name"]: row for row in rows_for(tmp_path, "admin_roles")}
+    assert roles["运营管理"]["is_system"] == 0
+    assert "历史兼容角色" in roles["运营管理"]["description"]
+    assert all(roles[name]["is_system"] == 1 for name in [
+        "系统管理员",
+        "总部管理层",
+        "采购",
+        "财务",
+        "设计",
+        "运营经理",
+        "区域经理",
+        "店长",
+        "店员",
+        "兼职",
+    ])
+
+
+def test_system_admin_role_permissions_cannot_be_reduced_below_access_safeguard(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch, admin_users="admin:123456")
+    assert_login_success(login_admin(client, "admin", "123456"))
+    system_role_id = role_id_by_name(tmp_path, "系统管理员")
+
+    blocked = client.post(
+        f"/admin/roles/{system_role_id}/permissions",
+        data={
+            "csrf_token": csrf_token_for(client, "/admin/roles"),
+            "permissions": ["ticket.view"],
+        },
+    )
+
+    assert blocked.status_code == 400
+    assert "不能移除最后一个系统管理员的账号管理和角色权限" in blocked.text
+    permissions = permission_keys_for_role(tmp_path, "系统管理员")
+    assert {"account.view", "account.update", "role.view", "role.update"}.issubset(permissions)
+
+
+def test_restore_default_role_permissions_uses_default_definitions_and_audits(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch, admin_users="admin:123456")
+    assert_login_success(login_admin(client, "admin", "123456"))
+    buyer_role_id = role_id_by_name(tmp_path, "采购")
+
+    custom = client.post(
+        f"/admin/roles/{buyer_role_id}/permissions",
+        data={
+            "csrf_token": csrf_token_for(client, "/admin/roles"),
+            "permissions": ["ticket.view", "account.view"],
+        },
+        follow_redirects=False,
+    )
+    assert custom.status_code == 303
+    assert "account.view" in permission_keys_for_role(tmp_path, "采购")
+
+    restored = client.post(
+        f"/admin/roles/{buyer_role_id}/permissions",
+        data={
+            "csrf_token": csrf_token_for(client, "/admin/roles"),
+            "restore_defaults": "1",
+        },
+        follow_redirects=False,
+    )
+
+    assert restored.status_code == 303
+    restored_permissions = permission_keys_for_role(tmp_path, "采购")
+    assert {"ticket.view", "ticket.update", "ticket.comment"}.issubset(restored_permissions)
+    assert "account.view" not in restored_permissions
+    operation_logs = rows_for(tmp_path, "admin_operation_logs")
+    assert any(row["action"] == "role.permissions.restore_default" for row in operation_logs)
+
+
 def test_admin_access_safeguard_restores_env_first_admin_and_permissions(tmp_path, monkeypatch):
     client, main = build_client(
         tmp_path,
@@ -1080,7 +1215,7 @@ def test_admin_access_safeguard_restores_env_first_admin_and_permissions(tmp_pat
         admin_users="admin:123456,ops:123456",
     )
     system_role_id = role_id_by_name(tmp_path, "系统管理员")
-    ops_role_id = role_id_by_name(tmp_path, "运营管理")
+    ops_role_id = role_id_by_name(tmp_path, "运营经理")
     with sqlite3.connect(tmp_path / "tickets.db") as connection:
         connection.execute("DELETE FROM admin_role_permissions WHERE role_id = ?", (system_role_id,))
         connection.execute(
@@ -1135,7 +1270,7 @@ def test_account_management_crud_safety_and_password_reset(tmp_path, monkeypatch
     )
     assert_login_success(login_admin(client, "admin", "123456"))
     csrf_token = csrf_token_for(client, "/admin/account")
-    ops_role_id = role_id_by_name(tmp_path, "运营管理")
+    ops_role_id = role_id_by_name(tmp_path, "运营经理")
 
     account_page = client.get("/admin/account")
     assert account_page.status_code == 200
@@ -1275,7 +1410,7 @@ def test_person_account_schema_and_legacy_records_remain_usable(tmp_path, monkey
 def test_person_account_management_creates_login_schedule_and_combined_people(tmp_path, monkeypatch):
     client, _ = build_client(tmp_path, monkeypatch, admin_users="admin:123456")
     assert_login_success(login_admin(client, "admin", "123456"))
-    ops_role_id = role_id_by_name(tmp_path, "运营管理")
+    ops_role_id = role_id_by_name(tmp_path, "运营经理")
 
     page = client.get("/admin/account")
     assert page.status_code == 200
@@ -1379,7 +1514,7 @@ def test_person_account_management_creates_login_schedule_and_combined_people(tm
 def test_person_status_flags_control_login_schedule_handlers_and_password_reset(tmp_path, monkeypatch):
     client, _ = build_client(tmp_path, monkeypatch, admin_users="admin:123456")
     assert_login_success(login_admin(client, "admin", "123456"))
-    ops_role_id = role_id_by_name(tmp_path, "运营管理")
+    ops_role_id = role_id_by_name(tmp_path, "运营经理")
     create = client.post(
         "/admin/account/users",
         data={
@@ -1570,6 +1705,84 @@ def test_personnel_governance_detects_candidates_and_ignore_roundtrip(tmp_path, 
     assert "personnel.match.unignore" in operation_actions
 
 
+def test_personnel_governance_detects_historical_employee_anomalies_and_repairs_schedule_flag(tmp_path, monkeypatch):
+    client, main = build_client(tmp_path, monkeypatch, admin_users="admin:123456")
+    logged_in_client(client, "admin", "123456")
+    user_id = create_test_admin_user(tmp_path, "13800004001", "历史店员", is_assignable=1)
+    employee_id = main.create_employee(
+        "历史店员",
+        "南京门东店",
+        "店员",
+        "13800004001",
+        "在职",
+        main.load_app_config(),
+    )
+    departed_id = main.create_employee(
+        "离职异常",
+        "南京门东店",
+        "兼职",
+        "13800004002",
+        "离职",
+        main.load_app_config(),
+    )
+    with sqlite3.connect(tmp_path / "tickets.db") as connection:
+        shift_id = connection.execute("SELECT id FROM shift_types ORDER BY id LIMIT 1").fetchone()[0]
+        connection.execute(
+            """
+            UPDATE employees
+            SET participate_schedule = 0
+            WHERE id = ?
+            """,
+            (employee_id,),
+        )
+        connection.execute(
+            """
+            INSERT INTO store_schedules (store_name, employee_id, schedule_date, shift_type_id, created_by, created_at, updated_at)
+            VALUES ('南京门东店', ?, '2026-07-06', ?, 'pytest', '2026-07-06 10:00:00', '2026-07-06 10:00:00')
+            """,
+            (employee_id, shift_id),
+        )
+        connection.execute(
+            """
+            UPDATE employees
+            SET allow_login = 1, participate_schedule = 1
+            WHERE id = ?
+            """,
+            (departed_id,),
+        )
+
+    context = main.personnel_governance_context("unprocessed", active_tab="historical")
+    anomaly_types = {item["type"] for item in context["historical_anomalies"]}
+    assert "employee_without_account_candidate" in anomaly_types
+    assert "account_without_employee_candidate" in anomaly_types
+    assert "schedule_disabled_active_store_staff" in anomaly_types
+    assert "invalid_employee_status_flags" in anomaly_types
+    assert "scheduled_but_invisible_employee" in anomaly_types
+
+    page = client.get("/admin/personnel-governance?tab=historical")
+    assert page.status_code == 200
+    assert "历史员工异常修复" in page.text
+    assert "重新启用排班" in page.text
+    assert "解除账号关联" in page.text
+    assert "重新关联账号" in page.text
+
+    repaired = client.post(
+        f"/admin/personnel-governance/repair/employee/{employee_id}",
+        data={
+            "csrf_token": csrf_token_for(client, "/admin/personnel-governance?tab=historical"),
+            "action": "enable_schedule",
+        },
+        follow_redirects=False,
+    )
+
+    assert repaired.status_code == 303
+    employee = next(row for row in rows_for(tmp_path, "employees") if row["id"] == employee_id)
+    assert employee["participate_schedule"] == 1
+    assert "历史店员" in client.get("/admin/schedules?store_name=南京门东店&month=2026-07").text
+    operation_actions = [row["action"] for row in rows_for(tmp_path, "admin_operation_logs")]
+    assert "personnel.repair.enable_schedule" in operation_actions
+
+
 def test_personnel_governance_link_unlink_preserves_data_and_prevents_one_to_many(tmp_path, monkeypatch):
     client, main = build_client(
         tmp_path,
@@ -1754,7 +1967,7 @@ def test_account_management_requires_account_permissions(tmp_path, monkeypatch):
             "display_name": "采购02",
             "password": "newpass1",
             "password_confirm": "newpass1",
-            "role_id": str(role_id_by_name(tmp_path, "运营管理")),
+            "role_id": str(role_id_by_name(tmp_path, "运营经理")),
             "data_scope": "all",
         },
     )
@@ -1881,7 +2094,7 @@ def test_phase2_schedule_employee_and_roles_permissions_are_enforced(tmp_path, m
     roles_page = client.get("/admin/roles")
     assert roles_page.status_code == 200
     assert "ticket.view" in roles_page.text
-    ops_role_id = role_id_by_name(tmp_path, "运营管理")
+    ops_role_id = role_id_by_name(tmp_path, "运营经理")
     grant = client.post(
         f"/admin/roles/{ops_role_id}/permissions",
         data={
@@ -2260,7 +2473,7 @@ def test_p1a_ticket_rule_tables_auto_assignment_priority_and_audit(tmp_path, mon
     create_test_admin_user(tmp_path, "buyer_disabled", "停用采购", is_active=0, is_assignable=1)
     create_test_admin_user(tmp_path, "buyer_no_login", "无登录采购", allow_login=0, is_assignable=1)
     create_test_admin_user(tmp_path, "buyer_not_assignable", "不可指派采购", is_assignable=0)
-    role_id = role_id_by_name(tmp_path, "运营管理")
+    role_id = role_id_by_name(tmp_path, "运营经理")
 
     with sqlite3.connect(tmp_path / "tickets.db") as connection:
         tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
@@ -8837,8 +9050,8 @@ def test_p5a_permission_overview_role_acceptance_checklist_and_excel_export(tmp_
     rows = list(workbook.active.iter_rows(values_only=True))
     assert rows[0] == ("角色", "验收类型", "检查项", "建议权限", "当前状态", "人工验收记录")
     assert ("系统管理员", "应能访问", "账号管理", "account.view", "已授权", None) in rows
-    assert ("运营管理", "不应访问", "账号管理", "account.view", "符合", None) in rows
-    assert ("只读账号", "不应看到", "导出", "ticket.export / schedule.export", "符合", None) in rows
+    assert ("运营经理", "不应访问", "账号管理", "account.view", "符合", None) in rows
+    assert ("店员", "不应访问", "导出", "ticket.export / schedule.export", "符合", None) in rows
 
 
 def test_p5a_backup_script_exists_and_backups_remain_untracked(tmp_path, monkeypatch):

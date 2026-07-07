@@ -18,17 +18,38 @@
 
 <section class="section-heading admin-section-heading">
   <h2>角色权限矩阵</h2>
-  <p>第二阶段只做轻量编辑，不调整角色结构和账号列表。</p>
+  <p>默认权限只作为初始化模板，所有角色权限以数据库保存结果为准，保存后立即生效。</p>
+</section>
+
+<section class="work-card role-matrix-toolbar" data-role-permission-toolbar>
+  <div class="filter-form compact-filter">
+    <label>
+      <span>关键词搜索</span>
+      <input type="search" placeholder="搜索权限名称或 key" data-role-permission-search>
+    </label>
+    <div>
+      <span class="form-label">模块筛选</span>
+      <div class="badge-row" data-role-module-filters>
+        <button class="ghost-button compact active" type="button" data-role-module-filter="all">全部</button>
+        {% for group in permission_groups %}
+        <button class="ghost-button compact" type="button" data-role-module-filter="{{ group.module }}">{{ group.name }}</button>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
 </section>
 
 <div class="account-grid">
   {% for role in roles %}
-  <article class="work-card account-card">
+  <article class="work-card account-card" data-role-permission-card>
     <header class="account-card-header">
       <div>
         <p class="eyebrow">Role #{{ role.id }}</p>
         <h2>{{ role.role_name }}</h2>
         <p>{{ role.description or '暂无描述' }}</p>
+        {% if role.is_default_role %}
+        <p class="subtle">默认数据范围：{{ role.default_data_scope }}</p>
+        {% endif %}
       </div>
       {% if role.is_system %}
       <span class="status-badge role-badge">系统角色</span>
@@ -39,16 +60,29 @@
 
     <form class="form-stack" method="post" action="/admin/roles/{{ role.id }}/permissions">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div class="form-actions role-matrix-actions">
+        <button class="ghost-button compact" type="button" data-role-select-module>全选当前模块</button>
+        <button class="ghost-button compact" type="button" data-role-clear-module>清空当前模块</button>
+        {% if role.is_default_role %}
+        <button class="secondary-button compact" type="submit" name="restore_defaults" value="1">恢复默认权限</button>
+        {% endif %}
+      </div>
       {% for group in permission_groups %}
-      <div class="permission-group">
+      <div class="permission-group" data-permission-module-group="{{ group.module }}">
         <h3>{{ group.name }}</h3>
         <div class="permission-check-grid">
           {% for permission in group.permissions %}
-          <label class="inline-check permission-check">
+          <label
+            class="inline-check permission-check"
+            data-permission-item
+            data-permission-module="{{ group.module }}"
+            data-permission-search="{{ group.name }} {{ permission.label }} {{ permission.key }}"
+          >
             <input
               type="checkbox"
               name="permissions"
               value="{{ permission.key }}"
+              data-role-permission-checkbox
               {% if permission.key in role.permissions %}checked{% endif %}
             >
             <span>

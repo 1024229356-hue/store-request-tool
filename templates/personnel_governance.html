@@ -40,8 +40,114 @@
       <strong>{{ stats.anomaly_count }}</strong>
       <small>只提示，不自动修复</small>
     </article>
+    <article class="stat-card">
+      <span>历史员工异常</span>
+      <strong>{{ stats.historical_anomaly_count }}</strong>
+      <small>需人工确认后修复</small>
+    </article>
   </div>
 </section>
+
+<section class="work-card governance-filter-card">
+  <div class="badge-row">
+    {% for tab in governance_tabs %}
+    <a class="ghost-button compact {% if active_tab == tab.value %}active{% endif %}" href="/admin/personnel-governance?tab={{ tab.value }}">{{ tab.label }}</a>
+    {% endfor %}
+  </div>
+</section>
+
+{% if active_tab == 'historical' %}
+<section class="work-card">
+  <div class="section-heading admin-section-heading">
+    <h2>历史员工异常修复</h2>
+    <p>支持重新关联账号、解除账号关联、重新启用排班、恢复和归档；所有动作只做软修复，不删除历史工单、历史排班、上传文件或数据库记录。</p>
+  </div>
+  <div class="table-wrapper">
+    <table class="admin-table">
+      <thead>
+        <tr>
+          <th>异常类型</th>
+          <th>人员/账号</th>
+          <th>说明</th>
+          <th>建议动作</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for anomaly in historical_anomalies %}
+        <tr>
+          <td>
+            <span class="status-badge {% if anomaly.level == 'danger' %}danger{% else %}warning{% endif %}">{{ anomaly.type_label }}</span>
+          </td>
+          <td>
+            <strong>{{ anomaly.employee.employee_name or anomaly.user.display_name or anomaly.user.username or '-' }}</strong>
+            <br>
+            <small>
+              {% if anomaly.user.username %}账号：{{ anomaly.user.username }}{% else %}账号：未关联{% endif %}
+              ·
+              {% if anomaly.employee.id %}员工 #{{ anomaly.employee.id }}{% else %}员工：未关联{% endif %}
+            </small>
+          </td>
+          <td>{{ anomaly.message }}</td>
+          <td>
+            <div class="table-actions compact-actions">
+              {% if anomaly.employee.id %}
+              <a class="ghost-button compact" href="/admin/account/detail?employee_id={{ anomaly.employee.id }}{% if anomaly.user.id %}&user_id={{ anomaly.user.id }}{% endif %}">查看详情</a>
+              {% endif %}
+              {% if 'link' in anomaly.actions and anomaly.user.id and anomaly.employee.id %}
+              <form method="post" action="/admin/personnel-governance/link">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="user_id" value="{{ anomaly.user.id }}">
+                <input type="hidden" name="employee_id" value="{{ anomaly.employee.id }}">
+                <button class="primary-button compact" type="submit">重新关联账号</button>
+              </form>
+              {% endif %}
+              {% if 'unlink' in anomaly.actions and anomaly.user.id and anomaly.employee.id %}
+              <form method="post" action="/admin/personnel-governance/unlink">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="user_id" value="{{ anomaly.user.id }}">
+                <input type="hidden" name="employee_id" value="{{ anomaly.employee.id }}">
+                <button class="ghost-button compact" type="submit">解除账号关联</button>
+              </form>
+              {% endif %}
+              {% if 'enable_schedule' in anomaly.actions and anomaly.employee.id %}
+              <form method="post" action="/admin/personnel-governance/repair/employee/{{ anomaly.employee.id }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="action" value="enable_schedule">
+                <button class="ghost-button compact" type="submit">重新启用排班</button>
+              </form>
+              {% endif %}
+              {% if 'normalize_departed_flags' in anomaly.actions and anomaly.employee.id %}
+              <form method="post" action="/admin/personnel-governance/repair/employee/{{ anomaly.employee.id }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="action" value="normalize_departed_flags">
+                <button class="ghost-button compact" type="submit">规范离职/停用</button>
+              </form>
+              {% endif %}
+              {% if 'restore_active' in anomaly.actions and anomaly.employee.id %}
+              <form method="post" action="/admin/personnel-governance/repair/employee/{{ anomaly.employee.id }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="action" value="restore_active">
+                <button class="ghost-button compact" type="submit">恢复在职可见</button>
+              </form>
+              {% endif %}
+              {% if 'archive' in anomaly.actions and anomaly.employee.id %}
+              <form method="post" action="/admin/personnel-governance/repair/employee/{{ anomaly.employee.id }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="action" value="archive">
+                <button class="ghost-button compact" type="submit">归档</button>
+              </form>
+              {% endif %}
+            </div>
+          </td>
+        </tr>
+        {% else %}
+        <tr><td class="empty-cell" colspan="4">暂未发现历史员工异常。</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% else %}
 
 <section class="work-card governance-filter-card">
   <div class="section-heading admin-section-heading">
@@ -179,4 +285,5 @@
     {% endfor %}
   </div>
 </section>
+{% endif %}
 {% endblock %}

@@ -187,17 +187,64 @@ ADMIN_PERMISSION_KEYS = [
     "system.backup_info",
 ]
 SYSTEM_ADMIN_ROLE_NAME = "系统管理员"
-OPERATIONS_ROLE_NAME = "运营管理"
+HEADQUARTERS_MANAGEMENT_ROLE_NAME = "总部管理层"
+PURCHASING_ROLE_NAME = "采购"
+FINANCE_ROLE_NAME = "财务"
+DESIGN_ROLE_NAME = "设计"
+OPERATIONS_ROLE_NAME = "运营经理"
+REGIONAL_MANAGER_ROLE_NAME = "区域经理"
+STORE_MANAGER_ROLE_NAME = "店长"
+STORE_STAFF_ROLE_NAME = "店员"
+PART_TIME_ROLE_NAME = "兼职"
+ADMIN_CRITICAL_PERMISSION_KEYS = {"account.view", "account.update", "role.view", "role.update"}
 DEFAULT_ADMIN_ROLE_DEFINITIONS = [
     {
         "role_name": SYSTEM_ADMIN_ROLE_NAME,
         "description": "拥有全部后台权限，可管理账号、角色和系统配置。",
         "is_system": 1,
         "permissions": ADMIN_PERMISSION_KEYS,
+        "default_data_scope": "all",
+    },
+    {
+        "role_name": HEADQUARTERS_MANAGEMENT_ROLE_NAME,
+        "description": "总部管理层默认查看全局经营、工单、SLA、排班看板、系统体检和配置结果，不参与写操作。",
+        "is_system": 1,
+        "permissions": [
+            "ticket.view",
+            "schedule.view",
+            "employee.view",
+            "config.view",
+            "ticket.assignment_rule.view",
+            "ticket.sla_rule.view",
+            "ticket.template.view",
+            "system.health",
+        ],
+        "default_data_scope": "all",
+    },
+    {
+        "role_name": PURCHASING_ROLE_NAME,
+        "description": "处理采购、缺货补货、建采购单、瑕疵破损漏发等分派给自己的工单。",
+        "is_system": 1,
+        "permissions": ["ticket.view", "ticket.update", "ticket.comment"],
+        "default_data_scope": "all",
+    },
+    {
+        "role_name": FINANCE_ROLE_NAME,
+        "description": "查看财务相关工单、附件、处理记录和经营看板，默认不具备删除、排班和配置权限。",
+        "is_system": 1,
+        "permissions": ["ticket.view"],
+        "default_data_scope": "all",
+    },
+    {
+        "role_name": DESIGN_ROLE_NAME,
+        "description": "处理设计、物料、图片、陈列相关的本人待办工单。",
+        "is_system": 1,
+        "permissions": ["ticket.view", "ticket.update", "ticket.comment"],
+        "default_data_scope": "assigned",
     },
     {
         "role_name": OPERATIONS_ROLE_NAME,
-        "description": "查看和处理工单、归档、回收站查看、排班查看和工单导出。",
+        "description": "运营经理可查看和处理全局工单、分派、归档、看板、排班异常和配置结果，默认不管理账号/角色。",
         "is_system": 1,
         "permissions": [
             "ticket.view",
@@ -205,46 +252,47 @@ DEFAULT_ADMIN_ROLE_DEFINITIONS = [
             "ticket.assign",
             "ticket.comment",
             "ticket.archive",
-            "ticket.restore",
-            "ticket.export",
             "ticket.view_trash",
             "schedule.view",
-        ],
-    },
-    {
-        "role_name": "商品采购",
-        "description": "处理商品、建单、缺货和新品相关工单。",
-        "is_system": 1,
-        "permissions": ["ticket.view", "ticket.update", "ticket.assign", "ticket.comment", "ticket.export"],
-    },
-    {
-        "role_name": "排班管理员",
-        "description": "管理员工、班次和门店排班。",
-        "is_system": 1,
-        "permissions": [
-            "schedule.view",
-            "schedule.create",
-            "schedule.update",
-            "schedule.delete",
-            "schedule.export",
-            "schedule.copy",
             "employee.view",
-            "employee.create",
-            "employee.update",
-            "employee.archive",
-            "shift.view",
-            "shift.create",
-            "shift.update",
-            "shift.archive",
+            "config.view",
+            "ticket.assignment_rule.view",
+            "ticket.sla_rule.view",
+            "ticket.template.view",
         ],
+        "default_data_scope": "all",
     },
     {
-        "role_name": "只读账号",
-        "description": "只允许查看，不允许新增、处理、删除或导出。",
+        "role_name": REGIONAL_MANAGER_ROLE_NAME,
+        "description": "区域经理默认查看指定门店范围内的工单、Dashboard、排班、超时和人员排班情况。",
         "is_system": 1,
-        "permissions": ["ticket.view", "schedule.view", "employee.view", "shift.view", "embedded.view"],
+        "permissions": ["ticket.view", "ticket.comment", "schedule.view", "employee.view"],
+        "default_data_scope": "stores",
+    },
+    {
+        "role_name": STORE_MANAGER_ROLE_NAME,
+        "description": "店长默认只查看和提交本店工单、查看本店排班和处理进度。",
+        "is_system": 1,
+        "permissions": ["ticket.view", "ticket.create", "ticket.comment", "schedule.view"],
+        "default_data_scope": "stores",
+    },
+    {
+        "role_name": STORE_STAFF_ROLE_NAME,
+        "description": "店员默认不登录后台，参与排班并使用前台提交、查询和排班入口。",
+        "is_system": 1,
+        "permissions": [],
+        "default_data_scope": "stores",
+    },
+    {
+        "role_name": PART_TIME_ROLE_NAME,
+        "description": "兼职默认不登录后台，按需参与排班并使用前台排班入口。",
+        "is_system": 1,
+        "permissions": [],
+        "default_data_scope": "stores",
     },
 ]
+DEFAULT_ADMIN_ROLE_NAMES = [str(role["role_name"]) for role in DEFAULT_ADMIN_ROLE_DEFINITIONS]
+LEGACY_DEFAULT_ADMIN_ROLE_NAMES = ["运营管理", "商品采购", "排班管理员", "只读账号"]
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 DATA_SCOPE_OPTIONS = {"all", "assigned", "stores"}
 PASSWORD_HASH_ITERATIONS = 260000
@@ -1403,32 +1451,80 @@ def ensure_admin_rbac_schema(connection: sqlite3.Connection) -> None:
 def seed_default_admin_roles(connection: sqlite3.Connection) -> None:
     timestamp = now_text()
     for role in DEFAULT_ADMIN_ROLE_DEFINITIONS:
-        connection.execute(
-            """
-            INSERT INTO admin_roles (role_name, description, is_system, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(role_name) DO UPDATE SET
-                description = excluded.description,
-                is_system = excluded.is_system,
-                updated_at = excluded.updated_at
-            """,
-            (
-                str(role["role_name"]),
-                str(role["description"]),
-                int(role["is_system"]),
-                timestamp,
-                timestamp,
-            ),
-        )
-        role_id = role_id_for_name(connection, str(role["role_name"]))
-        for permission_key in role["permissions"]:
+        role_name = str(role["role_name"])
+        existing_role = connection.execute("SELECT id FROM admin_roles WHERE role_name = ?", (role_name,)).fetchone()
+        role_created = existing_role is None
+        if role_created:
             connection.execute(
                 """
-                INSERT OR IGNORE INTO admin_role_permissions (role_id, permission_key, created_at)
-                VALUES (?, ?, ?)
+                INSERT INTO admin_roles (role_name, description, is_system, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?)
                 """,
-                (role_id, str(permission_key), timestamp),
+                (
+                    role_name,
+                    str(role["description"]),
+                    int(role["is_system"]),
+                    timestamp,
+                    timestamp,
+                ),
             )
+        else:
+            connection.execute(
+                """
+                UPDATE admin_roles
+                SET description = ?, is_system = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (str(role["description"]), int(role["is_system"]), timestamp, int(existing_role["id"])),
+            )
+        role_id = role_id_for_name(connection, str(role["role_name"]))
+        if role_created:
+            for permission_key in role["permissions"]:
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO admin_role_permissions (role_id, permission_key, created_at)
+                    VALUES (?, ?, ?)
+                    """,
+                    (role_id, str(permission_key), timestamp),
+                )
+    placeholders = ",".join("?" for _ in LEGACY_DEFAULT_ADMIN_ROLE_NAMES)
+    connection.execute(
+        f"""
+        UPDATE admin_roles
+        SET is_system = 0,
+            description = CASE
+                WHEN COALESCE(description, '') LIKE '历史兼容角色：%' THEN description
+                ELSE '历史兼容角色：' || COALESCE(NULLIF(description, ''), role_name)
+            END,
+            updated_at = ?
+        WHERE role_name IN ({placeholders})
+          AND role_name NOT IN ({",".join("?" for _ in DEFAULT_ADMIN_ROLE_NAMES)})
+        """,
+        (timestamp, *LEGACY_DEFAULT_ADMIN_ROLE_NAMES, *DEFAULT_ADMIN_ROLE_NAMES),
+    )
+
+
+def default_admin_role_definition(role_name: object) -> Optional[Dict[str, object]]:
+    clean_name = str(role_name or "").strip()
+    for role in DEFAULT_ADMIN_ROLE_DEFINITIONS:
+        if str(role["role_name"]) == clean_name:
+            return role
+    return None
+
+
+def default_permissions_for_role_name(role_name: object) -> List[str]:
+    role = default_admin_role_definition(role_name)
+    if not role:
+        return []
+    selected = {str(permission) for permission in role.get("permissions", [])}
+    return [permission for permission in ADMIN_PERMISSION_KEYS if permission in selected]
+
+
+def default_data_scope_for_role_name(role_name: object) -> str:
+    role = default_admin_role_definition(role_name)
+    if not role:
+        return "all"
+    return normalize_admin_data_scope(str(role.get("default_data_scope") or "all"))
 
 
 def role_id_for_name(connection: sqlite3.Connection, role_name: str) -> int:
@@ -2031,7 +2127,286 @@ def detect_personnel_link_anomalies() -> List[Dict[str, object]]:
     return anomalies
 
 
-def personnel_governance_context(filter_value: str = "unprocessed") -> Dict[str, object]:
+STORE_SCHEDULABLE_ROLE_NAMES = {STORE_MANAGER_ROLE_NAME, STORE_STAFF_ROLE_NAME, PART_TIME_ROLE_NAME}
+HISTORICAL_PERSONNEL_ANOMALY_LABELS = {
+    "employee_without_account_candidate": "员工无账号关联但存在疑似账号",
+    "account_without_employee_candidate": "账号无员工关联但存在疑似员工",
+    "link_mismatch": "双向关联不一致",
+    "schedule_disabled_active_store_staff": "在职门店人员不可排班",
+    "invalid_employee_status": "员工状态为空或非法",
+    "invalid_employee_status_flags": "员工状态与登录/排班/处理人标记冲突",
+    "scheduled_but_invisible_employee": "被历史排班引用但当前排班人员不可见",
+    "orphan_employee_without_history": "无历史排班引用的孤儿员工",
+}
+
+
+def historical_anomaly(
+    anomaly_type: str,
+    message: str,
+    level: str = "warning",
+    user: Optional[Dict[str, object]] = None,
+    employee: Optional[Dict[str, object]] = None,
+    candidate: Optional[Dict[str, object]] = None,
+    actions: Optional[List[str]] = None,
+) -> Dict[str, object]:
+    return {
+        "type": anomaly_type,
+        "type_label": HISTORICAL_PERSONNEL_ANOMALY_LABELS.get(anomaly_type, anomaly_type),
+        "level": level,
+        "message": message,
+        "user": user or {},
+        "employee": employee or {},
+        "candidate": candidate or {},
+        "actions": actions or [],
+    }
+
+
+def detect_historical_personnel_anomalies() -> List[Dict[str, object]]:
+    anomalies: List[Dict[str, object]] = []
+    seen: set[Tuple[str, int, int]] = set()
+
+    def add(item: Dict[str, object]) -> None:
+        user_id = int((item.get("user") or {}).get("id") or 0)
+        employee_id = int((item.get("employee") or {}).get("id") or 0)
+        key = (str(item.get("type") or ""), user_id, employee_id)
+        if key in seen:
+            return
+        seen.add(key)
+        anomalies.append(item)
+
+    candidates = build_personnel_match_candidates(include_ignored=False)
+    for candidate in candidates:
+        user = dict(candidate.get("user") or {})
+        employee = dict(candidate.get("employee") or {})
+        add(
+            historical_anomaly(
+                "employee_without_account_candidate",
+                f"员工 {employee.get('employee_name')} 未关联账号，但疑似对应 {user.get('username')}。",
+                user=user,
+                employee=employee,
+                candidate=candidate,
+                actions=["link"],
+            )
+        )
+        add(
+            historical_anomaly(
+                "account_without_employee_candidate",
+                f"账号 {user.get('username')} 未关联员工，但疑似对应 {employee.get('employee_name')}。",
+                user=user,
+                employee=employee,
+                candidate=candidate,
+                actions=["link"],
+            )
+        )
+
+    with get_connection() as connection:
+        mismatch_rows = connection.execute(
+            """
+            SELECT admin_users.id AS user_id, admin_users.username, admin_users.display_name,
+                   admin_users.employee_id, employees.id AS employee_id, employees.employee_name,
+                   employees.user_id AS employee_user_id
+            FROM admin_users
+            JOIN employees ON employees.id = admin_users.employee_id
+            WHERE employees.user_id IS NOT NULL AND employees.user_id != admin_users.id
+            """
+        ).fetchall()
+        for row in mismatch_rows:
+            add(
+                historical_anomaly(
+                    "link_mismatch",
+                    f"账号 {row['username']} 指向员工 #{row['employee_id']}，但该员工反向指向账号 #{row['employee_user_id']}。",
+                    level="danger",
+                    user={"id": int(row["user_id"]), "username": str(row["username"] or ""), "display_name": str(row["display_name"] or "")},
+                    employee={"id": int(row["employee_id"]), "employee_name": str(row["employee_name"] or "")},
+                    actions=["unlink", "link"],
+                )
+            )
+
+        employee_rows = connection.execute(
+            """
+            SELECT
+                employees.*,
+                linked_users.id AS linked_user_id,
+                linked_users.username AS linked_username,
+                linked_users.allow_login AS linked_allow_login,
+                linked_users.is_active AS linked_is_active,
+                linked_users.is_assignable AS linked_is_assignable,
+                COUNT(store_schedules.id) AS schedule_count
+            FROM employees
+            LEFT JOIN admin_users AS linked_users
+              ON linked_users.id = employees.user_id
+              OR linked_users.employee_id = employees.id
+            LEFT JOIN store_schedules ON store_schedules.employee_id = employees.id
+            GROUP BY employees.id
+            ORDER BY employees.id
+            """
+        ).fetchall()
+        for row in employee_rows:
+            employee = dict(row)
+            employee_id = int(row["id"])
+            role = str(row["role"] or "").strip()
+            status = str(row["status"] or "").strip()
+            participate_schedule = int(row["participate_schedule"] if row["participate_schedule"] is not None else 0)
+            allow_login = int(row["allow_login"] if row["allow_login"] is not None else 0)
+            linked_allow_login = int(row["linked_allow_login"] if row["linked_allow_login"] is not None else 0)
+            linked_is_active = int(row["linked_is_active"] if row["linked_is_active"] is not None else 0)
+            linked_is_assignable = int(row["linked_is_assignable"] if row["linked_is_assignable"] is not None else 0)
+            schedule_count = int(row["schedule_count"] or 0)
+            is_archived = bool(row["archived_at"] if "archived_at" in row.keys() else "")
+            is_deleted = bool(row["deleted_at"] if "deleted_at" in row.keys() else "")
+            user = (
+                {"id": int(row["linked_user_id"]), "username": str(row["linked_username"] or "")}
+                if row["linked_user_id"] is not None
+                else {}
+            )
+            if not status or status not in EMPLOYEE_STATUSES:
+                add(
+                    historical_anomaly(
+                        "invalid_employee_status",
+                        f"员工 {row['employee_name']} 状态为空或非法：{status or '空'}。",
+                        level="danger",
+                        user=user,
+                        employee=employee,
+                        actions=["restore_active", "normalize_departed_flags"],
+                    )
+                )
+            if status in {"离职", "停用"} and (
+                participate_schedule == 1
+                or allow_login == 1
+                or linked_allow_login == 1
+                or linked_is_active == 1
+                or linked_is_assignable == 1
+            ):
+                add(
+                    historical_anomaly(
+                        "invalid_employee_status_flags",
+                        f"员工 {row['employee_name']} 为{status}，但仍保留登录、排班或处理人标记。",
+                        level="danger",
+                        user=user,
+                        employee=employee,
+                        actions=["normalize_departed_flags"],
+                    )
+                )
+            if (
+                role in STORE_SCHEDULABLE_ROLE_NAMES
+                and status not in {"离职", "停用"}
+                and not is_archived
+                and not is_deleted
+                and participate_schedule == 0
+            ):
+                add(
+                    historical_anomaly(
+                        "schedule_disabled_active_store_staff",
+                        f"在职{role} {row['employee_name']} 当前不可排班。",
+                        user=user,
+                        employee=employee,
+                        actions=["enable_schedule"],
+                    )
+                )
+            if schedule_count > 0 and (
+                participate_schedule == 0
+                or status != "在职"
+                or is_archived
+                or is_deleted
+            ):
+                add(
+                    historical_anomaly(
+                        "scheduled_but_invisible_employee",
+                        f"员工 {row['employee_name']} 有 {schedule_count} 条历史排班，但当前不会出现在排班人员视图。",
+                        level="danger",
+                        user=user,
+                        employee=employee,
+                        actions=["enable_schedule", "restore_active"],
+                    )
+                )
+            if (
+                schedule_count == 0
+                and row["linked_user_id"] is None
+                and row["user_id"] is None
+                and status in {"离职", "停用"}
+                and not is_archived
+                and not is_deleted
+            ):
+                add(
+                    historical_anomaly(
+                        "orphan_employee_without_history",
+                        f"员工 {row['employee_name']} 无账号关联且无历史排班引用，可考虑归档。",
+                        user=user,
+                        employee=employee,
+                        actions=["archive"],
+                    )
+                )
+    anomalies.sort(key=lambda item: (0 if item["level"] == "danger" else 1, str(item["type"]), int((item["employee"] or {}).get("id") or 0)))
+    return anomalies
+
+
+def repair_historical_employee_anomaly(employee_id: int, action: str) -> Dict[str, object]:
+    clean_action = str(action or "").strip()
+    if clean_action not in {"enable_schedule", "normalize_departed_flags", "restore_active", "archive"}:
+        raise ValueError("不支持的修复动作。")
+    timestamp = now_text()
+    with get_connection() as connection:
+        row = connection.execute("SELECT * FROM employees WHERE id = ?", (int(employee_id),)).fetchone()
+        if not row:
+            raise ValueError("员工不存在。")
+        if clean_action == "enable_schedule":
+            connection.execute(
+                """
+                UPDATE employees
+                SET participate_schedule = 1,
+                    status = CASE WHEN status IS NULL OR status = '' OR status = '停用' THEN '在职' ELSE status END,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (timestamp, int(employee_id)),
+            )
+        elif clean_action == "normalize_departed_flags":
+            connection.execute(
+                """
+                UPDATE employees
+                SET allow_login = 0, participate_schedule = 0, updated_at = ?
+                WHERE id = ?
+                """,
+                (timestamp, int(employee_id)),
+            )
+            connection.execute(
+                """
+                UPDATE admin_users
+                SET allow_login = 0, participate_schedule = 0, is_assignable = 0, is_active = 0, updated_at = ?
+                WHERE employee_id = ? OR id = ?
+                """,
+                (timestamp, int(employee_id), int(row["user_id"] or 0)),
+            )
+        elif clean_action == "restore_active":
+            connection.execute(
+                """
+                UPDATE employees
+                SET status = '在职', deleted_at = NULL, deleted_by = NULL, delete_reason = NULL,
+                    archived_at = NULL, archived_by = NULL, archive_reason = NULL, updated_at = ?
+                WHERE id = ?
+                """,
+                (timestamp, int(employee_id)),
+            )
+        elif clean_action == "archive":
+            connection.execute(
+                """
+                UPDATE employees
+                SET archived_at = COALESCE(archived_at, ?), archived_by = COALESCE(archived_by, 'personnel-governance'),
+                    archive_reason = COALESCE(NULLIF(archive_reason, ''), '人员异常修复归档'), participate_schedule = 0,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (timestamp, timestamp, int(employee_id)),
+            )
+    return {
+        "employee_id": int(employee_id),
+        "employee_name": str(row["employee_name"] or ""),
+        "action": clean_action,
+    }
+
+
+def personnel_governance_context(filter_value: str = "unprocessed", active_tab: str = "matches") -> Dict[str, object]:
+    selected_tab = active_tab if active_tab in {"matches", "historical"} else "matches"
     selected_filter = filter_value if filter_value in {"all", "high", "medium", "low", "processed", "unprocessed", "ignored"} else "unprocessed"
     all_candidates = build_personnel_match_candidates(include_ignored=True)
     pending_candidates = [candidate for candidate in all_candidates if not candidate["ignored"]]
@@ -2048,7 +2423,13 @@ def personnel_governance_context(filter_value: str = "unprocessed") -> Dict[str,
         unlinked_users = fetch_unlinked_admin_users_for_personnel(connection)
         unlinked_employees = fetch_unlinked_employees_for_personnel(connection)
     anomalies = detect_personnel_link_anomalies()
+    historical_anomalies = detect_historical_personnel_anomalies()
     return {
+        "active_tab": selected_tab,
+        "governance_tabs": [
+            {"value": "matches", "label": "账号员工关联"},
+            {"value": "historical", "label": "历史员工异常修复"},
+        ],
         "selected_filter": selected_filter,
         "filter_tabs": [
             {"value": "unprocessed", "label": "未处理"},
@@ -2064,6 +2445,7 @@ def personnel_governance_context(filter_value: str = "unprocessed") -> Dict[str,
         "unlinked_users": unlinked_users,
         "unlinked_employees": unlinked_employees,
         "anomalies": anomalies,
+        "historical_anomalies": historical_anomalies,
         "stats": {
             "suspicious_count": len(pending_candidates),
             "high_count": sum(1 for candidate in pending_candidates if candidate["confidence"] == "high"),
@@ -2071,6 +2453,7 @@ def personnel_governance_context(filter_value: str = "unprocessed") -> Dict[str,
             "unlinked_account_count": len(unlinked_users),
             "unlinked_employee_count": len(unlinked_employees),
             "anomaly_count": len(anomalies),
+            "historical_anomaly_count": len(historical_anomalies),
         },
     }
 
@@ -2289,30 +2672,65 @@ def personnel_detail_context(user_id: int = 0, employee_id: int = 0) -> Dict[str
 
 def fetch_admin_roles() -> List[Dict[str, object]]:
     with get_connection() as connection:
-        return [
-            {
-                "id": int(row["id"]),
-                "role_name": str(row["role_name"] or ""),
-                "description": str(row["description"] or ""),
-                "is_system": int(row["is_system"] or 0),
-                "permissions": permissions_for_role(connection, int(row["id"])),
-            }
-            for row in connection.execute("SELECT * FROM admin_roles ORDER BY id").fetchall()
-        ]
+        rows = connection.execute(
+            """
+            SELECT *
+            FROM admin_roles
+            ORDER BY CASE role_name
+                WHEN ? THEN 1
+                WHEN ? THEN 2
+                WHEN ? THEN 3
+                WHEN ? THEN 4
+                WHEN ? THEN 5
+                WHEN ? THEN 6
+                WHEN ? THEN 7
+                WHEN ? THEN 8
+                WHEN ? THEN 9
+                WHEN ? THEN 10
+                ELSE 99
+            END, id
+            """,
+            tuple(DEFAULT_ADMIN_ROLE_NAMES),
+        ).fetchall()
+        roles: List[Dict[str, object]] = []
+        for row in rows:
+            role_name = str(row["role_name"] or "")
+            roles.append(
+                {
+                    "id": int(row["id"]),
+                    "role_name": role_name,
+                    "description": str(row["description"] or ""),
+                    "is_system": int(row["is_system"] or 0),
+                    "permissions": permissions_for_role(connection, int(row["id"])),
+                    "default_permissions": default_permissions_for_role_name(role_name),
+                    "default_data_scope": default_data_scope_for_role_name(role_name),
+                    "is_default_role": role_name in DEFAULT_ADMIN_ROLE_NAMES,
+                }
+            )
+        return roles
 
 
-def replace_admin_role_permissions(role_id: int, permission_keys: Iterable[object]) -> Dict[str, object]:
-    selected_permissions = {str(value or "").strip() for value in permission_keys}
-    clean_permissions = [
-        permission_key
-        for permission_key in ADMIN_PERMISSION_KEYS
-        if permission_key in selected_permissions
-    ]
+def replace_admin_role_permissions(
+    role_id: int,
+    permission_keys: Iterable[object],
+    restore_defaults: bool = False,
+) -> Dict[str, object]:
     timestamp = now_text()
     with get_connection() as connection:
         role = connection.execute("SELECT * FROM admin_roles WHERE id = ?", (int(role_id),)).fetchone()
         if not role:
             raise HTTPException(status_code=404, detail="角色不存在")
+        role_name = str(role["role_name"] or "")
+        selected_source = default_permissions_for_role_name(role_name) if restore_defaults else permission_keys
+        selected_permissions = {str(value or "").strip() for value in selected_source}
+        clean_permissions = [
+            permission_key
+            for permission_key in ADMIN_PERMISSION_KEYS
+            if permission_key in selected_permissions
+        ]
+        missing_admin_permissions = ADMIN_CRITICAL_PERMISSION_KEYS - set(clean_permissions)
+        if role_name == SYSTEM_ADMIN_ROLE_NAME and missing_admin_permissions and active_system_admin_count(connection) > 0:
+            raise HTTPException(status_code=400, detail="不能移除最后一个系统管理员的账号管理和角色权限")
         connection.execute("DELETE FROM admin_role_permissions WHERE role_id = ?", (int(role_id),))
         for permission_key in clean_permissions:
             connection.execute(
@@ -2325,8 +2743,9 @@ def replace_admin_role_permissions(role_id: int, permission_keys: Iterable[objec
         connection.execute("UPDATE admin_roles SET updated_at = ? WHERE id = ?", (timestamp, int(role_id)))
         return {
             "id": int(role["id"]),
-            "role_name": str(role["role_name"] or ""),
+            "role_name": role_name,
             "permissions": clean_permissions,
+            "restored_defaults": bool(restore_defaults),
         }
 
 
@@ -3160,8 +3579,16 @@ def ticket_rule_match_preview(store_name: str, request_type: str, brand: str, ur
 def admin_permission_groups() -> List[Dict[str, object]]:
     labels = {
         "ticket.view": "查看工单",
+        "ticket.create": "新增工单",
         "ticket.update": "处理工单",
+        "ticket.assign": "分派工单",
+        "ticket.comment": "评论工单",
+        "ticket.archive": "归档工单",
+        "ticket.restore": "恢复工单",
+        "ticket.delete": "删除工单",
+        "ticket.hard_delete": "永久删除工单",
         "ticket.export": "导出工单",
+        "ticket.view_trash": "查看回收站",
         "ticket.assignment_rule.view": "查看分派规则",
         "ticket.assignment_rule.update": "维护分派规则",
         "ticket.sla_rule.view": "查看 SLA 规则",
@@ -3170,36 +3597,72 @@ def admin_permission_groups() -> List[Dict[str, object]]:
         "ticket.template.update": "维护类型模板",
         "schedule.view": "查看排班",
         "schedule.create": "新增排班",
+        "schedule.update": "编辑排班",
+        "schedule.delete": "删除排班",
         "schedule.export": "导出排班",
         "schedule.copy": "复制排班",
         "schedule.override_conflict": "覆盖排班冲突",
-        "employee.view": "查看员工",
+        "employee.view": "查看人员",
+        "employee.create": "新增人员",
+        "employee.update": "编辑人员",
+        "employee.archive": "归档人员",
+        "employee.delete": "删除人员",
+        "employee.hard_delete": "永久删除人员",
+        "shift.view": "查看班次",
+        "shift.create": "新增班次",
+        "shift.update": "编辑班次",
+        "shift.archive": "归档班次",
+        "shift.delete": "删除班次",
+        "shift.hard_delete": "永久删除班次",
+        "embedded.view": "查看嵌入页面",
+        "embedded.create": "新增嵌入页面",
+        "embedded.update": "编辑嵌入页面",
+        "embedded.delete": "删除嵌入页面",
+        "embedded.hard_delete": "永久删除嵌入页面",
+        "config.view": "查看配置中心",
+        "config.update": "维护配置中心",
+        "account.view": "查看账号",
+        "account.create": "新增账号",
+        "account.update": "编辑账号/人员治理",
+        "account.disable": "停用/启用账号",
+        "account.reset_password": "重置密码",
         "role.view": "查看角色",
+        "role.create": "新增角色",
         "role.update": "编辑角色权限",
+        "role.delete": "删除角色",
         "notification.view": "查看通知",
         "notification.update": "更新通知",
+        "system.view": "查看系统信息",
+        "system.health": "查看系统体检",
+        "system.route_health": "查看路由体检",
+        "system.backup_info": "查看备份指引",
     }
-    grouped_prefixes = [
-        ("工单", "ticket."),
-        ("排班", "schedule."),
-        ("员工", "employee."),
-        ("班次", "shift."),
-        ("嵌入页", "embedded."),
-        ("配置", "config."),
-        ("通知", "notification."),
-        ("账号与角色", ("account.", "role.")),
-        ("系统", "system."),
+    group_definitions: List[Tuple[str, List[str]]] = [
+        ("工单", [key for key in ADMIN_PERMISSION_KEYS if key.startswith("ticket.")]),
+        ("排班", [key for key in ADMIN_PERMISSION_KEYS if key.startswith("schedule.")]),
+        ("人员", [key for key in ADMIN_PERMISSION_KEYS if key.startswith("employee.")]),
+        ("班次", [key for key in ADMIN_PERMISSION_KEYS if key.startswith("shift.")]),
+        ("配置", ["config.view", "config.update", "ticket.assignment_rule.view", "ticket.assignment_rule.update", "ticket.sla_rule.view", "ticket.sla_rule.update", "ticket.template.view", "ticket.template.update"]),
+        ("账号", [key for key in ADMIN_PERMISSION_KEYS if key.startswith("account.")]),
+        ("角色", [key for key in ADMIN_PERMISSION_KEYS if key.startswith("role.")]),
+        ("系统", [key for key in ADMIN_PERMISSION_KEYS if key.startswith("system.")]),
+        ("看板", ["ticket.view", "schedule.view", "employee.view", "config.view", "system.health"]),
+        ("嵌入页面", [key for key in ADMIN_PERMISSION_KEYS if key.startswith("embedded.")]),
+        ("通知", [key for key in ADMIN_PERMISSION_KEYS if key.startswith("notification.")]),
     ]
     groups: List[Dict[str, object]] = []
-    for group_name, prefixes in grouped_prefixes:
-        prefix_tuple = prefixes if isinstance(prefixes, tuple) else (prefixes,)
+    seen_group_names: set[str] = set()
+    for group_name, keys in group_definitions:
+        if group_name in seen_group_names:
+            continue
+        seen_group_names.add(group_name)
         permissions = [
-            {"key": key, "label": labels.get(key, key)}
-            for key in ADMIN_PERMISSION_KEYS
-            if key.startswith(prefix_tuple)
+            {"key": key, "label": labels.get(key, key), "module": group_name}
+            for key in keys
+            if key in ADMIN_PERMISSION_KEYS
         ]
         if permissions:
-            groups.append({"name": group_name, "permissions": permissions})
+            groups.append({"name": group_name, "module": group_name, "permissions": permissions})
     return groups
 
 
@@ -3309,6 +3772,7 @@ PERMISSION_ROUTE_RULES: List[Dict[str, str]] = [
     {"method": "POST", "path": "/admin/personnel-governance/unlink", "permission": "account.update", "module": "账号", "label": "解除人员与账号关联"},
     {"method": "POST", "path": "/admin/personnel-governance/ignore", "permission": "account.update", "module": "账号", "label": "忽略疑似重复"},
     {"method": "POST", "path": "/admin/personnel-governance/unignore", "permission": "account.update", "module": "账号", "label": "取消忽略疑似重复"},
+    {"method": "POST", "path": "/admin/personnel-governance/repair/employee/{employee_id}", "permission": "account.update", "module": "账号", "label": "历史员工异常修复"},
     {"method": "GET", "path": "/admin/roles", "permission": "role.view", "module": "角色", "label": "角色管理"},
     {"method": "POST", "path": "/admin/roles/{role_id}/permissions", "permission": "role.update", "module": "角色", "label": "编辑角色权限"},
     {"method": "GET", "path": "/admin/permission-overview", "permission": "role.view", "module": "角色", "label": "权限概览"},
@@ -3654,10 +4118,15 @@ def initialization_check_context() -> Dict[str, object]:
     with get_connection() as connection:
         people = {
             "system_admin_count": active_role_user_count(connection, SYSTEM_ADMIN_ROLE_NAME),
+            "headquarters_management_count": active_role_user_count(connection, HEADQUARTERS_MANAGEMENT_ROLE_NAME),
+            "purchasing_count": active_role_user_count(connection, PURCHASING_ROLE_NAME),
+            "finance_count": active_role_user_count(connection, FINANCE_ROLE_NAME),
+            "design_count": active_role_user_count(connection, DESIGN_ROLE_NAME),
             "operations_count": active_role_user_count(connection, OPERATIONS_ROLE_NAME),
-            "buyer_count": active_role_user_count(connection, "商品采购"),
-            "schedule_admin_count": active_role_user_count(connection, "排班管理员"),
-            "readonly_count": active_role_user_count(connection, "只读账号"),
+            "regional_manager_count": active_role_user_count(connection, REGIONAL_MANAGER_ROLE_NAME),
+            "store_manager_count": active_role_user_count(connection, STORE_MANAGER_ROLE_NAME),
+            "store_staff_count": active_role_user_count(connection, STORE_STAFF_ROLE_NAME),
+            "part_time_count": active_role_user_count(connection, PART_TIME_ROLE_NAME),
             "schedule_employee_count": count_rows(
                 connection,
                 "employees",
@@ -3963,11 +4432,69 @@ ROLE_ACCEPTANCE_REQUIREMENTS: List[Dict[str, object]] = [
         "must_not_have": [],
     },
     {
+        "role_name": HEADQUARTERS_MANAGEMENT_ROLE_NAME,
+        "must_have": [
+            ("Dashboard", ["ticket.view"]),
+            ("工单只读", ["ticket.view"]),
+            ("SLA 和配置结果", ["ticket.sla_rule.view", "config.view"]),
+            ("排班看板", ["schedule.view"]),
+            ("系统体检", ["system.health"]),
+        ],
+        "must_not_have": [
+            ("工单写操作", ["ticket.create", "ticket.update", "ticket.delete"]),
+            ("账号管理", ["account.view", "account.update"]),
+            ("角色权限", ["role.view", "role.update"]),
+            ("全局配置修改", ["config.update", "ticket.assignment_rule.update", "ticket.sla_rule.update", "ticket.template.update"]),
+            ("永久删除", ["ticket.hard_delete", "employee.hard_delete", "embedded.hard_delete"]),
+        ],
+    },
+    {
+        "role_name": PURCHASING_ROLE_NAME,
+        "must_have": [
+            ("我的待办与工单处理", ["ticket.view", "ticket.update", "ticket.comment"]),
+        ],
+        "must_not_have": [
+            ("排班管理", ["schedule.view", "schedule.create", "schedule.update"]),
+            ("员工管理", ["employee.view", "employee.update"]),
+            ("账号管理", ["account.view"]),
+            ("角色权限", ["role.view", "role.update"]),
+            ("永久删除", ["ticket.hard_delete"]),
+        ],
+    },
+    {
+        "role_name": FINANCE_ROLE_NAME,
+        "must_have": [
+            ("财务相关工单查看", ["ticket.view"]),
+        ],
+        "must_not_have": [
+            ("删除工单", ["ticket.delete", "ticket.hard_delete"]),
+            ("排班管理", ["schedule.view", "schedule.update"]),
+            ("员工管理", ["employee.view", "employee.update"]),
+            ("账号权限管理", ["account.view", "role.view"]),
+            ("系统配置", ["config.update", "ticket.assignment_rule.update", "ticket.sla_rule.update"]),
+        ],
+    },
+    {
+        "role_name": DESIGN_ROLE_NAME,
+        "must_have": [
+            ("设计待办处理", ["ticket.view", "ticket.update", "ticket.comment"]),
+        ],
+        "must_not_have": [
+            ("导出全量数据", ["ticket.export", "schedule.export"]),
+            ("排班管理", ["schedule.view", "schedule.update"]),
+            ("账号管理", ["account.view"]),
+            ("配置中心", ["config.view", "config.update"]),
+            ("永久删除", ["ticket.hard_delete"]),
+        ],
+    },
+    {
         "role_name": OPERATIONS_ROLE_NAME,
         "must_have": [
             ("工单管理", ["ticket.view", "ticket.assign"]),
             ("工单处理", ["ticket.update", "ticket.comment"]),
             ("工单看板", ["ticket.view"]),
+            ("排班看板", ["schedule.view"]),
+            ("规则查看", ["ticket.assignment_rule.view", "ticket.sla_rule.view", "ticket.template.view"]),
         ],
         "must_not_have": [
             ("账号管理", ["account.view"]),
@@ -3977,44 +4504,52 @@ ROLE_ACCEPTANCE_REQUIREMENTS: List[Dict[str, object]] = [
         ],
     },
     {
-        "role_name": "商品采购",
+        "role_name": REGIONAL_MANAGER_ROLE_NAME,
         "must_have": [
-            ("工单处理", ["ticket.view", "ticket.update", "ticket.comment"]),
-            ("我的待办", ["ticket.view"]),
-        ],
-        "must_not_have": [
-            ("排班管理", ["schedule.view", "schedule.create", "schedule.update"]),
-            ("员工管理", ["employee.view", "employee.update"]),
-            ("账号管理", ["account.view"]),
-        ],
-    },
-    {
-        "role_name": "排班管理员",
-        "must_have": [
-            ("人员排班视图", ["schedule.view", "employee.view"]),
-            ("班次设置", ["shift.view", "shift.create", "shift.update"]),
-            ("门店排班", ["schedule.create", "schedule.update"]),
-            ("排班看板", ["schedule.view"]),
+            ("区域工单查看", ["ticket.view"]),
+            ("区域排班查看", ["schedule.view"]),
+            ("区域人员查看", ["employee.view"]),
+            ("评论督办", ["ticket.comment"]),
         ],
         "must_not_have": [
             ("账号管理", ["account.view"]),
-            ("永久删除工单", ["ticket.hard_delete"]),
+            ("角色权限", ["role.view", "role.update"]),
+            ("全局配置", ["config.update", "ticket.assignment_rule.update", "ticket.sla_rule.update"]),
+            ("永久删除", ["ticket.hard_delete"]),
         ],
     },
     {
-        "role_name": "只读账号",
-        "must_have_label": "应能查看",
-        "must_not_label": "不应看到",
+        "role_name": STORE_MANAGER_ROLE_NAME,
         "must_have": [
-            ("被授权数据", ["ticket.view", "schedule.view", "employee.view", "shift.view", "embedded.view"]),
+            ("本店工单", ["ticket.view"]),
+            ("提交/补充工单", ["ticket.create", "ticket.comment"]),
+            ("本店排班", ["schedule.view"]),
         ],
         "must_not_have": [
-            ("新增", ["ticket.create", "employee.create", "shift.create", "embedded.create", "role.create"]),
-            ("编辑", ["ticket.update", "employee.update", "shift.update", "embedded.update", "config.update"]),
-            ("删除", ["ticket.delete", "ticket.hard_delete", "employee.delete", "shift.delete", "embedded.delete"]),
+            ("账号管理", ["account.view"]),
+            ("角色权限", ["role.view", "role.update"]),
+            ("配置中心", ["config.view", "config.update"]),
+            ("删除工单", ["ticket.delete", "ticket.hard_delete"]),
+        ],
+    },
+    {
+        "role_name": STORE_STAFF_ROLE_NAME,
+        "must_have": [],
+        "must_not_have": [
+            ("后台登录权限", ["ticket.view", "schedule.view", "account.view", "role.view"]),
+            ("处理工单", ["ticket.update", "ticket.assign"]),
             ("导出", ["ticket.export", "schedule.export"]),
-            ("排班保存", ["schedule.create", "schedule.update", "schedule.delete", "schedule.copy"]),
-            ("权限设置", ["role.update"]),
+            ("删除", ["ticket.delete", "ticket.hard_delete"]),
+        ],
+    },
+    {
+        "role_name": PART_TIME_ROLE_NAME,
+        "must_have": [],
+        "must_not_have": [
+            ("后台登录权限", ["ticket.view", "schedule.view", "account.view", "role.view"]),
+            ("经营数据", ["ticket.export", "employee.view"]),
+            ("处理工单", ["ticket.update", "ticket.assign"]),
+            ("删除", ["ticket.delete", "ticket.hard_delete"]),
         ],
     },
 ]
@@ -12697,7 +13232,10 @@ def create_app() -> FastAPI:
         success: str = "",
         status_code: int = 200,
     ) -> HTMLResponse:
-        context = personnel_governance_context(request.query_params.get("filter", "unprocessed"))
+        context = personnel_governance_context(
+            request.query_params.get("filter", "unprocessed"),
+            request.query_params.get("tab", "matches"),
+        )
         context.update(
             {
                 "request": request,
@@ -15507,6 +16045,7 @@ def create_app() -> FastAPI:
             "unlinked": "人员与账号关联已解除。",
             "ignored": "疑似重复已忽略。",
             "unignored": "已取消忽略。",
+            "repaired": "历史员工异常已修复。",
         }
         return render_personnel_governance_page(request, admin, success=success_messages.get(success, ""))
 
@@ -15624,6 +16163,32 @@ def create_app() -> FastAPI:
             request,
         )
         return RedirectResponse(url="/admin/personnel-governance?success=unignored", status_code=303)
+
+    @app.post("/admin/personnel-governance/repair/employee/{employee_id}", response_class=HTMLResponse)
+    def repair_personnel_employee_governance(
+        request: Request,
+        employee_id: int,
+        current_user: Dict[str, object] = Depends(require_permission("account.update")),
+        csrf_token: str = Form(""),
+        action: str = Form(""),
+    ):
+        admin = str(current_user.get("username") or "")
+        require_admin_csrf(request, csrf_token)
+        try:
+            result = repair_historical_employee_anomaly(employee_id, action)
+        except ValueError as exc:
+            return render_personnel_governance_page(request, admin, error=form_error_message(exc), status_code=400)
+        except sqlite3.Error:
+            return render_personnel_governance_page(request, admin, error="历史员工异常修复失败，请稍后重试。", status_code=500)
+        record_operation_log(
+            admin,
+            f"personnel.repair.{result['action']}",
+            "employee",
+            employee_id,
+            result,
+            request,
+        )
+        return RedirectResponse(url="/admin/personnel-governance?tab=historical&success=repaired", status_code=303)
 
     @app.post("/admin/account/users", response_class=HTMLResponse)
     def create_admin_account(
@@ -16066,21 +16631,23 @@ def create_app() -> FastAPI:
         current_user: Dict[str, object] = Depends(require_permission("role.update")),
         csrf_token: str = Form(""),
         permissions: Optional[List[str]] = Form(None),
+        restore_defaults: str = Form(""),
     ):
         admin = str(current_user.get("username") or "")
         require_admin_csrf(request, csrf_token)
+        should_restore_defaults = restore_defaults == "1"
         try:
-            role = replace_admin_role_permissions(role_id, permissions or [])
+            role = replace_admin_role_permissions(role_id, permissions or [], restore_defaults=should_restore_defaults)
         except HTTPException as exc:
             return render_roles_page(request, admin, error=form_error_message(exc), status_code=exc.status_code)
         except sqlite3.Error:
             return render_roles_page(request, admin, error="角色权限保存失败，请稍后重试。", status_code=500)
         record_operation_log(
             admin,
-            "role.permissions.update",
+            "role.permissions.restore_default" if should_restore_defaults else "role.permissions.update",
             "admin_role",
             role_id,
-            {"role_name": role["role_name"], "permissions": role["permissions"]},
+            {"role_name": role["role_name"], "permissions": role["permissions"], "restore_defaults": should_restore_defaults},
             request,
         )
         record_operation_log(

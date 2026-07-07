@@ -19,6 +19,7 @@
 
 {% block topbar_actions %}
   <a class="ghost-button compact" href="/admin/personnel-governance">人员数据治理</a>
+  <a class="ghost-button compact" href="/admin/personnel-governance?tab=historical">历史员工异常修复</a>
   {% if can_create_account and not permission_denied %}
   <button class="primary-button compact" type="button" data-drawer-open="account-create">新增人员 / 新增账号</button>
   {% endif %}
@@ -45,7 +46,7 @@
     <dl class="detail-grid account-detail-grid">
       <div><dt>用户名</dt><dd>{{ current_user.username }}</dd></div>
       <div><dt>显示名</dt><dd>{{ current_user.display_name or current_user.username }}</dd></div>
-      <div><dt>角色</dt><dd><span class="role-badge">{{ current_user.role_name }}</span></dd></div>
+      <div><dt>系统权限角色</dt><dd><span class="role-badge">{{ current_user.role_name }}</span></dd></div>
       <div><dt>数据范围</dt><dd>{{ data_scope_label(current_user.data_scope) }}</dd></div>
       <div><dt>上次登录</dt><dd>{{ current_user.last_login_at or '暂无记录' }}</dd></div>
     </dl>
@@ -77,8 +78,8 @@
         <tr>
           <th>姓名</th>
           <th>登录账号</th>
-          <th>角色</th>
-          <th>岗位</th>
+          <th>系统权限角色</th>
+          <th>组织/岗位</th>
           <th>主门店</th>
           <th>绑定门店</th>
           <th>登录/排班/处理人</th>
@@ -169,7 +170,7 @@
       <div class="form-section-title">基础信息</div>
       <label><span>姓名</span><input name="employee_name" type="text" required></label>
       <label><span>手机</span><input name="phone" type="text"></label>
-      <label><span>岗位</span><input name="employee_role" type="text" placeholder="店长、店员、采购专员"></label>
+      <label><span>组织/岗位</span><input name="employee_role" type="text" placeholder="店长、店员、采购、财务、设计"></label>
       <label>
         <span>主门店</span>
         <select name="primary_store_name">
@@ -193,7 +194,7 @@
       <label><span>初始密码</span><input name="password" type="password" minlength="6" autocomplete="new-password"></label>
       <label><span>确认密码</span><input name="password_confirm" type="password" minlength="6" autocomplete="new-password"></label>
       <label>
-        <span>角色</span>
+        <span>系统权限角色</span>
         <select name="role_id">
           <option value="0">不允许登录可不选</option>
           {% for role in roles %}<option value="{{ role.id }}">{{ role.role_name }}</option>{% endfor %}
@@ -246,7 +247,7 @@
       <div class="form-section-title">基础信息</div>
       <label><span>姓名</span><input name="employee_name" type="text" value="{{ user.person_name or user.display_name or user.username }}" required></label>
       <label><span>手机</span><input name="phone" type="text" value="{{ user.phone }}"></label>
-      <label><span>岗位</span><input name="employee_role" type="text" value="{{ user.employee_role }}"></label>
+      <label><span>组织/岗位</span><input name="employee_role" type="text" value="{{ user.employee_role }}"></label>
       <label>
         <span>主门店</span>
         <select name="primary_store_name">
@@ -271,7 +272,7 @@
       <input type="hidden" name="username" value="{{ user.username }}">
       <label><span>登录账号</span><input type="text" value="{{ user.username }}" disabled></label>
       <label>
-        <span>角色</span>
+        <span>系统权限角色</span>
         <select name="role_id">
           {% for role in roles %}
           <option value="{{ role.id }}" {% if role.id == user.role_id %}selected{% endif %}>{{ role.role_name }}</option>
