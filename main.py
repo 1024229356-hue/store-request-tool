@@ -10994,6 +10994,419 @@ def dashboard_handler_rows(tickets: List[Dict[str, object]]) -> List[Dict[str, o
     return sorted(result, key=lambda item: (-int(item["count"]), str(item["label"])))
 
 
+def dashboard_parse_int_values(values: Iterable[object]) -> List[int]:
+    parsed: List[int] = []
+    for value in values:
+        text = str(value or "").strip()
+        if not text or text == "custom":
+            continue
+        try:
+            number = int(text)
+        except ValueError:
+            continue
+        if number > 0 and number not in parsed:
+            parsed.append(number)
+    return parsed
+
+
+def normalize_dashboard_schedule_filters(
+    query_values: Dict[str, List[str]],
+    base_filters: Dict[str, object],
+) -> Dict[str, object]:
+    shift_values = unique_clean_values(query_values.get("shift_type_ids") or [])
+    return {
+        "date_start": str(base_filters.get("date_start") or "").strip(),
+        "date_end": str(base_filters.get("date_end") or "").strip(),
+        "store_names": filter_values(base_filters, "store_names"),
+        "employee_ids": dashboard_parse_int_values(query_values.get("employee_ids") or []),
+        "shift_type_ids": dashboard_parse_int_values(shift_values),
+        "include_custom_shift": "custom" in shift_values,
+        "schedule_custom": first_filter_value({"schedule_custom": query_values.get("schedule_custom") or []}, "schedule_custom"),
+        "schedule_abnormal": first_filter_value({"schedule_abnormal": query_values.get("schedule_abnormal") or []}, "schedule_abnormal"),
+    }
+
+
+def empty_schedule_operations_stats() -> Dict[str, object]:
+    summary = {
+        "schedule_count": 0,
+        "employee_count": 0,
+        "total_hours": 0,
+        "scheduled_until_today_hours": 0,
+        "rest_shift_count": 0,
+        "custom_shift_count": 0,
+        "custom_hours": 0,
+        "conflict_schedule_count": 0,
+        "conflict_pair_count": 0,
+        "warning_count": 0,
+        "daily_over_10_count": 0,
+        "daily_over_12_count": 0,
+        "continuous_over_6_employee_count": 0,
+        "cross_store_employee_count": 0,
+        "missing_time_count": 0,
+    }
+    return {
+        "summary": summary,
+        "summary_cards": [
+            {"label": "排班人次", "value": 0, "hint": "筛选周期内"},
+            {"label": "排班人数", "value": 0, "hint": "去重员工"},
+            {"label": "总排班工时", "value": 0, "hint": "小时"},
+            {"label": "截至今日已排工时", "value": 0, "hint": "date <= 今天"},
+            {"label": "休息班次数", "value": 0, "hint": "不计入工时"},
+            {"label": "自定义/加班班次数", "value": 0, "hint": "自定义时间"},
+            {"label": "自定义/加班工时", "value": 0, "hint": "小时"},
+            {"label": "冲突排班数", "value": 0, "hint": "时间重叠排班"},
+            {"label": "工时异常数", "value": 0, "hint": "超工时/连续/缺时间"},
+            {"label": "跨店排班人数", "value": 0, "hint": "同日多门店"},
+        ],
+        "store_rank": [],
+        "employee_rank": [],
+        "shift_distribution": [],
+        "abnormal_items": [],
+        "custom_rows": [],
+        "rows": [],
+    }
+
+
+def schedule_date_range_days(start_date: str, end_date: str) -> int:
+    try:
+        start = datetime.strptime(start_date, "%Y-%m-%d").date()
+        end = datetime.strptime(end_date, "%Y-%m-%d").date()
+    except ValueError:
+        return 1
+    return max((end - start).days + 1, 1)
+
+
+def schedule_store_meta_map() -> Dict[str, Dict[str, object]]:
+    return {str(row.get("store_name") or ""): row for row in fetch_managed_store_rows(include_disabled=True)}
+
+
+def schedule_employee_meta_map(employee_ids: Iterable[int], visible_store_names: Optional[List[str]] = None) -> Dict[int, Dict[str, object]]:
+    ids = [int(employee_id) for employee_id in employee_ids if int(employee_id) > 0]
+    if not ids:
+        return {}
+    placeholders = ",".join("?" for _ in ids)
+    with get_connection() as connection:
+        rows = connection.execute(
+            f"""
+            SELECT
+                employees.id, employees.employee_name, employees.store_name, employees.primary_store_name,
+                employees.user_id, employees.allow_login, employees.participate_schedule,
+                employees.role, employees.phone, employees.status,
+                employees.archived_at, employees.archived_by, employees.archive_reason,
+                employees.deleted_at, employees.deleted_by, employees.delete_reason,
+                employees.created_at, employees.updated_at
+            FROM employees
+            WHERE employees.id IN ({placeholders})
+            """,
+            ids,
+        ).fetchall()
+        employees = attach_employee_store_bindings(connection, rows)
+    visible_set = set(visible_store_names or [])
+    result: Dict[int, Dict[str, object]] = {}
+    for employee in employees:
+        employee_id = int(employee["id"])
+        store_names = list(employee.get("store_names") or [])
+        if visible_set:
+            store_names = [store_name for store_name in store_names if store_name in visible_set]
+        employee["store_names"] = store_names
+        employee["store_names_text"] = join_display_values(store_names)
+        result[employee_id] = employee
+    return result
+
+
+def schedule_row_is_missing_time(row: Dict[str, object]) -> bool:
+    if schedule_validation_service.is_rest_schedule(row):
+        return False
+    has_start = bool(str(row.get("start_time") or row.get("custom_start_time") or "").strip())
+    has_end = bool(str(row.get("end_time") or row.get("custom_end_time") or "").strip())
+    try:
+        duration = float(row.get("duration_hours") or row.get("custom_duration_hours") or 0)
+    except (TypeError, ValueError):
+        duration = 0.0
+    return duration > 0 and not (has_start and has_end)
+
+
+def schedule_employee_warning_summary(rows: List[Dict[str, object]]) -> Dict[int, Dict[str, object]]:
+    by_employee: Dict[int, List[Dict[str, object]]] = {}
+    for row in rows:
+        by_employee.setdefault(int(row.get("employee_id") or 0), []).append(row)
+    summary: Dict[int, Dict[str, object]] = {}
+    month = str(rows[0].get("schedule_date") or datetime.now().strftime("%Y-%m"))[:7] if rows else datetime.now().strftime("%Y-%m")
+    for employee_id, employee_rows in by_employee.items():
+        warnings = schedule_validation_service.build_schedule_warnings(employee_id, month, employee_rows)
+        daily_over_10 = 0
+        daily_over_12 = 0
+        continuous = False
+        cross_store_dates: set[str] = set()
+        for warning in warnings:
+            warning_type = str(warning.get("type") or "")
+            level = str(warning.get("level") or "")
+            if warning_type == "daily_hours_high" and level == "danger":
+                daily_over_12 += 1
+            elif warning_type == "daily_hours_high":
+                daily_over_10 += 1
+            elif warning_type == "continuous_days":
+                continuous = True
+            elif warning_type == "cross_store":
+                cross_store_dates.add(str(warning.get("date") or ""))
+        summary[employee_id] = {
+            "warnings": warnings,
+            "daily_over_10": daily_over_10,
+            "daily_over_12": daily_over_12,
+            "continuous_over_6": continuous,
+            "cross_store_dates": cross_store_dates,
+        }
+    return summary
+
+
+def schedule_row_has_abnormal(row: Dict[str, object]) -> bool:
+    return bool(
+        row.get("has_conflict")
+        or row.get("missing_time")
+        or any(str(warning.get("type") or "") != "custom_time" for warning in row.get("warnings") or [])
+    )
+
+
+def fetch_schedule_operations_stats(filters: Dict[str, object]) -> Dict[str, object]:
+    start_date = str(filters.get("date_start") or "").strip()
+    end_date = str(filters.get("date_end") or "").strip()
+    store_names = filter_values(filters, "store_names")
+    if not start_date or not end_date or not store_names:
+        return empty_schedule_operations_stats()
+    rows = fetch_schedule_rows_between(
+        start_date,
+        end_date,
+        store_names,
+        employee_ids=[int(value) for value in filters.get("employee_ids") or [] if int(value) > 0],
+        shift_type_ids=[int(value) for value in filters.get("shift_type_ids") or [] if int(value) > 0],
+        include_custom_shift=bool(filters.get("include_custom_shift")),
+    )
+    custom_filter = str(filters.get("schedule_custom") or "").strip()
+    if custom_filter == "custom":
+        rows = [row for row in rows if int(row.get("is_custom_time") or 0) == 1]
+    elif custom_filter == "standard":
+        rows = [row for row in rows if int(row.get("is_custom_time") or 0) != 1]
+    quality = schedule_validation_service.build_schedule_quality(rows, start_date[:7] or datetime.now().strftime("%Y-%m"))
+    rows = list(quality["rows"])
+    warning_summary = schedule_employee_warning_summary(rows)
+    for row in rows:
+        row["missing_time"] = schedule_row_is_missing_time(row)
+        row["is_rest"] = schedule_validation_service.is_rest_schedule(row)
+        row["is_abnormal"] = schedule_row_has_abnormal(row)
+    if str(filters.get("schedule_abnormal") or "").strip() == "abnormal":
+        rows = [row for row in rows if row.get("is_abnormal")]
+    employee_meta = schedule_employee_meta_map([int(row.get("employee_id") or 0) for row in rows], store_names)
+    store_meta = schedule_store_meta_map()
+    today_text = datetime.now().date().isoformat()
+    active_rows = [row for row in rows if not row.get("is_rest")]
+    total_hours = round(sum(float(row.get("duration_hours") or 0) for row in active_rows), 2)
+    scheduled_until_today_hours = round(
+        sum(float(row.get("duration_hours") or 0) for row in active_rows if str(row.get("schedule_date") or "") <= today_text),
+        2,
+    )
+    custom_rows = [row for row in active_rows if int(row.get("is_custom_time") or 0) == 1]
+    daily_over_10_count = sum(int(item.get("daily_over_10") or 0) for item in warning_summary.values())
+    daily_over_12_count = sum(int(item.get("daily_over_12") or 0) for item in warning_summary.values())
+    continuous_employee_count = sum(1 for item in warning_summary.values() if item.get("continuous_over_6"))
+    cross_store_employee_count = sum(1 for item in warning_summary.values() if item.get("cross_store_dates"))
+    missing_time_count = sum(1 for row in rows if row.get("missing_time"))
+    conflict_schedule_count = sum(1 for row in rows if row.get("has_conflict"))
+    summary = {
+        "schedule_count": len(rows),
+        "employee_count": len({int(row["employee_id"]) for row in rows}) if rows else 0,
+        "total_hours": total_hours,
+        "scheduled_until_today_hours": scheduled_until_today_hours,
+        "rest_shift_count": sum(1 for row in rows if row.get("is_rest")),
+        "custom_shift_count": len(custom_rows),
+        "custom_hours": round(sum(float(row.get("duration_hours") or 0) for row in custom_rows), 2),
+        "conflict_schedule_count": conflict_schedule_count,
+        "conflict_pair_count": int(quality.get("conflict_count") or 0),
+        "warning_count": daily_over_10_count + daily_over_12_count + continuous_employee_count + missing_time_count,
+        "daily_over_10_count": daily_over_10_count,
+        "daily_over_12_count": daily_over_12_count,
+        "continuous_over_6_employee_count": continuous_employee_count,
+        "cross_store_employee_count": cross_store_employee_count,
+        "missing_time_count": missing_time_count,
+    }
+    day_count = schedule_date_range_days(start_date, end_date)
+    store_acc: Dict[str, Dict[str, object]] = {}
+    for row in rows:
+        store_name = str(row.get("store_name") or "未设置门店")
+        meta = store_meta.get(store_name, {})
+        store_row = store_acc.setdefault(
+            store_name,
+            {
+                "store_name": store_name,
+                "employee_ids": set(),
+                "schedule_count": 0,
+                "total_hours": 0.0,
+                "custom_hours": 0.0,
+                "abnormal_count": 0,
+                "conflict_count": 0,
+                "is_disabled": bool(meta and (int(meta.get("enabled") or 0) != 1 or str(meta.get("status") or "") == "闭店")),
+                "status": str(meta.get("status") or ""),
+            },
+        )
+        store_row["employee_ids"].add(int(row.get("employee_id") or 0))
+        store_row["schedule_count"] = int(store_row["schedule_count"]) + 1
+        if not row.get("is_rest"):
+            store_row["total_hours"] = round(float(store_row["total_hours"]) + float(row.get("duration_hours") or 0), 2)
+        if int(row.get("is_custom_time") or 0) == 1:
+            store_row["custom_hours"] = round(float(store_row["custom_hours"]) + float(row.get("duration_hours") or 0), 2)
+        if row.get("is_abnormal"):
+            store_row["abnormal_count"] = int(store_row["abnormal_count"]) + 1
+        if row.get("has_conflict"):
+            store_row["conflict_count"] = int(store_row["conflict_count"]) + 1
+    store_rank: List[Dict[str, object]] = []
+    for store_row in store_acc.values():
+        total_store_hours = float(store_row["total_hours"])
+        store_rank.append(
+            {
+                "store_name": store_row["store_name"],
+                "employee_count": len(store_row["employee_ids"]),
+                "schedule_count": int(store_row["schedule_count"]),
+                "total_hours": round(total_store_hours, 2),
+                "custom_hours": round(float(store_row["custom_hours"]), 2),
+                "abnormal_count": int(store_row["abnormal_count"]),
+                "conflict_count": int(store_row["conflict_count"]),
+                "average_daily_hours": round(total_store_hours / day_count, 2),
+                "is_disabled": bool(store_row["is_disabled"]),
+                "status": store_row["status"],
+            }
+        )
+    store_rank.sort(key=lambda row: (-float(row["total_hours"]), str(row["store_name"])))
+    employee_acc: Dict[int, Dict[str, object]] = {}
+    rows_by_employee_date: Dict[Tuple[int, str], List[Dict[str, object]]] = {}
+    for row in rows:
+        employee_id = int(row.get("employee_id") or 0)
+        date_text = str(row.get("schedule_date") or "")
+        rows_by_employee_date.setdefault((employee_id, date_text), []).append(row)
+        meta = employee_meta.get(employee_id, {})
+        employee_row = employee_acc.setdefault(
+            employee_id,
+            {
+                "employee_id": employee_id,
+                "employee_name": str(meta.get("employee_name") or row.get("employee_name") or employee_id),
+                "primary_store": str(meta.get("primary_store_name") or meta.get("store_name") or ""),
+                "store_names": list(meta.get("store_names") or []),
+                "store_names_text": str(meta.get("store_names_text") or ""),
+                "employee_status": str(meta.get("status") or row.get("employee_status") or ""),
+                "is_inactive": bool(
+                    str(meta.get("status") or row.get("employee_status") or "") != "在职"
+                    or int(meta.get("participate_schedule") if meta else row.get("participate_schedule") or 1) != 1
+                    or meta.get("archived_at")
+                    or meta.get("deleted_at")
+                ),
+                "schedule_dates": set(),
+                "total_hours": 0.0,
+                "custom_hours": 0.0,
+            },
+        )
+        if not row.get("is_rest"):
+            employee_row["schedule_dates"].add(date_text)
+            employee_row["total_hours"] = round(float(employee_row["total_hours"]) + float(row.get("duration_hours") or 0), 2)
+        if int(row.get("is_custom_time") or 0) == 1:
+            employee_row["custom_hours"] = round(float(employee_row["custom_hours"]) + float(row.get("duration_hours") or 0), 2)
+    employee_rank: List[Dict[str, object]] = []
+    for employee_id, employee_row in employee_acc.items():
+        warning_item = warning_summary.get(employee_id, {})
+        cross_store_count = 0
+        for (_employee_id, _date_text), day_rows in rows_by_employee_date.items():
+            if _employee_id != employee_id:
+                continue
+            active_store_names = unique_clean_values(row.get("store_name") for row in day_rows if not row.get("is_rest"))
+            if len(active_store_names) > 1:
+                cross_store_count += 1
+        employee_rank.append(
+            {
+                "employee_id": employee_id,
+                "employee_name": employee_row["employee_name"],
+                "primary_store": employee_row["primary_store"],
+                "store_names_text": employee_row["store_names_text"],
+                "schedule_day_count": len(employee_row["schedule_dates"]),
+                "total_hours": round(float(employee_row["total_hours"]), 2),
+                "custom_hours": round(float(employee_row["custom_hours"]), 2),
+                "daily_over_10_count": int(warning_item.get("daily_over_10") or 0),
+                "daily_over_12_count": int(warning_item.get("daily_over_12") or 0),
+                "continuous_over_6": bool(warning_item.get("continuous_over_6")),
+                "cross_store_count": cross_store_count,
+                "employee_status": employee_row["employee_status"],
+                "is_inactive": bool(employee_row["is_inactive"]),
+            }
+        )
+    employee_rank.sort(key=lambda row: (-float(row["total_hours"]), str(row["employee_name"])))
+    shift_acc: Dict[str, Dict[str, object]] = {}
+    for row in rows:
+        shift_name = str(row.get("shift_name") or "未设置班次")
+        shift_row = shift_acc.setdefault(
+            shift_name,
+            {"shift_name": shift_name, "count": 0, "total_hours": 0.0, "is_custom": False, "is_rest": False},
+        )
+        shift_row["count"] = int(shift_row["count"]) + 1
+        if not row.get("is_rest"):
+            shift_row["total_hours"] = round(float(shift_row["total_hours"]) + float(row.get("duration_hours") or 0), 2)
+        shift_row["is_custom"] = bool(shift_row["is_custom"] or int(row.get("is_custom_time") or 0) == 1)
+        shift_row["is_rest"] = bool(shift_row["is_rest"] or row.get("is_rest"))
+    shift_distribution = [
+        {
+            "shift_name": row["shift_name"],
+            "count": int(row["count"]),
+            "total_hours": round(float(row["total_hours"]), 2),
+            "percent": percent_value(int(row["count"]), max(len(rows), 1)),
+            "is_custom": bool(row["is_custom"]),
+            "is_rest": bool(row["is_rest"]),
+        }
+        for row in shift_acc.values()
+    ]
+    shift_distribution.sort(key=lambda row: (-int(row["count"]), str(row["shift_name"])))
+    abnormal_items = [
+        {"label": "时间冲突数量", "count": summary["conflict_pair_count"], "level": "danger"},
+        {"label": "单日超 10 小时数量", "count": summary["daily_over_10_count"], "level": "warning"},
+        {"label": "单日超 12 小时数量", "count": summary["daily_over_12_count"], "level": "danger"},
+        {"label": "连续排班超过 6 天人数", "count": summary["continuous_over_6_employee_count"], "level": "warning"},
+        {"label": "跨店排班人数", "count": summary["cross_store_employee_count"], "level": "info"},
+        {"label": "缺少时间段无法判断冲突数量", "count": summary["missing_time_count"], "level": "muted"},
+    ]
+    recent_custom_rows = sorted(custom_rows, key=lambda row: (str(row.get("schedule_date") or ""), int(row.get("id") or 0)), reverse=True)[:10]
+    result = empty_schedule_operations_stats()
+    result.update(
+        {
+            "summary": summary,
+            "summary_cards": [
+                {"label": "排班人次", "value": summary["schedule_count"], "hint": "筛选周期内"},
+                {"label": "排班人数", "value": summary["employee_count"], "hint": "去重员工"},
+                {"label": "总排班工时", "value": summary["total_hours"], "hint": "小时"},
+                {"label": "截至今日已排工时", "value": summary["scheduled_until_today_hours"], "hint": "date <= 今天"},
+                {"label": "休息班次数", "value": summary["rest_shift_count"], "hint": "不计入工时"},
+                {"label": "自定义/加班班次数", "value": summary["custom_shift_count"], "hint": "自定义时间"},
+                {"label": "自定义/加班工时", "value": summary["custom_hours"], "hint": "小时"},
+                {"label": "冲突排班数", "value": summary["conflict_schedule_count"], "hint": "时间重叠排班"},
+                {"label": "工时异常数", "value": summary["warning_count"], "hint": "超工时/连续/缺时间"},
+                {"label": "跨店排班人数", "value": summary["cross_store_employee_count"], "hint": "同日多门店"},
+            ],
+            "store_rank": store_rank,
+            "employee_rank": employee_rank,
+            "shift_distribution": shift_distribution,
+            "abnormal_items": abnormal_items,
+            "custom_rows": recent_custom_rows,
+            "rows": rows,
+        }
+    )
+    return result
+
+
+def dashboard_schedule_employee_options(store_names: List[str]) -> List[Dict[str, object]]:
+    employees = fetch_employees("", "", scope="all")
+    store_set = set(store_names)
+    options = []
+    for employee in employees:
+        employee_stores = set(employee.get("store_names") or [])
+        if store_set and not (employee_stores & store_set):
+            continue
+        options.append(employee)
+    return sorted(options, key=employee_sort_key)
+
+
 def fetch_dashboard_stats(filters: Dict[str, object]) -> Dict[str, object]:
     config = load_app_config()
     tickets = fetch_tickets(filters, "newest", config)
@@ -13593,6 +14006,10 @@ def create_app() -> FastAPI:
             "status": request.query_params.getlist("status"),
             "statuses": request.query_params.getlist("statuses"),
             "handlers": request.query_params.getlist("handlers"),
+            "employee_ids": request.query_params.getlist("employee_ids"),
+            "shift_type_ids": request.query_params.getlist("shift_type_ids"),
+            "schedule_custom": request.query_params.getlist("schedule_custom"),
+            "schedule_abnormal": request.query_params.getlist("schedule_abnormal"),
         }
         filters = normalize_dashboard_filters(
             query_values,
@@ -13615,6 +14032,25 @@ def create_app() -> FastAPI:
         allowed_stores = dashboard_allowed_stores(current_user, config)
         if normalize_admin_data_scope(str(current_user.get("data_scope") or "all")) == "stores":
             filters["store_names"] = [store for store in filter_values(scoped_filters, "store_names") if store in allowed_stores]
+        can_view_schedule_dashboard = permission_service.has_permission(current_user, "schedule.view")
+        schedule_filters = normalize_dashboard_schedule_filters(query_values, filters)
+        schedule_stats = empty_schedule_operations_stats()
+        schedule_store_options = allowed_stores
+        schedule_employee_options: List[Dict[str, object]] = []
+        schedule_shift_options: List[Dict[str, object]] = []
+        if can_view_schedule_dashboard:
+            requested_schedule_stores = filter_values(schedule_filters, "store_names") or schedule_store_options
+            schedule_scope = apply_data_scope(
+                {"__scope_kind": "schedule", "store_names": requested_schedule_stores, "is_all_stores": False},
+                current_user,
+            )
+            if schedule_scope.get("__scope_no_rows"):
+                schedule_filters["store_names"] = []
+            else:
+                schedule_filters["store_names"] = list(schedule_scope.get("store_names") or requested_schedule_stores)
+            schedule_stats = fetch_schedule_operations_stats(schedule_filters)
+            schedule_employee_options = dashboard_schedule_employee_options(schedule_store_options)
+            schedule_shift_options = fetch_shift_types(active_only=False, store_names=schedule_store_options or None, global_scope="all")
         return templates.TemplateResponse(
             request,
             "dashboard.html",
@@ -13625,6 +14061,11 @@ def create_app() -> FastAPI:
                 "statuses": config.statuses,
                 "handlers": config.handlers,
                 "filters": filters,
+                "schedule_filters": schedule_filters,
+                "schedule_stats": schedule_stats,
+                "can_view_schedule_dashboard": can_view_schedule_dashboard,
+                "schedule_employee_options": schedule_employee_options,
+                "schedule_shift_options": schedule_shift_options,
                 "stats": stats,
                 "today_label": datetime.now().strftime("%Y-%m-%d"),
                 "admin_user": str(current_user.get("username") or ""),

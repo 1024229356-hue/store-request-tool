@@ -7941,6 +7941,201 @@ def test_p4a_dashboard_filters_rankings_and_data_scope(tmp_path, monkeypatch):
     assert "P4A 南昌隐藏" not in assigned_dashboard.text
 
 
+def test_p4b_schedule_dashboard_permission_and_scope(tmp_path, monkeypatch):
+    client, _main = build_client(tmp_path, monkeypatch, admin_users="regional-admin:very-secret-value,ticketonly:123456")
+    ticket_only_role = create_role_with_permissions(tmp_path, "p4b-ticket-only-dashboard", ["ticket.view"])
+    update_admin_user_access(tmp_path, "ticketonly", ticket_only_role)
+
+    assert_login_success(login_admin(client, "ticketonly", "123456"))
+    dashboard = client.get("/admin/dashboard")
+
+    assert dashboard.status_code == 200
+    assert "工单运营看板" in dashboard.text
+    assert "排班运营看板" not in dashboard.text
+    assert "门店工时排行" not in dashboard.text
+
+
+def test_p4b_schedule_dashboard_metrics_rankings_and_data_scope(tmp_path, monkeypatch):
+    client, main = build_client(
+        tmp_path,
+        monkeypatch,
+        admin_users="regional-admin:very-secret-value,storeviewer:123456",
+    )
+    store_role = create_role_with_permissions(tmp_path, "p4b-store-schedule-dashboard", ["ticket.view", "schedule.view"])
+    update_admin_user_access(tmp_path, "storeviewer", store_role, data_scope="stores", store_names="南京门东店")
+    logged_in_client(client)
+
+    today = date.today()
+    days = [(today + timedelta(days=offset)).isoformat() for offset in range(7)]
+    end_date = days[-1]
+
+    create_schedule_employee(client, "P4B 张三", store_names=["南京门东店", "南昌万寿宫店"])
+    create_schedule_employee(client, "P4B 李四", store_name="南京门东店")
+    create_schedule_employee(client, "P4B 离职历史", store_name="南京门东店")
+    create_schedule_employee(client, "P4B 缺时间", store_name="南京门东店")
+    employee_ids = {row["employee_name"]: row["id"] for row in rows_for(tmp_path, "employees")}
+    missing_shift_id = main.create_shift_type("P4B 无时间班", "", "", "8", "#64748b", store_name="南京门东店", config=main.load_app_config())
+
+    timestamp = f"{today.isoformat()} 09:00:00"
+
+    def insert_schedule(store_name, employee_name, schedule_date, shift_type_id=1, *, note="", custom_label="", custom_start="", custom_end="", custom_hours=None):
+        is_custom = 1 if custom_label else 0
+        with sqlite3.connect(tmp_path / "tickets.db") as connection:
+            connection.execute(
+                """
+                INSERT INTO store_schedules (
+                    store_name, employee_id, schedule_date, shift_type_id, note,
+                    is_custom_time, custom_start_time, custom_end_time, custom_duration_hours, custom_label,
+                    created_by, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    store_name,
+                    employee_ids[employee_name],
+                    schedule_date,
+                    int(shift_type_id),
+                    note,
+                    is_custom,
+                    custom_start,
+                    custom_end,
+                    custom_hours,
+                    custom_label,
+                    "pytest",
+                    timestamp,
+                    timestamp,
+                ),
+            )
+
+    insert_schedule("南京门东店", "P4B 张三", days[0], note="南京早班")
+    insert_schedule("南昌万寿宫店", "P4B 张三", days[0], note="跨店冲突")
+    for schedule_date in days[1:]:
+        insert_schedule("南京门东店", "P4B 张三", schedule_date, note="连续排班")
+    insert_schedule("南京门东店", "P4B 李四", days[0], shift_type_id=0, custom_label="P4B 加班", custom_start="18:00", custom_end="21:00", custom_hours=3)
+    insert_schedule("南京门东店", "P4B 李四", days[1], shift_type_id=4, note="休息")
+    insert_schedule("南京门东店", "P4B 李四", days[2], shift_type_id=0, custom_label="P4B 长工时", custom_start="09:00", custom_end="20:30", custom_hours=11.5)
+    insert_schedule("南京门东店", "P4B 离职历史", days[2], note="历史排班")
+    insert_schedule("南京门东店", "P4B 缺时间", days[3], shift_type_id=missing_shift_id, note="缺少时间段")
+
+    with sqlite3.connect(tmp_path / "tickets.db") as connection:
+        connection.execute("UPDATE employees SET status = '离职', participate_schedule = 0 WHERE employee_name = ?", ("P4B 离职历史",))
+        connection.execute("UPDATE stores SET enabled = 0, status = '闭店' WHERE store_name = ?", ("南京门东店",))
+
+    stats = main.fetch_schedule_operations_stats(
+        {
+            "date_start": days[0],
+            "date_end": end_date,
+            "store_names": ["南京门东店", "南昌万寿宫店"],
+        }
+    )
+    summary = stats["summary"]
+    assert summary["schedule_count"] == 13
+    assert summary["employee_count"] == 4
+    assert summary["total_hours"] == 94.5
+    assert summary["scheduled_until_today_hours"] == 19
+    assert summary["rest_shift_count"] == 1
+    assert summary["custom_shift_count"] == 2
+    assert summary["custom_hours"] == 14.5
+    assert summary["conflict_schedule_count"] == 2
+    assert summary["daily_over_10_count"] == 1
+    assert summary["daily_over_12_count"] == 1
+    assert summary["continuous_over_6_employee_count"] == 1
+    assert summary["cross_store_employee_count"] == 1
+    assert summary["missing_time_count"] == 1
+
+    store_rank = {row["store_name"]: row for row in stats["store_rank"]}
+    assert store_rank["南京门东店"]["schedule_count"] == 12
+    assert store_rank["南京门东店"]["total_hours"] == 86.5
+    assert store_rank["南京门东店"]["is_disabled"] is True
+    assert store_rank["南昌万寿宫店"]["total_hours"] == 8
+
+    employee_rank = {row["employee_name"]: row for row in stats["employee_rank"]}
+    assert employee_rank["P4B 张三"]["total_hours"] == 64
+    assert employee_rank["P4B 张三"]["continuous_over_6"] is True
+    assert employee_rank["P4B 张三"]["cross_store_count"] == 1
+    assert employee_rank["P4B 李四"]["custom_hours"] == 14.5
+    assert employee_rank["P4B 离职历史"]["is_inactive"] is True
+
+    shift_distribution = {row["shift_name"]: row for row in stats["shift_distribution"]}
+    assert shift_distribution["早班"]["count"] == 9
+    assert shift_distribution["休息"]["is_rest"] is True
+    assert shift_distribution["P4B 加班"]["is_custom"] is True
+
+    li_stats = main.fetch_schedule_operations_stats(
+        {
+            "date_start": days[0],
+            "date_end": end_date,
+            "store_names": ["南京门东店", "南昌万寿宫店"],
+            "employee_ids": [employee_ids["P4B 李四"]],
+        }
+    )
+    assert li_stats["summary"]["schedule_count"] == 3
+    assert li_stats["summary"]["total_hours"] == 14.5
+    rest_stats = main.fetch_schedule_operations_stats(
+        {
+            "date_start": days[0],
+            "date_end": end_date,
+            "store_names": ["南京门东店", "南昌万寿宫店"],
+            "shift_type_ids": [4],
+        }
+    )
+    assert rest_stats["summary"]["schedule_count"] == 1
+    assert rest_stats["summary"]["total_hours"] == 0
+    custom_stats = main.fetch_schedule_operations_stats(
+        {
+            "date_start": days[0],
+            "date_end": end_date,
+            "store_names": ["南京门东店", "南昌万寿宫店"],
+            "schedule_custom": "custom",
+        }
+    )
+    assert custom_stats["summary"]["schedule_count"] == 2
+    assert custom_stats["summary"]["custom_hours"] == 14.5
+    abnormal_stats = main.fetch_schedule_operations_stats(
+        {
+            "date_start": days[0],
+            "date_end": end_date,
+            "store_names": ["南京门东店", "南昌万寿宫店"],
+            "schedule_abnormal": "abnormal",
+        }
+    )
+    assert 0 < abnormal_stats["summary"]["schedule_count"] < stats["summary"]["schedule_count"]
+
+    dashboard = client.get(
+        "/admin/dashboard",
+        params=[
+            ("date_range", "custom"),
+            ("start_date", days[0]),
+            ("end_date", end_date),
+            ("store_names", "南京门东店"),
+            ("store_names", "南昌万寿宫店"),
+        ],
+    )
+    assert dashboard.status_code == 200
+    for label in ("排班运营看板", "排班人次", "总排班工时", "门店工时排行", "员工工时排行", "班次分布", "排班异常概览", "自定义/加班工时"):
+        assert label in dashboard.text
+    assert "P4B 张三" in dashboard.text
+    assert "P4B 离职历史" in dashboard.text
+    assert "已停用" in dashboard.text
+    assert "离职/停用" in dashboard.text
+
+    assert_login_success(login_admin(client, "storeviewer", "123456"))
+    scoped_dashboard = client.get(
+        "/admin/dashboard",
+        params=[
+            ("date_range", "custom"),
+            ("start_date", days[0]),
+            ("end_date", end_date),
+            ("store_names", "南京门东店"),
+            ("store_names", "南昌万寿宫店"),
+        ],
+    )
+    assert scoped_dashboard.status_code == 200
+    assert "排班运营看板" in scoped_dashboard.text
+    assert "南京门东店" in scoped_dashboard.text
+    assert "南昌万寿宫店" not in scoped_dashboard.text
+
+
 def test_lightweight_erp_admin_layout_navigation_and_placeholder_pages(tmp_path, monkeypatch):
     client, _ = build_client(tmp_path, monkeypatch)
     submit_ticket_with_image_and_file(client, description="ERP 布局测试工单")

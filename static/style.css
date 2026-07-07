@@ -3985,6 +3985,83 @@ dd {
   min-width: 620px;
 }
 
+.dashboard-schedule-section {
+  display: grid;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+
+.dashboard-schedule-section summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  cursor: pointer;
+  list-style: none;
+  margin-bottom: 14px;
+}
+
+.dashboard-schedule-section summary::-webkit-details-marker {
+  display: none;
+}
+
+.dashboard-schedule-section summary strong,
+.dashboard-schedule-section summary small {
+  display: block;
+}
+
+.dashboard-schedule-section summary small {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.schedule-metric-grid {
+  margin-bottom: 14px;
+}
+
+.dashboard-rank-table {
+  min-width: 760px;
+}
+
+.dashboard-rank-table th,
+.dashboard-rank-table td {
+  white-space: nowrap;
+}
+
+.muted-badge {
+  margin-left: 6px;
+  background: #eef3f7;
+  color: var(--muted);
+  border-color: #dbe4ee;
+}
+
+.custom-badge {
+  margin-left: 6px;
+  background: #fff7ed;
+  color: #b45309;
+  border-color: #fed7aa;
+}
+
+.schedule-abnormal-grid .mini-metric-card {
+  border-left: 4px solid #cbd5e1;
+}
+
+.schedule-abnormal-grid .abnormal-danger {
+  background: var(--danger-bg);
+  border-left-color: var(--danger);
+}
+
+.schedule-abnormal-grid .abnormal-warning {
+  background: var(--warn-bg);
+  border-left-color: var(--warn);
+}
+
+.schedule-abnormal-grid .abnormal-info {
+  background: var(--primary-soft);
+  border-left-color: var(--primary);
+}
+
 .dashboard-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

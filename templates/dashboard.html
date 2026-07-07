@@ -83,6 +83,40 @@
           {% endfor %}
         </select>
       </label>
+      {% if can_view_schedule_dashboard %}
+      <label>
+        <span>排班员工</span>
+        <select name="employee_ids" multiple size="5">
+          {% for employee in schedule_employee_options %}
+          <option value="{{ employee.id }}" {% if employee.id in schedule_filters.get('employee_ids', []) %}selected{% endif %}>{{ employee.employee_name }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>
+        <span>班次</span>
+        <select name="shift_type_ids" multiple size="5">
+          {% for shift in schedule_shift_options %}
+          <option value="{{ shift.id }}" {% if shift.id in schedule_filters.get('shift_type_ids', []) %}selected{% endif %}>{{ shift.shift_name }}</option>
+          {% endfor %}
+          <option value="custom" {% if schedule_filters.get('include_custom_shift') %}selected{% endif %}>自定义/加班</option>
+        </select>
+      </label>
+      <label>
+        <span>是否自定义时间</span>
+        <select name="schedule_custom">
+          <option value="" {% if not schedule_filters.get('schedule_custom') %}selected{% endif %}>全部</option>
+          <option value="custom" {% if schedule_filters.get('schedule_custom') == 'custom' %}selected{% endif %}>仅自定义/加班</option>
+          <option value="standard" {% if schedule_filters.get('schedule_custom') == 'standard' %}selected{% endif %}>仅标准班次</option>
+        </select>
+      </label>
+      <label>
+        <span>是否异常</span>
+        <select name="schedule_abnormal">
+          <option value="" {% if not schedule_filters.get('schedule_abnormal') %}selected{% endif %}>全部</option>
+          <option value="abnormal" {% if schedule_filters.get('schedule_abnormal') == 'abnormal' %}selected{% endif %}>仅异常排班</option>
+        </select>
+      </label>
+      {% endif %}
     </div>
     <div class="filter-actions">
       <button class="primary-button compact" type="submit">刷新看板</button>
@@ -306,4 +340,178 @@
     {% endfor %}
   </article>
 </section>
+
+{% if can_view_schedule_dashboard %}
+<details class="work-card dashboard-schedule-section" open>
+  <summary>
+    <span>
+      <strong>排班运营看板</strong>
+      <small>排班人次、工时排行、班次分布和异常概览会跟随上方日期与门店筛选变化。</small>
+    </span>
+  </summary>
+
+  <div class="stats-grid dashboard-card-grid dashboard-metric-grid schedule-metric-grid">
+    {% for card in schedule_stats.summary_cards %}
+    <article class="stat-card metric-card neumorphic-stat-card {% if '冲突' in card.label or '异常' in card.label %}stat-alert{% endif %}">
+      <span class="metric-icon">{{ "%02d"|format(loop.index) }}</span>
+      <span>{{ card.label }}</span>
+      <strong>{{ card.value }}</strong>
+      <small>{{ card.hint }}</small>
+    </article>
+    {% endfor %}
+  </div>
+
+  <section class="dashboard-grid dashboard-main-grid">
+    <article class="dashboard-panel work-card">
+      <h2>门店工时排行</h2>
+      <div class="table-scroll">
+        <table class="compact-table dashboard-rank-table">
+          <thead>
+            <tr>
+              <th>门店</th>
+              <th>人数</th>
+              <th>人次</th>
+              <th>总工时</th>
+              <th>自定义工时</th>
+              <th>异常</th>
+              <th>冲突</th>
+              <th>日均工时</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in schedule_stats.store_rank[:10] %}
+            <tr>
+              <td>
+                {{ row.store_name }}
+                {% if row.is_disabled %}<span class="badge muted-badge">已停用</span>{% endif %}
+              </td>
+              <td>{{ row.employee_count }}</td>
+              <td>{{ row.schedule_count }}</td>
+              <td>{{ row.total_hours }}</td>
+              <td>{{ row.custom_hours }}</td>
+              <td>{{ row.abnormal_count }}</td>
+              <td>{{ row.conflict_count }}</td>
+              <td>{{ row.average_daily_hours }}</td>
+            </tr>
+            {% else %}
+            <tr><td colspan="8">暂无排班数据。</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% if schedule_stats.store_rank|length > 10 %}<p class="empty-note">默认展示 Top10，当前共 {{ schedule_stats.store_rank|length }} 个门店。</p>{% endif %}
+    </article>
+
+    <article class="dashboard-panel work-card">
+      <h2>员工工时排行</h2>
+      <div class="table-scroll">
+        <table class="compact-table dashboard-rank-table">
+          <thead>
+            <tr>
+              <th>员工</th>
+              <th>主门店</th>
+              <th>绑定门店</th>
+              <th>天数</th>
+              <th>总工时</th>
+              <th>自定义工时</th>
+              <th>超10h</th>
+              <th>超12h</th>
+              <th>连续</th>
+              <th>跨店</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in schedule_stats.employee_rank[:10] %}
+            <tr>
+              <td>
+                {{ row.employee_name }}
+                {% if row.is_inactive %}<span class="badge muted-badge">离职/停用</span>{% endif %}
+              </td>
+              <td>{{ row.primary_store or '-' }}</td>
+              <td>{{ row.store_names_text or '-' }}</td>
+              <td>{{ row.schedule_day_count }}</td>
+              <td>{{ row.total_hours }}</td>
+              <td>{{ row.custom_hours }}</td>
+              <td>{{ row.daily_over_10_count }}</td>
+              <td>{{ row.daily_over_12_count }}</td>
+              <td>{% if row.continuous_over_6 %}是{% else %}否{% endif %}</td>
+              <td>{{ row.cross_store_count }}</td>
+            </tr>
+            {% else %}
+            <tr><td colspan="10">暂无排班数据。</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% if schedule_stats.employee_rank|length > 10 %}<p class="empty-note">默认展示 Top10，当前共 {{ schedule_stats.employee_rank|length }} 名员工。</p>{% endif %}
+    </article>
+  </section>
+
+  <section class="dashboard-grid">
+    <article class="dashboard-panel work-card">
+      <h2>班次分布</h2>
+      {% for row in schedule_stats.shift_distribution %}
+      <div class="bar-row">
+        <div class="bar-top">
+          <span>
+            {{ row.shift_name }}
+            {% if row.is_custom %}<span class="badge custom-badge">自定义</span>{% endif %}
+            {% if row.is_rest %}<span class="badge muted-badge">休息班</span>{% endif %}
+          </span>
+          <strong>{{ row.count }} 次 / {{ row.total_hours }}h / {{ row.percent }}%</strong>
+        </div>
+        <div class="bar-track"><span style="width: {{ row.percent }}%;"></span></div>
+      </div>
+      {% else %}
+      <p class="empty-note">暂无班次分布。</p>
+      {% endfor %}
+    </article>
+
+    <article class="dashboard-panel work-card">
+      <h2>排班异常概览</h2>
+      <div class="mini-metric-grid schedule-abnormal-grid">
+        {% for row in schedule_stats.abnormal_items %}
+        <div class="mini-metric-card abnormal-{{ row.level }}">
+          <span>{{ row.label }}</span>
+          <strong>{{ row.count }}</strong>
+          <small>{{ row.level }}</small>
+        </div>
+        {% endfor %}
+      </div>
+    </article>
+
+    <article class="dashboard-panel work-card">
+      <h2>自定义/加班工时</h2>
+      <div class="table-scroll">
+        <table class="compact-table dashboard-rank-table">
+          <thead>
+            <tr>
+              <th>门店</th>
+              <th>员工</th>
+              <th>日期</th>
+              <th>时间段</th>
+              <th>工时</th>
+              <th>备注</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in schedule_stats.custom_rows %}
+            <tr>
+              <td>{{ row.store_name }}</td>
+              <td>{{ row.employee_name }}</td>
+              <td>{{ row.schedule_date }}</td>
+              <td>{{ row.display_time }}</td>
+              <td>{{ row.duration_hours }}</td>
+              <td>{{ row.note or row.shift_name }}</td>
+            </tr>
+            {% else %}
+            <tr><td colspan="6">暂无自定义/加班排班。</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </article>
+  </section>
+</details>
+{% endif %}
 {% endblock %}
