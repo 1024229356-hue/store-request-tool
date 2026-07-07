@@ -7865,6 +7865,82 @@ def test_admin_dashboard_due_status_and_attachment_statistics(tmp_path, monkeypa
     assert "该工单已超过期望完成时间，请优先处理。" in detail_page.text
 
 
+def test_p4a_dashboard_filters_rankings_and_data_scope(tmp_path, monkeypatch):
+    client, _ = build_client(
+        tmp_path,
+        monkeypatch,
+        admin_users="regional-admin:very-secret-value,storeviewer:123456,assignedviewer:123456",
+    )
+    store_role = create_role_with_permissions(tmp_path, "p4a-store-dashboard", ["ticket.view"])
+    assigned_role = create_role_with_permissions(tmp_path, "p4a-assigned-dashboard", ["ticket.view"])
+    update_admin_user_access(tmp_path, "storeviewer", store_role, data_scope="stores", store_names="南京门东店")
+    update_admin_user_access(tmp_path, "assignedviewer", assigned_role, data_scope="assigned")
+
+    today = date.today()
+    old_day = (today - timedelta(days=10)).isoformat()
+    yesterday = (today - timedelta(days=1)).isoformat()
+    tomorrow = (today + timedelta(days=1)).isoformat()
+
+    submit_ticket(client, store_name="南京门东店", request_type="缺货需求", status="待处理", assigned_to="storeviewer", description="P4A 南京缺货可见", expected_finish_date=tomorrow)
+    submit_ticket(client, store_name="南京门东店", request_type="商品异常", status="处理中", assigned_to="assignedviewer", description="P4A assigned 仅本人", expected_finish_date=yesterday)
+    submit_ticket(client, store_name="南昌万寿宫店", request_type="新品需求", status="待处理", assigned_to="regional-admin", description="P4A 南昌隐藏", expected_finish_date=tomorrow)
+    submit_ticket(client, store_name="南京门东店", request_type="系统问题", status="待处理", assigned_to="storeviewer", description="P4A 旧工单不在近7天", expected_finish_date=tomorrow)
+    set_ticket_assignment(tmp_path, 1, "storeviewer")
+    set_ticket_assignment(tmp_path, 2, "assignedviewer")
+    set_ticket_assignment(tmp_path, 3, "regional-admin")
+    set_ticket_assignment(tmp_path, 4, "storeviewer")
+
+    with sqlite3.connect(tmp_path / "tickets.db") as connection:
+        connection.execute(
+            "UPDATE tickets SET created_at = ?, updated_at = ? WHERE description = ?",
+            (f"{old_day} 09:00:00", f"{old_day} 09:00:00", "P4A 旧工单不在近7天"),
+        )
+        connection.execute(
+            """
+            INSERT INTO ticket_logs (
+                ticket_id, action, old_status, new_status, old_assigned_to, new_assigned_to,
+                note, operator, created_at
+            )
+            VALUES (?, ?, '', '待处理', '', ?, ?, ?, ?)
+            """,
+            (1, "自动分派", "storeviewer", "P4A 自动分派测试", f"{today.isoformat()} 09:00:00", "system"),
+        )
+
+    logged_in_client(client)
+    dashboard = client.get("/admin/dashboard")
+    assert dashboard.status_code == 200
+    for label in ("工单运营看板", "新增工单数", "SLA 指标", "门店问题排行", "需求类型排行", "处理人效率", "自动分派效果"):
+        assert label in dashboard.text
+    assert "P4A 旧工单不在近7天" not in dashboard.text
+    assert "P4A 南京缺货可见" in dashboard.text
+    assert "P4A 南昌隐藏" in dashboard.text
+
+    assert_login_success(login_admin(client, "storeviewer", "123456"))
+    scoped_dashboard = client.get(
+        "/admin/dashboard",
+        params=[
+            ("date_range", "last7"),
+            ("store_names", "南京门东店"),
+            ("store_names", "南昌万寿宫店"),
+            ("request_types", "缺货需求"),
+            ("request_types", "新品需求"),
+            ("handlers", "storeviewer"),
+            ("status", "待处理"),
+        ],
+    )
+    assert scoped_dashboard.status_code == 200
+    assert "P4A 南京缺货可见" in scoped_dashboard.text
+    assert "P4A 南昌隐藏" not in scoped_dashboard.text
+    assert '<option value="南昌万寿宫店"' not in scoped_dashboard.text
+
+    assert_login_success(login_admin(client, "assignedviewer", "123456"))
+    assigned_dashboard = client.get("/admin/dashboard?date_range=last7&store_names=南京门东店&store_names=南昌万寿宫店")
+    assert assigned_dashboard.status_code == 200
+    assert "P4A assigned 仅本人" in assigned_dashboard.text
+    assert "P4A 南京缺货可见" not in assigned_dashboard.text
+    assert "P4A 南昌隐藏" not in assigned_dashboard.text
+
+
 def test_lightweight_erp_admin_layout_navigation_and_placeholder_pages(tmp_path, monkeypatch):
     client, _ = build_client(tmp_path, monkeypatch)
     submit_ticket_with_image_and_file(client, description="ERP 布局测试工单")

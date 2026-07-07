@@ -3348,6 +3348,30 @@ def split_multi_value_text(value: object) -> List[str]:
     return unique_clean_values(MULTI_VALUE_SPLIT_RE.split(str(value or "")))
 
 
+def filter_values(filters: Dict[str, object], key: str, legacy_key: str = "") -> List[str]:
+    candidates: List[object] = []
+    raw_value = filters.get(key)
+    if isinstance(raw_value, (list, tuple, set)):
+        candidates.extend(raw_value)
+    elif raw_value not in (None, ""):
+        candidates.append(raw_value)
+    if legacy_key:
+        legacy_value = filters.get(legacy_key)
+        if isinstance(legacy_value, (list, tuple, set)):
+            candidates.extend(legacy_value)
+        elif legacy_value not in (None, ""):
+            candidates.append(legacy_value)
+    expanded: List[object] = []
+    for value in candidates:
+        expanded.extend(split_multi_value_text(value))
+    return unique_clean_values(expanded)
+
+
+def first_filter_value(filters: Dict[str, object], key: str) -> str:
+    values = filter_values(filters, key)
+    return values[0] if values else ""
+
+
 def join_display_values(values: Iterable[object]) -> str:
     return "、".join(unique_clean_values(values))
 
@@ -5985,7 +6009,19 @@ def create_ticket_with_images(
     raise RuntimeError("工单号生成冲突，请稍后重试。")
 
 
-def build_ticket_where(filters: Dict[str, str]) -> Tuple[str, List[str]]:
+def add_in_filter(clauses: List[str], params: List[str], column_name: str, values: List[str]) -> None:
+    if not values:
+        return
+    if len(values) == 1:
+        clauses.append(f"{column_name} = ?")
+        params.append(values[0])
+        return
+    placeholders = ",".join("?" for _ in values)
+    clauses.append(f"{column_name} IN ({placeholders})")
+    params.extend(values)
+
+
+def build_ticket_where(filters: Dict[str, object]) -> Tuple[str, List[str]]:
     include_deleted = str(filters.get("__include_deleted") or "").strip() == "1"
     deleted_only = str(filters.get("__deleted_only") or "").strip() == "1"
     ticket_scope = str(filters.get("__ticket_scope") or "").strip()
@@ -6044,42 +6080,44 @@ def build_ticket_where(filters: Dict[str, str]) -> Tuple[str, List[str]]:
     exact_fields = {
         "ticket_no": "ticket_no",
         "submitter": "submitter",
-        "request_type": "request_type",
         "urgency": "urgency",
-        "status": "status",
-        "assigned_to": "assigned_to",
     }
     for filter_key, column_name in exact_fields.items():
-        value = filters.get(filter_key, "").strip()
+        value = first_filter_value(filters, filter_key)
         if value:
             clauses.append(f"{column_name} = ?")
             params.append(value)
 
-    store_name = filters.get("store_name", "").strip()
-    if store_name:
+    add_in_filter(clauses, params, "request_type", filter_values(filters, "request_types", "request_type"))
+    add_in_filter(clauses, params, "status", filter_values(filters, "statuses", "status"))
+    add_in_filter(clauses, params, "assigned_to", filter_values(filters, "handlers", "assigned_to"))
+
+    store_names = filter_values(filters, "store_names", "store_name")
+    if store_names:
+        placeholders = ",".join("?" for _ in store_names)
         clauses.append(
-            """
+            f"""
             EXISTS (
                 SELECT 1
                 FROM ticket_stores
                 WHERE ticket_stores.ticket_id = tickets.id
-                  AND ticket_stores.store_name = ?
+                  AND ticket_stores.store_name IN ({placeholders})
             )
             """
         )
-        params.append(store_name)
+        params.extend(store_names)
 
-    date_start = filters.get("date_start", "").strip()
+    date_start = first_filter_value(filters, "date_start") or first_filter_value(filters, "start_date")
     if date_start:
         clauses.append("DATE(created_at) >= DATE(?)")
         params.append(date_start)
 
-    date_end = filters.get("date_end", "").strip()
+    date_end = first_filter_value(filters, "date_end") or first_filter_value(filters, "end_date")
     if date_end:
         clauses.append("DATE(created_at) <= DATE(?)")
         params.append(date_end)
 
-    keyword = filters.get("keyword", "").strip()
+    keyword = first_filter_value(filters, "keyword")
     if keyword:
         like_value = f"%{keyword}%"
         clauses.append(
@@ -10868,7 +10906,95 @@ def counter_rows(counter: Counter[str], total: int, limit: Optional[int] = None)
     return rows
 
 
-def fetch_dashboard_stats(filters: Dict[str, str]) -> Dict[str, object]:
+def dashboard_date_bounds(date_range: str, start_date: str = "", end_date: str = "") -> Tuple[str, str, str]:
+    today = datetime.now().date()
+    clean_range = (date_range or "last7").strip()
+    if clean_range not in {"today", "last7", "this_month", "last_month", "custom"}:
+        clean_range = "last7"
+    if clean_range == "today":
+        return clean_range, today.isoformat(), today.isoformat()
+    if clean_range == "this_month":
+        return clean_range, today.replace(day=1).isoformat(), today.isoformat()
+    if clean_range == "last_month":
+        month_start = today.replace(day=1)
+        last_month_end = month_start - timedelta(days=1)
+        last_month_start = last_month_end.replace(day=1)
+        return clean_range, last_month_start.isoformat(), last_month_end.isoformat()
+    if clean_range == "custom":
+        return clean_range, (start_date or "").strip(), (end_date or "").strip()
+    return "last7", (today - timedelta(days=6)).isoformat(), today.isoformat()
+
+
+def normalize_dashboard_filters(
+    query_values: Dict[str, List[str]],
+    legacy_values: Optional[Dict[str, str]] = None,
+) -> Dict[str, object]:
+    legacy_values = legacy_values or {}
+    date_range = (legacy_values.get("date_range") or "last7").strip()
+    start_date = legacy_values.get("start_date") or legacy_values.get("date_start") or ""
+    end_date = legacy_values.get("end_date") or legacy_values.get("date_end") or ""
+    clean_range, clean_start, clean_end = dashboard_date_bounds(date_range, start_date, end_date)
+    filters: Dict[str, object] = {
+        "date_range": clean_range,
+        "date_start": clean_start,
+        "date_end": clean_end,
+        "store_names": unique_clean_values([*(query_values.get("store_names") or []), legacy_values.get("store_name", "")]),
+        "request_types": unique_clean_values([*(query_values.get("request_types") or []), legacy_values.get("request_type", "")]),
+        "statuses": unique_clean_values([*(query_values.get("status") or []), *(query_values.get("statuses") or []), legacy_values.get("status", "")]),
+        "handlers": unique_clean_values([*(query_values.get("handlers") or []), legacy_values.get("assigned_to", "")]),
+    }
+    return filters
+
+
+def dashboard_allowed_stores(user: Optional[Dict[str, object]], config: AppConfig) -> List[str]:
+    stores = get_all_stores() or config.stores
+    if not user:
+        return []
+    if normalize_admin_data_scope(str(user.get("data_scope") or "all")) == "stores":
+        allowed = split_multi_value_text(user.get("store_names"))
+        return [store for store in stores if store in allowed]
+    return stores
+
+
+def dashboard_handler_rows(tickets: List[Dict[str, object]]) -> List[Dict[str, object]]:
+    rows: Dict[str, Dict[str, object]] = {}
+    for ticket in tickets:
+        handler = str(ticket.get("assigned_to") or "未指定").strip() or "未指定"
+        row = rows.setdefault(
+            handler,
+            {
+                "label": handler,
+                "count": 0,
+                "completed_count": 0,
+                "overdue_count": 0,
+                "on_time_count": 0,
+                "processing_hours_total": 0.0,
+                "processing_hours_count": 0,
+            },
+        )
+        row["count"] = int(row["count"]) + 1
+        due_status = str(ticket.get("due_status") or "")
+        if due_status in {"已超时", "超时完成"}:
+            row["overdue_count"] = int(row["overdue_count"]) + 1
+        if due_status == "按时完成":
+            row["on_time_count"] = int(row["on_time_count"]) + 1
+        if str(ticket.get("status") or "") == COMPLETED_STATUS:
+            row["completed_count"] = int(row["completed_count"]) + 1
+            hours = processing_hours(ticket)
+            if hours != "":
+                row["processing_hours_total"] = float(row["processing_hours_total"]) + float(hours)
+                row["processing_hours_count"] = int(row["processing_hours_count"]) + 1
+    result = []
+    for row in rows.values():
+        completed_count = int(row["completed_count"])
+        hour_count = int(row["processing_hours_count"])
+        row["on_time_rate"] = percent_value(int(row["on_time_count"]), completed_count)
+        row["average_processing_hours"] = round(float(row["processing_hours_total"]) / hour_count, 2) if hour_count else 0
+        result.append(row)
+    return sorted(result, key=lambda item: (-int(item["count"]), str(item["label"])))
+
+
+def fetch_dashboard_stats(filters: Dict[str, object]) -> Dict[str, object]:
     config = load_app_config()
     tickets = fetch_tickets(filters, "newest", config)
     total = len(tickets)
@@ -10882,9 +11008,13 @@ def fetch_dashboard_stats(filters: Dict[str, str]) -> Dict[str, object]:
             store_counter[str(store_name or "未填写")] += 1
     handler_counter: Counter[str] = Counter(str(ticket.get("assigned_to") or "未指定") or "未指定" for ticket in tickets)
     urgency_counter: Counter[str] = Counter(str(ticket.get("urgency") or "未填写") for ticket in tickets)
+    due_status_counter: Counter[str] = Counter(str(ticket.get("due_status") or "未设置") for ticket in tickets)
     today_new_count = sum(1 for ticket in tickets if str(ticket.get("created_at") or "").startswith(today_prefix))
     overdue_count = sum(1 for ticket in tickets if ticket.get("due_status") == "已超时")
     due_today_count = sum(1 for ticket in tickets if ticket.get("due_status") == "今日到期")
+    not_due_count = sum(1 for ticket in tickets if ticket.get("due_status") == "未到期")
+    sla_not_set_count = sum(1 for ticket in tickets if ticket.get("due_status") == "未设置")
+    late_completed_count = sum(1 for ticket in tickets if ticket.get("due_status") == "超时完成")
     completed_sla_count = sum(1 for ticket in tickets if ticket.get("due_status") in {"按时完成", "超时完成"})
     on_time_completed_count = sum(1 for ticket in tickets if ticket.get("due_status") == "按时完成")
     sla_completion_rate = percent_value(on_time_completed_count, completed_sla_count)
@@ -10910,6 +11040,10 @@ def fetch_dashboard_stats(filters: Dict[str, str]) -> Dict[str, object]:
                 ).fetchone()["total"]
                 or 0
             )
+    assigned_ticket_count = sum(1 for ticket in tickets if str(ticket.get("assigned_to") or "").strip())
+    unassigned_ticket_count = total - assigned_ticket_count
+    manual_assigned_count = max(assigned_ticket_count - auto_assigned_count, 0)
+    auto_assignment_rate = percent_value(auto_assigned_count, total)
     image_ticket_count = sum(1 for ticket in tickets if int(ticket.get("image_count") or 0) > 0)
     file_ticket_count = sum(1 for ticket in tickets if int(ticket.get("file_count") or 0) > 0)
     attachment_ticket_count = sum(
@@ -10949,6 +11083,7 @@ def fetch_dashboard_stats(filters: Dict[str, str]) -> Dict[str, object]:
     schedule_total_hours = round(sum(float(row["duration_hours"] or 0) for row in schedule_rows), 2)
     cards = [
         {"label": "总工单数", "count": total, "percent": 100 if total else 0},
+        {"label": "新增工单数", "count": total, "percent": 100 if total else 0},
         {"label": "待处理数", "count": status_counter.get("待处理", 0), "percent": percent_value(status_counter.get("待处理", 0), total)},
         {"label": "处理中数", "count": status_counter.get("处理中", 0), "percent": percent_value(status_counter.get("处理中", 0), total)},
         {"label": "待门店补充数", "count": status_counter.get("待门店补充", 0), "percent": percent_value(status_counter.get("待门店补充", 0), total)},
@@ -10964,12 +11099,22 @@ def fetch_dashboard_stats(filters: Dict[str, str]) -> Dict[str, object]:
         {"label": "有文件工单数", "count": file_ticket_count, "percent": percent_value(file_ticket_count, total)},
         {"label": "无附件工单数", "count": no_attachment_count, "percent": percent_value(no_attachment_count, total)},
     ]
-    type_structure = [
-        {"label": label, "count": type_counter.get(label, 0), "percent": percent_value(type_counter.get(label, 0), total)}
-        for label in config.request_types
+    sla_rows = [
+        {"label": "未设置", "count": sla_not_set_count, "percent": percent_value(sla_not_set_count, total)},
+        {"label": "未到期", "count": not_due_count, "percent": percent_value(not_due_count, total)},
+        {"label": "今日到期", "count": due_today_count, "percent": percent_value(due_today_count, total)},
+        {"label": "已超时", "count": overdue_count, "percent": percent_value(overdue_count, total)},
+        {"label": "按时完成", "count": on_time_completed_count, "percent": percent_value(on_time_completed_count, total)},
+        {"label": "超时完成", "count": late_completed_count, "percent": percent_value(late_completed_count, total)},
+    ]
+    auto_assignment_rows = [
+        {"label": "自动分派", "count": auto_assigned_count, "percent": auto_assignment_rate},
+        {"label": "人工/手动分派", "count": manual_assigned_count, "percent": percent_value(manual_assigned_count, total)},
+        {"label": "待分派", "count": unassigned_ticket_count, "percent": percent_value(unassigned_ticket_count, total)},
     ]
     return {
         "total": total,
+        "new_ticket_count": total,
         "today_new_count": today_new_count,
         "pending_count": status_counter.get("待处理", 0),
         "processing_count": status_counter.get("处理中", 0),
@@ -10977,9 +11122,17 @@ def fetch_dashboard_stats(filters: Dict[str, str]) -> Dict[str, object]:
         "completed_count": status_counter.get("已完成", 0),
         "overdue_count": overdue_count,
         "due_today_count": due_today_count,
+        "not_due_count": not_due_count,
+        "sla_not_set_count": sla_not_set_count,
+        "late_completed_count": late_completed_count,
+        "completed_sla_count": completed_sla_count,
+        "on_time_completed_count": on_time_completed_count,
         "sla_completion_rate": sla_completion_rate,
         "average_processing_hours": average_processing_hours,
         "auto_assigned_count": auto_assigned_count,
+        "manual_assigned_count": manual_assigned_count,
+        "unassigned_ticket_count": unassigned_ticket_count,
+        "auto_assignment_rate": auto_assignment_rate,
         "today_urgent_count": urgency_counter.get("当天必须处理", 0),
         "attachment_ticket_count": attachment_ticket_count,
         "store_supplement_count": supplement_count,
@@ -10987,11 +11140,15 @@ def fetch_dashboard_stats(filters: Dict[str, str]) -> Dict[str, object]:
         "schedule_total_hours": schedule_total_hours,
         "recent_tickets": tickets[:5],
         "cards": cards,
-        "by_request_type": type_structure,
+        "sla_rows": sla_rows,
+        "auto_assignment_rows": auto_assignment_rows,
+        "by_request_type": counter_rows(type_counter, total, limit=10),
         "by_store": counter_rows(store_counter, total, limit=10),
         "by_handler": counter_rows(handler_counter, total),
+        "handler_efficiency": dashboard_handler_rows(tickets),
         "by_status": counter_rows(status_counter, total),
         "by_urgency": counter_rows(urgency_counter, total),
+        "by_due_status": counter_rows(due_status_counter, total),
         "attachments": attachment_rows,
     }
 
@@ -13428,33 +13585,43 @@ def create_app() -> FastAPI:
     def admin_dashboard(
         request: Request,
         current_user: Dict[str, object] = Depends(require_permission("ticket.view")),
-        store_name: str = Query(""),
-        request_type: str = Query(""),
-        status: str = Query(""),
-        assigned_to: str = Query(""),
-        date_start: str = Query(""),
-        date_end: str = Query(""),
     ) -> HTMLResponse:
         config = load_app_config()
-        filters = {
-            "store_name": store_name,
-            "request_type": request_type,
-            "status": status,
-            "assigned_to": assigned_to,
-            "date_start": date_start,
-            "date_end": date_end,
+        query_values = {
+            "store_names": request.query_params.getlist("store_names"),
+            "request_types": request.query_params.getlist("request_types"),
+            "status": request.query_params.getlist("status"),
+            "statuses": request.query_params.getlist("statuses"),
+            "handlers": request.query_params.getlist("handlers"),
         }
+        filters = normalize_dashboard_filters(
+            query_values,
+            {
+                "date_range": request.query_params.get("date_range", "last7"),
+                "start_date": request.query_params.get("start_date", ""),
+                "end_date": request.query_params.get("end_date", ""),
+                "date_start": request.query_params.get("date_start", ""),
+                "date_end": request.query_params.get("date_end", ""),
+                "store_name": request.query_params.get("store_name", ""),
+                "request_type": request.query_params.get("request_type", ""),
+                "status": request.query_params.get("status", ""),
+                "assigned_to": request.query_params.get("assigned_to", ""),
+            },
+        )
         scoped_filters = apply_data_scope(filters, current_user)
         stats = fetch_dashboard_stats(scoped_filters)
         for ticket in stats["recent_tickets"]:
             ticket["detail_url"] = build_ticket_detail_url(int(ticket["id"]), "/admin/dashboard")
+        allowed_stores = dashboard_allowed_stores(current_user, config)
+        if normalize_admin_data_scope(str(current_user.get("data_scope") or "all")) == "stores":
+            filters["store_names"] = [store for store in filter_values(scoped_filters, "store_names") if store in allowed_stores]
         return templates.TemplateResponse(
             request,
             "dashboard.html",
             {
                 "request": request,
-                "stores": config.stores,
-                "request_types": config.request_types,
+                "stores": allowed_stores,
+                "request_types": get_all_request_types() or config.request_types,
                 "statuses": config.statuses,
                 "handlers": config.handlers,
                 "filters": filters,

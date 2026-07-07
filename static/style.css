@@ -3890,6 +3890,101 @@ dd {
   grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
+.dashboard-filter-card {
+  overflow: hidden;
+}
+
+.dashboard-filter-form {
+  display: grid;
+  gap: 14px;
+}
+
+.dashboard-range-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.range-choice {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel-soft);
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 900;
+  padding: 7px 12px;
+}
+
+.range-choice input {
+  inline-size: 14px;
+  block-size: 14px;
+  margin: 0;
+}
+
+.range-choice.active {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+  color: var(--primary-dark);
+}
+
+.dashboard-filter-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.dashboard-filter-grid label {
+  min-width: 0;
+}
+
+.dashboard-filter-grid select[multiple] {
+  min-height: 128px;
+  overflow: auto;
+}
+
+.mini-metric-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.mini-metric-card {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel-soft);
+  padding: 12px;
+}
+
+.mini-metric-card span,
+.mini-metric-card small {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.mini-metric-card strong {
+  display: block;
+  margin: 5px 0;
+  color: var(--text);
+  font-size: 24px;
+  line-height: 1.1;
+}
+
+.table-scroll {
+  overflow-x: auto;
+  width: 100%;
+}
+
+.dashboard-efficiency-table {
+  min-width: 620px;
+}
+
 .dashboard-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -4280,7 +4375,8 @@ dd {
   }
 
   .filter-bar,
-  .stats-grid {
+  .stats-grid,
+  .dashboard-filter-grid {
     grid-template-columns: 1fr 1fr;
   }
 
@@ -4289,7 +4385,8 @@ dd {
   }
 
   .dashboard-card-grid,
-  .dashboard-grid {
+  .dashboard-grid,
+  .mini-metric-grid {
     grid-template-columns: 1fr;
   }
 
