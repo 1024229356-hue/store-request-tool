@@ -1218,6 +1218,33 @@ function initializeStoreRequestApp() {
     updateScheduleBulkSummary();
   }
 
+  const copyLastWeekButton = document.querySelector("[data-copy-last-week-fill]");
+  if (copyLastWeekButton) {
+    copyLastWeekButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      const form = copyLastWeekButton.closest("form");
+      if (!form) {
+        return;
+      }
+      const today = new Date();
+      const day = today.getDay() || 7;
+      const monday = new Date(today);
+      monday.setDate(today.getDate() - day + 1);
+      const sourceStart = new Date(monday);
+      sourceStart.setDate(monday.getDate() - 7);
+      const sourceEnd = new Date(monday);
+      sourceEnd.setDate(monday.getDate() - 1);
+      const toDateValue = (value) => value.toISOString().slice(0, 10);
+      const sourceStartInput = form.querySelector('input[name="source_start_date"]');
+      const sourceEndInput = form.querySelector('input[name="source_end_date"]');
+      const targetStartInput = form.querySelector('input[name="target_start_date"]');
+      if (sourceStartInput) sourceStartInput.value = toDateValue(sourceStart);
+      if (sourceEndInput) sourceEndInput.value = toDateValue(sourceEnd);
+      if (targetStartInput) targetStartInput.value = toDateValue(monday);
+      showAppToast("已填入上周到本周的复制周期。", "success");
+    });
+  }
+
   modalOpenButtons.forEach((button) => {
     button.addEventListener("click", (event) => {
       event.preventDefault();

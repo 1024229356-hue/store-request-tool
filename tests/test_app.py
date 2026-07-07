@@ -6366,6 +6366,232 @@ def test_schedule_validation_service_overlap_rest_and_hour_rules(tmp_path, monke
     assert not any("连续排班超过 6 天" in item["message"] for item in interrupted)
 
 
+def test_schedule_copy_permission_required_for_preview_and_confirm(tmp_path, monkeypatch):
+    client, main = build_client(tmp_path, monkeypatch)
+    logged_in_client(client)
+    assert "schedule.copy" in main.ADMIN_PERMISSION_KEYS
+    limited_role = create_role_with_permissions(tmp_path, "schedule-copy-denied", ["schedule.view"])
+    update_admin_user_access(tmp_path, ADMIN_AUTH[0], limited_role)
+
+    preview = admin_post(
+        client,
+        "/admin/schedules/copy-preview",
+        data={
+            "source_start_date": "2026-07-01",
+            "source_end_date": "2026-07-07",
+            "target_start_date": "2026-07-08",
+            "store_names": ["南京门东店"],
+            "csrf_token": csrf_token_for(client, "/admin/schedules?store_name=南京门东店&month=2026-07"),
+        },
+    )
+    confirm = admin_post(
+        client,
+        "/admin/schedules/copy-confirm",
+        data={
+            "source_start_date": "2026-07-01",
+            "source_end_date": "2026-07-07",
+            "target_start_date": "2026-07-08",
+            "store_names": ["南京门东店"],
+            "csrf_token": csrf_token_for(client, "/admin/schedules?store_name=南京门东店&month=2026-07"),
+        },
+    )
+
+    assert_html_forbidden(preview)
+    assert_html_forbidden(confirm)
+
+
+def test_schedule_copy_preview_confirm_strategy_conflicts_scope_and_audit(tmp_path, monkeypatch):
+    client, main = build_client(tmp_path, monkeypatch)
+    logged_in_client(client)
+    create_schedule_employee(client, "复制员工", store_names=["南京门东店", "南昌万寿宫店"])
+    create_schedule_employee(client, "离职来源", status="离职")
+    create_schedule_employee(client, "不排班员工")
+    with sqlite3.connect(tmp_path / "tickets.db") as connection:
+        connection.execute("UPDATE employees SET participate_schedule = 0 WHERE employee_name = ?", ("不排班员工",))
+
+    admin_post(
+        client,
+        "/admin/schedules",
+        data={"store_name": "南京门东店", "employee_id": "1", "schedule_date": "2026-07-01", "shift_type_id": "1"},
+        follow_redirects=False,
+    )
+    admin_post(
+        client,
+        "/admin/schedules",
+        data={
+            "store_name": "南京门东店",
+            "employee_id": "1",
+            "schedule_date": "2026-07-02",
+            "schedule_mode": "custom",
+            "shift_type_id": "custom",
+            "custom_label": "盘点",
+            "custom_start_time": "18:00",
+            "custom_end_time": "21:30",
+            "custom_duration_hours": "3.5",
+        },
+        follow_redirects=False,
+    )
+    with sqlite3.connect(tmp_path / "tickets.db") as connection:
+        timestamp = "2026-07-06 10:00:00"
+        connection.execute(
+            """
+            INSERT INTO store_schedules (
+                store_name, employee_id, schedule_date, shift_type_id, note,
+                is_custom_time, custom_start_time, custom_end_time, custom_duration_hours, custom_label,
+                created_by, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, 0, '', '', NULL, '', ?, ?, ?)
+            """,
+            ("南京门东店", 2, "2026-07-03", 1, "离职历史", "seed", timestamp, timestamp),
+        )
+        connection.execute(
+            """
+            INSERT INTO store_schedules (
+                store_name, employee_id, schedule_date, shift_type_id, note,
+                is_custom_time, custom_start_time, custom_end_time, custom_duration_hours, custom_label,
+                created_by, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, 0, '', '', NULL, '', ?, ?, ?)
+            """,
+            ("南京门东店", 3, "2026-07-04", 1, "不排班历史", "seed", timestamp, timestamp),
+        )
+
+    preview = admin_post(
+        client,
+        "/admin/schedules/copy-preview",
+        data={
+            "source_start_date": "2026-07-01",
+            "source_end_date": "2026-07-07",
+            "target_start_date": "2026-07-08",
+            "store_names": ["南京门东店"],
+            "copy_strategy": "skip",
+        },
+    )
+    assert preview.status_code == 200
+    assert "复制排班预览" in preview.text
+    assert "2026-07-08" in preview.text
+    assert "2026-07-09" in preview.text
+    assert "员工已离职，不能复制" in preview.text
+    assert "员工不参与排班，不能复制" in preview.text
+    assert "工时异常" in preview.text
+
+    admin_post(
+        client,
+        "/admin/schedules",
+        data={"store_name": "南京门东店", "employee_id": "1", "schedule_date": "2026-07-08", "shift_type_id": "2", "note": "目标已有"},
+        follow_redirects=False,
+    )
+    skip_confirm = admin_post(
+        client,
+        "/admin/schedules/copy-confirm",
+        data={
+            "source_start_date": "2026-07-01",
+            "source_end_date": "2026-07-02",
+            "target_start_date": "2026-07-08",
+            "store_names": ["南京门东店"],
+            "copy_strategy": "skip",
+        },
+        follow_redirects=False,
+    )
+    assert skip_confirm.status_code == 303
+    rows = rows_for(tmp_path, "store_schedules")
+    assert any(row["schedule_date"] == "2026-07-08" and row["note"] == "目标已有" for row in rows)
+    copied_custom = [row for row in rows if row["schedule_date"] == "2026-07-09" and row["employee_id"] == 1][0]
+    assert copied_custom["is_custom_time"] == 1
+    assert copied_custom["custom_start_time"] == "18:00"
+    assert copied_custom["custom_end_time"] == "21:30"
+    assert float(copied_custom["custom_duration_hours"]) == 3.5
+
+    overwrite_confirm = admin_post(
+        client,
+        "/admin/schedules/copy-confirm",
+        data={
+            "source_start_date": "2026-07-01",
+            "source_end_date": "2026-07-01",
+            "target_start_date": "2026-07-08",
+            "store_names": ["南京门东店"],
+            "copy_strategy": "overwrite",
+        },
+        follow_redirects=False,
+    )
+    assert overwrite_confirm.status_code == 303
+    overwritten = [row for row in rows_for(tmp_path, "store_schedules") if row["schedule_date"] == "2026-07-08" and row["employee_id"] == 1][0]
+    assert overwritten["shift_type_id"] == 1
+    assert overwritten["note"] != "目标已有"
+
+    admin_post(
+        client,
+        "/admin/schedules",
+        data={
+            "store_name": "南昌万寿宫店",
+            "employee_id": "1",
+            "schedule_date": "2026-07-10",
+            "schedule_mode": "custom",
+            "shift_type_id": "custom",
+            "custom_label": "冲突目标",
+            "custom_start_time": "10:00",
+            "custom_end_time": "12:00",
+        },
+        follow_redirects=False,
+    )
+    copy_role = create_role_with_permissions(tmp_path, "schedule-copy-no-override", ["schedule.view", "schedule.copy"])
+    update_admin_user_access(tmp_path, ADMIN_AUTH[0], copy_role)
+    blocked = admin_post(
+        client,
+        "/admin/schedules/copy-confirm",
+        data={
+            "source_start_date": "2026-07-01",
+            "source_end_date": "2026-07-01",
+            "target_start_date": "2026-07-10",
+            "store_names": ["南京门东店"],
+            "copy_strategy": "overwrite",
+            "csrf_token": csrf_token_for(client, "/admin/schedules?store_name=南京门东店&month=2026-07"),
+        },
+    )
+    assert blocked.status_code == 200
+    assert "时间冲突" in blocked.text
+    assert "确认复制被拒绝" in blocked.text
+
+    system_role_id = next(row["id"] for row in rows_for(tmp_path, "admin_roles") if row["role_name"] == "系统管理员")
+    update_admin_user_access(tmp_path, ADMIN_AUTH[0], system_role_id, data_scope="stores", store_names="南京门东店")
+    scoped = admin_post(
+        client,
+        "/admin/schedules/copy-preview",
+        data={
+            "source_start_date": "2026-07-01",
+            "source_end_date": "2026-07-01",
+            "target_start_date": "2026-07-11",
+            "store_names": ["南昌万寿宫店"],
+        },
+    )
+    assert scoped.status_code == 200
+    assert "无可复制排班" in scoped.text
+
+    update_admin_user_access(tmp_path, ADMIN_AUTH[0], system_role_id)
+    override = admin_post(
+        client,
+        "/admin/schedules/copy-confirm",
+        data={
+            "source_start_date": "2026-07-01",
+            "source_end_date": "2026-07-01",
+            "target_start_date": "2026-07-10",
+            "store_names": ["南京门东店"],
+            "copy_strategy": "overwrite",
+            "override_conflict": "1",
+        },
+        follow_redirects=False,
+    )
+    assert override.status_code == 303
+    assert any(row["schedule_date"] == "2026-07-10" and row["store_name"] == "南京门东店" for row in rows_for(tmp_path, "store_schedules"))
+    operations = rows_for(tmp_path, "admin_operation_logs")
+    assert any(row["action"] == "schedule.copy" and "copied_count" in row["detail"] for row in operations)
+    assert any(row["action"] == "schedule.copy.override_conflict" for row in operations)
+
+    overview = client.get("/admin/permission-overview")
+    assert "schedule.copy" in overview.text
+    assert "高风险 POST 未接入：0" in overview.text
+
+
 def test_admin_schedule_interaction_js_feedback_contract():
     app_js = (PROJECT_DIR / "static" / "app.js").read_text(encoding="utf-8")
     style_css = (PROJECT_DIR / "static" / "style.css").read_text(encoding="utf-8")

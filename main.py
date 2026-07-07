@@ -148,6 +148,7 @@ ADMIN_PERMISSION_KEYS = [
     "schedule.update",
     "schedule.delete",
     "schedule.export",
+    "schedule.copy",
     "schedule.override_conflict",
     "employee.view",
     "employee.create",
@@ -225,6 +226,7 @@ DEFAULT_ADMIN_ROLE_DEFINITIONS = [
             "schedule.update",
             "schedule.delete",
             "schedule.export",
+            "schedule.copy",
             "employee.view",
             "employee.create",
             "employee.update",
@@ -2975,6 +2977,7 @@ def admin_permission_groups() -> List[Dict[str, object]]:
         "schedule.view": "查看排班",
         "schedule.create": "新增排班",
         "schedule.export": "导出排班",
+        "schedule.copy": "复制排班",
         "schedule.override_conflict": "覆盖排班冲突",
         "employee.view": "查看员工",
         "role.view": "查看角色",
@@ -3039,7 +3042,9 @@ PERMISSION_ROUTE_RULES: List[Dict[str, str]] = [
     {"method": "GET", "path": "/admin/archive/export", "permission": "ticket.export", "module": "工单", "label": "导出归档工单"},
     {"method": "GET", "path": "/admin/schedules", "permission": "schedule.view", "module": "排班", "label": "排班列表"},
     {"method": "POST", "path": "/admin/schedules", "permission": "schedule.create", "module": "排班", "label": "新增排班"},
-    {"method": "POST", "path": "/admin/schedules/copy-day", "permission": "schedule.create", "module": "排班", "label": "复制排班"},
+    {"method": "POST", "path": "/admin/schedules/copy-day", "permission": "schedule.copy", "module": "排班", "label": "复制排班"},
+    {"method": "POST", "path": "/admin/schedules/copy-preview", "permission": "schedule.copy", "module": "排班", "label": "复制排班预览"},
+    {"method": "POST", "path": "/admin/schedules/copy-confirm", "permission": "schedule.copy", "module": "排班", "label": "确认复制排班"},
     {"method": "POST", "path": "/admin/schedules/clear-employee", "permission": "schedule.delete", "module": "排班", "label": "清空员工排班"},
     {"method": "POST", "path": "/admin/schedules/{schedule_id}/delete", "permission": "schedule.delete", "module": "排班", "label": "删除排班"},
     {"method": "GET", "path": "/admin/schedules/export", "permission": "schedule.export", "module": "排班", "label": "导出排班"},
@@ -7272,6 +7277,10 @@ def fetch_schedule_context(
     is_single_store = len(selected_store_names) == 1 and not is_all
     bulk_shift_types = fetch_shift_types(active_only=True, store_names=selected_store_names if is_single_store else [], global_scope="all" if is_single_store else "global")
     all_shift_types = fetch_shift_types(store_names=selected_store_names or None)
+    today_value = date.today()
+    current_week_start = today_value - timedelta(days=today_value.weekday())
+    source_week_start = current_week_start - timedelta(days=7)
+    source_week_end = current_week_start - timedelta(days=1)
     return {
         "filters": filters,
         "stores": config.stores,
@@ -7309,6 +7318,11 @@ def fetch_schedule_context(
         "global_view_url": global_view_url,
         "max_bulk_schedule_count": config.max_bulk_schedule_count,
         "export_url": "/admin/schedules/export?" + urlencode(export_query),
+        "copy_defaults": {
+            "source_start_date": source_week_start.isoformat(),
+            "source_end_date": source_week_end.isoformat(),
+            "target_start_date": current_week_start.isoformat(),
+        },
     }
 
 
@@ -7939,6 +7953,321 @@ def delete_schedule(schedule_id: int, operator: str) -> Dict[str, object]:
         connection.execute("DELETE FROM store_schedules WHERE id = ?", (schedule_id,))
         insert_schedule_log(connection, schedule_id, "删除排班", old_value, "", operator, timestamp)
     return old_value
+
+
+def normalize_schedule_copy_dates(source_start_date: str, source_end_date: str, target_start_date: str) -> Dict[str, object]:
+    source_start = datetime.strptime(normalize_schedule_date(source_start_date), "%Y-%m-%d").date()
+    source_end = datetime.strptime(normalize_schedule_date(source_end_date), "%Y-%m-%d").date()
+    target_start = datetime.strptime(normalize_schedule_date(target_start_date), "%Y-%m-%d").date()
+    if source_end < source_start:
+        raise ValueError("来源结束日期不能早于开始日期。")
+    day_count = (source_end - source_start).days + 1
+    if day_count < 1 or day_count > 31:
+        raise ValueError("来源周期必须为 1 到 31 天。")
+    target_end = target_start + timedelta(days=day_count - 1)
+    return {
+        "source_start_date": source_start.isoformat(),
+        "source_end_date": source_end.isoformat(),
+        "target_start_date": target_start.isoformat(),
+        "target_end_date": target_end.isoformat(),
+        "day_count": day_count,
+    }
+
+
+def fetch_schedule_rows_between(
+    source_start_date: str,
+    source_end_date: str,
+    store_names: List[str],
+    employee_ids: Optional[List[int]] = None,
+    shift_type_ids: Optional[List[int]] = None,
+    include_custom_shift: bool = False,
+) -> List[Dict[str, object]]:
+    clean_stores = unique_clean_values(store_names)
+    if not clean_stores:
+        return []
+    clauses = ["schedules.schedule_date >= ?", "schedules.schedule_date <= ?"]
+    params: List[object] = [source_start_date, source_end_date]
+    placeholders = ",".join("?" for _ in clean_stores)
+    clauses.append(f"schedules.store_name IN ({placeholders})")
+    params.extend(clean_stores)
+    clean_employee_ids = [int(employee_id) for employee_id in employee_ids or [] if int(employee_id) > 0]
+    if clean_employee_ids:
+        placeholders = ",".join("?" for _ in clean_employee_ids)
+        clauses.append(f"schedules.employee_id IN ({placeholders})")
+        params.extend(clean_employee_ids)
+    selected_shift_ids = [int(shift_id) for shift_id in shift_type_ids or [] if int(shift_id) > 0]
+    if selected_shift_ids and include_custom_shift:
+        placeholders = ",".join("?" for _ in selected_shift_ids)
+        clauses.append(f"(schedules.shift_type_id IN ({placeholders}) OR COALESCE(schedules.is_custom_time, 0) = 1)")
+        params.extend(selected_shift_ids)
+    elif selected_shift_ids:
+        placeholders = ",".join("?" for _ in selected_shift_ids)
+        clauses.append(f"COALESCE(schedules.is_custom_time, 0) = 0 AND schedules.shift_type_id IN ({placeholders})")
+        params.extend(selected_shift_ids)
+    elif include_custom_shift:
+        clauses.append("COALESCE(schedules.is_custom_time, 0) = 1")
+    with get_connection() as connection:
+        rows = connection.execute(
+            f"""
+            SELECT
+                schedules.id, schedules.store_name, schedules.employee_id, schedules.schedule_date,
+                schedules.shift_type_id, schedules.note, schedules.created_by,
+                COALESCE(schedules.is_custom_time, 0) AS is_custom_time,
+                schedules.custom_start_time, schedules.custom_end_time,
+                schedules.custom_duration_hours, schedules.custom_label,
+                employees.employee_name, employees.role, employees.status AS employee_status,
+                COALESCE(employees.participate_schedule, 1) AS participate_schedule,
+                employees.archived_at AS employee_archived_at,
+                employees.deleted_at AS employee_deleted_at,
+                shift_types.shift_name, shift_types.start_time, shift_types.end_time,
+                shift_types.duration_hours, shift_types.color, shift_types.is_active
+            FROM store_schedules AS schedules
+            JOIN employees ON employees.id = schedules.employee_id
+            LEFT JOIN shift_types ON shift_types.id = schedules.shift_type_id
+            WHERE {" AND ".join(clauses)}
+            ORDER BY schedules.schedule_date, schedules.store_name, employees.employee_name, schedules.id
+            """,
+            params,
+        ).fetchall()
+    result = [dict(row) for row in rows]
+    for row in result:
+        if int(row.get("is_custom_time") or 0) == 1:
+            row["shift_name"] = str(row.get("custom_label") or "自定义")
+            row["start_time"] = row.get("custom_start_time") or ""
+            row["end_time"] = row.get("custom_end_time") or ""
+            row["duration_hours"] = float(row.get("custom_duration_hours") or 0)
+            row["color"] = row.get("color") or "#f97316"
+        else:
+            row["shift_name"] = row.get("shift_name") or "未设置班次"
+            row["duration_hours"] = float(row.get("duration_hours") or 0)
+        row["weekday"] = weekday_label(str(row["schedule_date"]))
+        decorate_schedule_display(row)
+    return result
+
+
+def existing_schedule_by_store_employee_date(connection: sqlite3.Connection, store_name: str, employee_id: int, schedule_date: str) -> Optional[Dict[str, object]]:
+    row = connection.execute(
+        "SELECT * FROM store_schedules WHERE store_name = ? AND employee_id = ? AND schedule_date = ?",
+        (store_name, employee_id, schedule_date),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def build_schedule_copy_candidate(source_row: Dict[str, object], target_date: str) -> Dict[str, object]:
+    return {
+        "id": None,
+        "store_name": source_row.get("store_name") or "",
+        "employee_id": int(source_row.get("employee_id") or 0),
+        "employee_name": source_row.get("employee_name") or "",
+        "schedule_date": target_date,
+        "shift_type_id": int(source_row.get("shift_type_id") or 0),
+        "shift_name": source_row.get("shift_name") or "未设置班次",
+        "start_time": source_row.get("start_time") or "",
+        "end_time": source_row.get("end_time") or "",
+        "duration_hours": float(source_row.get("duration_hours") or 0),
+        "is_custom_time": int(source_row.get("is_custom_time") or 0),
+        "custom_start_time": source_row.get("custom_start_time") or "",
+        "custom_end_time": source_row.get("custom_end_time") or "",
+        "custom_duration_hours": source_row.get("custom_duration_hours"),
+        "custom_label": source_row.get("custom_label") or "",
+        "note": source_row.get("note") or "",
+    }
+
+
+def build_schedule_copy_plan(
+    source_start_date: str,
+    source_end_date: str,
+    target_start_date: str,
+    store_names: List[str],
+    employee_ids: Optional[List[int]] = None,
+    shift_type_ids: Optional[List[int]] = None,
+    include_custom_shift: bool = False,
+    copy_strategy: str = "skip",
+    override_conflict: bool = False,
+    current_user: Optional[Dict[str, object]] = None,
+) -> Dict[str, object]:
+    dates = normalize_schedule_copy_dates(source_start_date, source_end_date, target_start_date)
+    clean_stores = unique_clean_values(store_names)
+    scope_result = apply_data_scope({"__scope_kind": "schedule", "store_names": clean_stores, "is_all_stores": False}, current_user)
+    if scope_result.get("__scope_no_rows"):
+        clean_stores = []
+    else:
+        clean_stores = list(scope_result.get("store_names") or [])
+    strategy = "overwrite" if str(copy_strategy or "").strip() == "overwrite" else "skip"
+    source_rows = fetch_schedule_rows_between(
+        str(dates["source_start_date"]),
+        str(dates["source_end_date"]),
+        clean_stores,
+        employee_ids=employee_ids,
+        shift_type_ids=shift_type_ids,
+        include_custom_shift=include_custom_shift,
+    )
+    source_start = datetime.strptime(str(dates["source_start_date"]), "%Y-%m-%d").date()
+    target_start = datetime.strptime(str(dates["target_start_date"]), "%Y-%m-%d").date()
+    items: List[Dict[str, object]] = []
+    with get_connection() as connection:
+        for source in source_rows:
+            source_date = datetime.strptime(str(source["schedule_date"]), "%Y-%m-%d").date()
+            target_date = (target_start + timedelta(days=(source_date - source_start).days)).isoformat()
+            existing = existing_schedule_by_store_employee_date(connection, str(source["store_name"] or ""), int(source["employee_id"]), target_date)
+            candidate = build_schedule_copy_candidate(source, target_date)
+            status = "copyable"
+            result_label = "可复制"
+            can_copy = True
+            messages: List[str] = []
+            if str(source.get("employee_status") or "") == "离职":
+                status = "employee_inactive"
+                result_label = "员工已停用"
+                can_copy = False
+                messages.append("员工已离职，不能复制。")
+            elif source.get("employee_deleted_at") or source.get("employee_archived_at"):
+                status = "employee_inactive"
+                result_label = "员工已停用"
+                can_copy = False
+                messages.append("员工已停用，不能复制。")
+            elif int(source.get("participate_schedule") or 0) != 1:
+                status = "employee_not_schedulable"
+                result_label = "员工不参与排班"
+                can_copy = False
+                messages.append("员工不参与排班，不能复制。")
+            elif existing and strategy == "skip":
+                status = "skip_existing"
+                result_label = "跳过已有"
+                can_copy = False
+                messages.append("目标日期已有排班，将跳过。")
+            elif existing and strategy == "overwrite":
+                status = "will_overwrite"
+                result_label = "将覆盖"
+                messages.append("目标日期已有排班，确认后将覆盖。")
+            conflicts = []
+            if can_copy:
+                conflicts = schedule_validation_service.detect_schedule_conflicts(
+                    int(source["employee_id"]),
+                    target_date,
+                    str(candidate.get("start_time") or ""),
+                    str(candidate.get("end_time") or ""),
+                    exclude_schedule_id=int(existing["id"]) if existing and strategy == "overwrite" else None,
+                    candidate=candidate,
+                )
+                conflicts = [conflict for conflict in conflicts if conflict.get("type") == "overlap"]
+                if conflicts and not override_conflict:
+                    status = "time_conflict"
+                    result_label = "时间冲突"
+                    can_copy = False
+                    messages.extend([str(conflict.get("message") or "时间冲突") for conflict in conflicts])
+                elif conflicts:
+                    messages.extend([str(conflict.get("message") or "时间冲突") for conflict in conflicts])
+            warnings = schedule_validation_service.build_schedule_warnings(int(source["employee_id"]), target_date[:7], [candidate])
+            items.append(
+                {
+                    "source": source,
+                    "candidate": candidate,
+                    "source_date": source.get("schedule_date"),
+                    "target_date": target_date,
+                    "employee_id": int(source["employee_id"]),
+                    "employee_name": source.get("employee_name") or "",
+                    "store_name": source.get("store_name") or "",
+                    "shift_name": source.get("shift_name") or "",
+                    "display_time": source.get("display_time") or "-",
+                    "display_hours": source.get("display_hours") or f"{format_hours_value(source.get('duration_hours'))} 小时",
+                    "status": status,
+                    "result_label": result_label,
+                    "can_copy": can_copy,
+                    "existing_schedule": existing,
+                    "will_overwrite": bool(existing and strategy == "overwrite" and can_copy),
+                    "will_skip": status == "skip_existing",
+                    "conflicts": conflicts,
+                    "warnings": warnings,
+                    "messages": messages,
+                    "message_text": "；".join(messages + [str(warning.get("message") or "") for warning in warnings if warning.get("type") != "custom_time"]),
+                }
+            )
+    summary = {
+        "source_count": len(source_rows),
+        "target_count": len(items),
+        "existing_conflict_count": sum(1 for item in items if item["will_skip"] or item["will_overwrite"]),
+        "time_conflict_count": sum(len(item.get("conflicts") or []) for item in items),
+        "warning_count": sum(len([warning for warning in item.get("warnings") or [] if warning.get("type") != "custom_time"]) for item in items),
+        "skipped_count": sum(1 for item in items if item["will_skip"]),
+        "overwritten_count": sum(1 for item in items if item["will_overwrite"]),
+        "copyable_count": sum(1 for item in items if item["can_copy"]),
+        "blocked_count": sum(1 for item in items if not item["can_copy"] and not item["will_skip"]),
+    }
+    return {
+        **dates,
+        "store_names": clean_stores,
+        "employee_ids": [int(employee_id) for employee_id in employee_ids or [] if int(employee_id) > 0],
+        "shift_type_ids": [int(shift_id) for shift_id in shift_type_ids or [] if int(shift_id) > 0],
+        "include_custom_shift": include_custom_shift,
+        "copy_strategy": strategy,
+        "override_conflict": bool(override_conflict),
+        "items": items,
+        "summary": summary,
+        "has_blocking_conflicts": any(item["status"] == "time_conflict" for item in items),
+        "has_blocking_items": any(not item["can_copy"] and not item["will_skip"] for item in items),
+    }
+
+
+def insert_copied_schedule(connection: sqlite3.Connection, item: Dict[str, object], operator: str, timestamp: str) -> int:
+    candidate = dict(item["candidate"])
+    existing = item.get("existing_schedule")
+    if existing and item.get("will_overwrite"):
+        connection.execute("DELETE FROM store_schedules WHERE id = ?", (int(existing["id"]),))
+    cursor = connection.execute(
+        """
+        INSERT INTO store_schedules (
+            store_name, employee_id, schedule_date, shift_type_id, note,
+            is_custom_time, custom_start_time, custom_end_time,
+            custom_duration_hours, custom_label, created_by, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            candidate["store_name"],
+            int(candidate["employee_id"]),
+            candidate["schedule_date"],
+            int(candidate.get("shift_type_id") or 0),
+            candidate.get("note") or "",
+            int(candidate.get("is_custom_time") or 0),
+            candidate.get("custom_start_time") or "",
+            candidate.get("custom_end_time") or "",
+            candidate.get("custom_duration_hours"),
+            candidate.get("custom_label") or "",
+            operator,
+            timestamp,
+            timestamp,
+        ),
+    )
+    schedule_id = int(cursor.lastrowid)
+    insert_schedule_log(connection, schedule_id, "复制排班", item["source"], candidate, operator, timestamp)
+    return schedule_id
+
+
+def confirm_schedule_copy(plan: Dict[str, object], operator: str) -> Dict[str, int]:
+    if plan.get("has_blocking_items"):
+        raise ValueError("确认复制被拒绝：存在不可复制明细，请返回预览处理。")
+    timestamp = now_text()
+    copied_count = 0
+    overwritten_count = 0
+    conflict_override_count = 0
+    warning_count = int(plan.get("summary", {}).get("warning_count") or 0)
+    with get_connection() as connection:
+        for item in plan.get("items") or []:
+            if item.get("will_skip") or not item.get("can_copy"):
+                continue
+            insert_copied_schedule(connection, item, operator, timestamp)
+            copied_count += 1
+            if item.get("will_overwrite"):
+                overwritten_count += 1
+            if item.get("conflicts"):
+                conflict_override_count += 1
+    return {
+        "copied_count": copied_count,
+        "skipped_count": int(plan.get("summary", {}).get("skipped_count") or 0),
+        "overwritten_count": overwritten_count,
+        "conflict_override_count": conflict_override_count,
+        "warning_count": warning_count,
+    }
 
 
 def copy_previous_day_schedules(store_name: str, target_date: str, operator: str) -> Dict[str, object]:
@@ -10658,6 +10987,7 @@ def create_app() -> FastAPI:
         skipped_count: int = 0,
         deleted: int = 0,
         error: str = "",
+        copy_preview: Optional[Dict[str, object]] = None,
         status_code: int = 200,
         current_user: Optional[Dict[str, object]] = None,
     ) -> HTMLResponse:
@@ -10730,6 +11060,7 @@ def create_app() -> FastAPI:
                 "skipped_count": max(skipped_count, 0),
                 "deleted": max(deleted, 0),
                 "error": combined_error,
+                "copy_preview": copy_preview,
                 "admin_user": admin,
                 "csrf_token": current_csrf_token(request),
             },
@@ -12087,10 +12418,165 @@ def create_app() -> FastAPI:
             status_code=303,
         )
 
+    @app.post("/admin/schedules/copy-preview", response_class=HTMLResponse)
+    def preview_schedule_copy_route(
+        request: Request,
+        current_user: Dict[str, object] = Depends(require_permission("schedule.copy")),
+        source_start_date: str = Form(""),
+        source_end_date: str = Form(""),
+        target_start_date: str = Form(""),
+        store_names: Optional[List[str]] = Form(None),
+        employee_ids: Optional[List[str]] = Form(None),
+        shift_type_ids: Optional[List[str]] = Form(None),
+        copy_strategy: str = Form("skip"),
+        override_conflict: str = Form(""),
+        csrf_token: str = Form(""),
+    ) -> HTMLResponse:
+        admin = str(current_user.get("username") or "")
+        require_admin_csrf(request, csrf_token)
+        config = load_app_config()
+        parsed_employee_ids, _invalid_employee_ids = parse_optional_int_list(employee_ids)
+        parsed_shift_ids, include_custom_shift, _invalid_shift = parse_shift_filter_values(shift_type_ids, "")
+        selected_store_names, _is_all, invalid_store = normalize_schedule_store_filter(store_names, "", config, default_to_first=False)
+        error = ""
+        copy_preview: Optional[Dict[str, object]] = None
+        selected_month = target_start_date[:7] if target_start_date else datetime.now().strftime("%Y-%m")
+        try:
+            if invalid_store:
+                raise ValueError("请选择有效门店。")
+            copy_preview = build_schedule_copy_plan(
+                source_start_date,
+                source_end_date,
+                target_start_date,
+                selected_store_names,
+                employee_ids=parsed_employee_ids,
+                shift_type_ids=parsed_shift_ids,
+                include_custom_shift=include_custom_shift,
+                copy_strategy=copy_strategy,
+                override_conflict=override_conflict in {"1", "true", "on", "yes"} and permission_service.has_permission(current_user, "schedule.override_conflict"),
+                current_user=current_user,
+            )
+            selected_month = str(copy_preview["target_start_date"])[:7]
+            if not copy_preview["items"]:
+                error = "无可复制排班。"
+        except (ValueError, HTTPException) as exc:
+            error = form_error_message(exc)
+        return render_schedules_page(
+            request,
+            admin,
+            selected_store_names[0] if len(selected_store_names) == 1 else "",
+            selected_month,
+            "",
+            "calendar",
+            False,
+            "store",
+            "selected_stores",
+            "all",
+            parsed_employee_ids,
+            0,
+            current_user=current_user,
+            store_names=selected_store_names,
+            error=error,
+            copy_preview=copy_preview,
+        )
+
+    @app.post("/admin/schedules/copy-confirm", response_class=HTMLResponse)
+    def confirm_schedule_copy_route(
+        request: Request,
+        current_user: Dict[str, object] = Depends(require_permission("schedule.copy")),
+        source_start_date: str = Form(""),
+        source_end_date: str = Form(""),
+        target_start_date: str = Form(""),
+        store_names: Optional[List[str]] = Form(None),
+        employee_ids: Optional[List[str]] = Form(None),
+        shift_type_ids: Optional[List[str]] = Form(None),
+        copy_strategy: str = Form("skip"),
+        override_conflict: str = Form(""),
+        csrf_token: str = Form(""),
+    ):
+        admin = str(current_user.get("username") or "")
+        require_admin_csrf(request, csrf_token)
+        config = load_app_config()
+        parsed_employee_ids, _invalid_employee_ids = parse_optional_int_list(employee_ids)
+        parsed_shift_ids, include_custom_shift, _invalid_shift = parse_shift_filter_values(shift_type_ids, "")
+        selected_store_names, _is_all, invalid_store = normalize_schedule_store_filter(store_names, "", config, default_to_first=False)
+        selected_month = target_start_date[:7] if target_start_date else datetime.now().strftime("%Y-%m")
+        copy_preview: Optional[Dict[str, object]] = None
+        try:
+            if invalid_store:
+                raise ValueError("请选择有效门店。")
+            requested_override = override_conflict in {"1", "true", "on", "yes"}
+            can_override = permission_service.has_permission(current_user, "schedule.override_conflict")
+            copy_preview = build_schedule_copy_plan(
+                source_start_date,
+                source_end_date,
+                target_start_date,
+                selected_store_names,
+                employee_ids=parsed_employee_ids,
+                shift_type_ids=parsed_shift_ids,
+                include_custom_shift=include_custom_shift,
+                copy_strategy=copy_strategy,
+                override_conflict=requested_override and can_override,
+                current_user=current_user,
+            )
+            selected_month = str(copy_preview["target_start_date"])[:7]
+            if copy_preview.get("has_blocking_conflicts") and not (requested_override and can_override):
+                raise ValueError("确认复制被拒绝：存在时间冲突，请先处理冲突或使用覆盖权限。")
+            result = confirm_schedule_copy(copy_preview, admin)
+        except (ValueError, HTTPException) as exc:
+            error = form_error_message(exc)
+            return render_schedules_page(
+                request,
+                admin,
+                selected_store_names[0] if len(selected_store_names) == 1 else "",
+                selected_month,
+                "",
+                "calendar",
+                False,
+                "store",
+                "selected_stores",
+                "all",
+                parsed_employee_ids,
+                0,
+                current_user=current_user,
+                store_names=selected_store_names,
+                error=error,
+                copy_preview=copy_preview,
+                status_code=200,
+            )
+        record_operation_log(
+            admin,
+            "schedule.copy",
+            "schedule",
+            "",
+            {
+                "source_start_date": source_start_date,
+                "source_end_date": source_end_date,
+                "target_start_date": target_start_date,
+                "store_names": copy_preview.get("store_names") if copy_preview else selected_store_names,
+                **result,
+                "override_conflict": override_conflict in {"1", "true", "on", "yes"},
+            },
+            request,
+        )
+        if int(result.get("overwritten_count") or 0) > 0:
+            record_operation_log(admin, "schedule.copy.overwrite", "schedule", "", result, request)
+        if int(result.get("conflict_override_count") or 0) > 0:
+            record_operation_log(admin, "schedule.copy.override_conflict", "schedule", "", result, request)
+        return RedirectResponse(
+            url=schedule_redirect_url(
+                selected_store_names[0] if len(selected_store_names) == 1 else "",
+                selected_month,
+                saved_count=int(result.get("copied_count") or 0),
+                skipped_count=int(result.get("skipped_count") or 0),
+            ),
+            status_code=303,
+        )
+
     @app.post("/admin/schedules/copy-day")
     def copy_schedule_day_route(
         request: Request,
-        current_user: Dict[str, object] = Depends(require_permission("schedule.create")),
+        current_user: Dict[str, object] = Depends(require_permission("schedule.copy")),
         store_name: str = Form(""),
         target_date: str = Form(""),
         csrf_token: str = Form(""),

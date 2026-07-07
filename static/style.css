@@ -3039,6 +3039,59 @@ a:focus-visible {
   margin-bottom: 10px;
 }
 
+.schedule-copy-card,
+.schedule-copy-preview-card {
+  display: grid;
+  gap: 16px;
+}
+
+.schedule-copy-workflow-form {
+  align-items: start;
+}
+
+.schedule-copy-kpis {
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+}
+
+.schedule-copy-preview-scroll {
+  max-width: 100%;
+}
+
+.schedule-copy-preview-table th,
+.schedule-copy-preview-table td {
+  min-width: 120px;
+}
+
+.schedule-copy-result-badge {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  padding: 4px 9px;
+  border-radius: 999px;
+  background: #dcfce7;
+  color: #166534;
+  font-size: 11px;
+  font-weight: 900;
+  white-space: nowrap;
+}
+
+.schedule-copy-result-badge.skip_existing {
+  background: #e5e7eb;
+  color: #374151;
+}
+
+.schedule-copy-result-badge.will_overwrite {
+  background: #ffedd5;
+  color: #9a3412;
+}
+
+.schedule-copy-result-badge.time_conflict,
+.schedule-copy-result-badge.employee_inactive,
+.schedule-copy-result-badge.employee_not_schedulable {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
 .calendar-shift-counts,
 .store-summary-counts {
   display: flex;

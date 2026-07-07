@@ -298,6 +298,144 @@
   </details>
   {% endif %}
 
+  {% if has_perm('schedule.copy') %}
+  <details class="schedule-copy-card schedule-operation-layer schedule-workspace-card admin-section ops-card schedule-operation-panel" id="copy-schedule" open>
+    <summary class="section-heading admin-section-heading">
+      <span>
+        <h2>复制排班</h2>
+        <p>先预览来源周期和目标周期，确认冲突、覆盖和跳过数量后再复制。</p>
+      </span>
+    </summary>
+    <form class="schedule-form schedule-copy-workflow-form" method="post" action="/admin/schedules/copy-preview" data-feedback-form data-preserve-scroll data-loading-label="生成预览中...">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label><span>来源开始</span><input name="source_start_date" type="date" value="{{ copy_preview.source_start_date if copy_preview else context.copy_defaults.source_start_date }}" required></label>
+      <label><span>来源结束</span><input name="source_end_date" type="date" value="{{ copy_preview.source_end_date if copy_preview else context.copy_defaults.source_end_date }}" required></label>
+      <label><span>目标开始</span><input name="target_start_date" type="date" value="{{ copy_preview.target_start_date if copy_preview else context.copy_defaults.target_start_date }}" required></label>
+      <div class="schedule-filter-employees full-span">
+        <span>复制门店</span>
+        <div class="schedule-filter-chip-grid compact-chip-grid">
+          {% for store in context.stores %}
+          <label class="choice-chip compact-chip">
+            <input type="checkbox" name="store_names" value="{{ store }}" {% if (copy_preview and store in copy_preview.store_names) or ((not copy_preview) and store in context.selected_store_names) %}checked{% endif %}>
+            <span>{{ store }}</span>
+          </label>
+          {% endfor %}
+        </div>
+      </div>
+      <div class="schedule-filter-employees full-span">
+        <span>员工范围（不选表示门店下全部）</span>
+        <div class="schedule-filter-chip-grid compact-chip-grid">
+          {% for employee in context.employee_options %}
+          <label class="choice-chip compact-chip">
+            <input type="checkbox" name="employee_ids" value="{{ employee.id }}" {% if copy_preview and employee.id in copy_preview.employee_ids %}checked{% endif %}>
+            <span>{{ employee.employee_name }}<small>{{ employee.primary_store or '-' }}</small></span>
+          </label>
+          {% else %}
+          <small class="empty-note">当前范围暂无员工。</small>
+          {% endfor %}
+        </div>
+      </div>
+      <div class="schedule-filter-employees full-span">
+        <span>班次范围（不选表示全部）</span>
+        <div class="schedule-filter-chip-grid compact-chip-grid">
+          {% for shift in context.all_shift_types %}
+          <label class="choice-chip compact-chip">
+            <input type="checkbox" name="shift_type_ids" value="{{ shift.id }}" {% if copy_preview and shift.id in copy_preview.shift_type_ids %}checked{% endif %}>
+            <span>{{ shift.shift_name }}<small>{{ shift.store_label }}</small></span>
+          </label>
+          {% endfor %}
+          <label class="choice-chip compact-chip">
+            <input type="checkbox" name="shift_type_ids" value="custom" {% if copy_preview and copy_preview.include_custom_shift %}checked{% endif %}>
+            <span>自定义时间</span>
+          </label>
+        </div>
+      </div>
+      <div class="schedule-mode-segment">
+        <span>复制策略</span>
+        <label><input type="radio" name="copy_strategy" value="skip" {% if not copy_preview or copy_preview.copy_strategy == 'skip' %}checked{% endif %}><span>跳过已有排班</span></label>
+        <label><input type="radio" name="copy_strategy" value="overwrite" {% if copy_preview and copy_preview.copy_strategy == 'overwrite' %}checked{% endif %}><span>覆盖已有排班</span></label>
+      </div>
+      {% if has_perm('schedule.override_conflict') %}
+      <label class="checkbox-line schedule-overwrite-line schedule-conflict-override-line">
+        <input type="checkbox" name="override_conflict" value="1" {% if copy_preview and copy_preview.override_conflict %}checked{% endif %}>
+        <span>忽略冲突并复制</span>
+      </label>
+      {% endif %}
+      <div class="schedule-quick-actions full-span">
+        <button class="ghost-button compact" type="button" data-copy-last-week-fill>复制上周到本周</button>
+        <button class="primary-button compact" type="submit">预览复制结果</button>
+      </div>
+    </form>
+  </details>
+  {% endif %}
+
+  {% if copy_preview %}
+  <section class="schedule-copy-preview-card schedule-workspace-card ops-card" id="schedule-copy-preview">
+    <div class="section-heading admin-section-heading">
+      <h2>复制排班预览</h2>
+      <p>{{ copy_preview.source_start_date }} 至 {{ copy_preview.source_end_date }} → {{ copy_preview.target_start_date }} 至 {{ copy_preview.target_end_date }}</p>
+    </div>
+    <div class="schedule-kpi-grid schedule-copy-kpis">
+      <article class="ops-card metric-card"><span>来源排班</span><strong>{{ copy_preview.summary.source_count }}</strong></article>
+      <article class="ops-card metric-card"><span>目标明细</span><strong>{{ copy_preview.summary.target_count }}</strong></article>
+      <article class="ops-card metric-card"><span>已有排班</span><strong>{{ copy_preview.summary.existing_conflict_count }}</strong></article>
+      <article class="ops-card metric-card"><span>时间冲突</span><strong>{{ copy_preview.summary.time_conflict_count }}</strong></article>
+      <article class="ops-card metric-card"><span>工时异常</span><strong>{{ copy_preview.summary.warning_count }}</strong></article>
+      <article class="ops-card metric-card"><span>跳过</span><strong>{{ copy_preview.summary.skipped_count }}</strong></article>
+      <article class="ops-card metric-card"><span>覆盖</span><strong>{{ copy_preview.summary.overwritten_count }}</strong></article>
+      <article class="ops-card metric-card"><span>可复制</span><strong>{{ copy_preview.summary.copyable_count }}</strong></article>
+    </div>
+    <div class="schedule-table-scroll schedule-copy-preview-scroll">
+      <table class="schedule-table schedule-copy-preview-table">
+        <thead>
+          <tr>
+            <th>来源日期</th>
+            <th>目标日期</th>
+            <th>员工</th>
+            <th>门店</th>
+            <th>班次</th>
+            <th>时间段</th>
+            <th>工时</th>
+            <th>结果</th>
+            <th>异常说明</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for item in copy_preview['items'] %}
+          <tr>
+            <td>{{ item.source_date }}</td>
+            <td>{{ item.target_date }}</td>
+            <td>{{ item.employee_name }}</td>
+            <td>{{ item.store_name }}</td>
+            <td>{{ item.shift_name }}</td>
+            <td>{{ item.display_time }}</td>
+            <td>{{ item.display_hours }}</td>
+            <td><span class="schedule-copy-result-badge {{ item.status }}">{{ item.result_label }}</span></td>
+            <td>{{ item.message_text or '-' }}</td>
+          </tr>
+          {% else %}
+          <tr><td class="empty-cell" colspan="9">无可复制排班。</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <form class="schedule-copy-confirm-form" method="post" action="/admin/schedules/copy-confirm" data-feedback-form data-preserve-scroll data-loading-label="复制中..." onsubmit="return confirm('确认按当前预览参数复制排班吗？');">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="source_start_date" value="{{ copy_preview.source_start_date }}">
+      <input type="hidden" name="source_end_date" value="{{ copy_preview.source_end_date }}">
+      <input type="hidden" name="target_start_date" value="{{ copy_preview.target_start_date }}">
+      {% for store in copy_preview.store_names %}<input type="hidden" name="store_names" value="{{ store }}">{% endfor %}
+      {% for employee_id in copy_preview.employee_ids %}<input type="hidden" name="employee_ids" value="{{ employee_id }}">{% endfor %}
+      {% for shift_id in copy_preview.shift_type_ids %}<input type="hidden" name="shift_type_ids" value="{{ shift_id }}">{% endfor %}
+      {% if copy_preview.include_custom_shift %}<input type="hidden" name="shift_type_ids" value="custom">{% endif %}
+      <input type="hidden" name="copy_strategy" value="{{ copy_preview.copy_strategy }}">
+      {% if copy_preview.override_conflict %}<input type="hidden" name="override_conflict" value="1">{% endif %}
+      <button class="primary-button compact" type="submit" {% if copy_preview.has_blocking_items %}disabled{% endif %}>确认复制</button>
+      {% if copy_preview.has_blocking_items %}<small class="empty-note">存在不可复制明细，请调整后重新预览。</small>{% endif %}
+    </form>
+  </section>
+  {% endif %}
+
   <section class="schedule-view-card schedule-view-layer schedule-workspace-card schedule-data-layer ops-card" id="schedule-view">
     <div class="section-heading admin-section-heading">
       <h2>排班查看</h2>
