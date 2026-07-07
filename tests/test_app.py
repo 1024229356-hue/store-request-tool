@@ -2670,7 +2670,7 @@ def test_p1b_template_validation_keeps_auto_assignment_and_sla(tmp_path, monkeyp
 
 def test_phase4_templates_use_has_perm_for_privileged_controls():
     expectations = {
-        "templates/base_admin.html": ["account.view", "role.view", "system.route_health", "ticket.view_trash", "ticket.delete"],
+        "templates/base_admin.html": ["account.view", "system.view", "role.view", "system.route_health", "ticket.view_trash", "ticket.delete"],
         "templates/admin.html": ["ticket.export", "ticket.archive", "ticket.delete"],
         "templates/ticket_detail.html": ["ticket.comment", "ticket.assign", "ticket.update", "ticket.delete", "ticket.archive", "ticket.hard_delete"],
         "templates/employees.html": ["employee.create", "employee.update", "employee.archive", "employee.delete", "employee.hard_delete"],
@@ -3745,10 +3745,11 @@ def test_base_admin_navigation_uses_only_canonical_admin_paths():
         "/admin/employees",
         "/admin/shift-types",
             "/admin/schedules",
-            "/admin/settings",
-            "/admin/ticket-rules",
-            "/admin/account",
+        "/admin/settings",
+        "/admin/ticket-rules",
+        "/admin/account",
         "/admin/personnel-governance",
+        "/admin/audit-logs",
         "/admin/roles",
         "/admin/route-health",
         "/admin/system",
@@ -3787,6 +3788,7 @@ def test_admin_core_pages_return_200_after_login(tmp_path, monkeypatch):
         "/admin/settings",
         "/admin/account",
         "/admin/personnel-governance",
+        "/admin/audit-logs",
         "/admin/system",
         "/admin/embedded-pages",
         "/admin/route-health",
@@ -3805,6 +3807,7 @@ def test_version_endpoint_reports_runtime_route_health(tmp_path, monkeypatch):
         "/admin/employees",
         "/admin/shift-types",
         "/admin/schedules",
+        "/admin/audit-logs",
         "/admin/tickets/bulk-archive",
         "/admin/tickets/bulk-delete",
     ]
@@ -3850,6 +3853,7 @@ def test_runtime_health_endpoints_report_fixed_access_contract(tmp_path, monkeyp
     assert payload["urls"]["employees"] == "http://127.0.0.1:8701/admin/employees"
     assert payload["urls"]["shift_types"] == "http://127.0.0.1:8701/admin/shift-types"
     assert payload["urls"]["embedded_pages"] == "http://127.0.0.1:8701/admin/embedded-pages"
+    assert payload["urls"]["audit_logs"] == "http://127.0.0.1:8701/admin/audit-logs"
     assert payload["urls"]["route_health"] == "http://127.0.0.1:8701/admin/route-health"
     assert ".env" not in json.dumps(payload, ensure_ascii=False)
     assert ADMIN_AUTH[1] not in json.dumps(payload, ensure_ascii=False)
@@ -8707,8 +8711,17 @@ def test_p5a_system_check_readiness_counts_and_gaps(tmp_path, monkeypatch):
     assert checks_by_key["active_brand_count"]["value"] == 1
     assert checks_by_key["active_request_type_count"]["value"] == 2
     assert checks_by_key["request_types_missing_assignment_count"]["value"] == 1
+    assert checks_by_key["request_types_missing_assignment_count"]["level"] == "warning"
+    assert checks_by_key["request_types_missing_assignment_count"]["risk_grade"] == "中"
+    assert checks_by_key["request_types_missing_assignment_count"]["action_url"] == "/admin/ticket-rules"
     assert checks_by_key["request_types_missing_sla_count"]["value"] == 1
+    assert checks_by_key["request_types_missing_sla_count"]["level"] == "warning"
+    assert checks_by_key["request_types_missing_sla_count"]["risk_grade"] == "中"
+    assert checks_by_key["request_types_missing_sla_count"]["action_url"] == "/admin/ticket-rules"
     assert checks_by_key["request_types_missing_template_count"]["value"] == 1
+    assert checks_by_key["request_types_missing_template_count"]["level"] == "warning"
+    assert checks_by_key["request_types_missing_template_count"]["risk_grade"] == "中"
+    assert checks_by_key["request_types_missing_template_count"]["action_url"] == "/admin/ticket-rules"
     assert init["stores"]["active_count"] == 1
     assert init["stores"]["inactive_count"] == 1
     assert init["brands"]["active_count"] == 1
@@ -8717,6 +8730,94 @@ def test_p5a_system_check_readiness_counts_and_gaps(tmp_path, monkeypatch):
     assert init["request_types"]["missing_assignment_count"] == 1
     assert init["request_types"]["missing_sla_count"] == 1
     assert init["request_types"]["missing_template_count"] == 1
+
+
+def test_p5b_system_check_distinguishes_acceptance_config_risks(tmp_path, monkeypatch):
+    _, main = build_client(
+        tmp_path,
+        monkeypatch,
+        config_overrides={
+            "stores.json": ["验收门店A"],
+            "brands.json": [],
+            "request_types.json": ["验收类型A", "验收类型B"],
+            "holidays.json": {"2026-07-08": "验收节日"},
+        },
+        admin_users="admin:123456",
+    )
+
+    context = main.system_check_context(main.app)
+    checks_by_key = {item["key"]: item for section in context["system_checks"] for item in section["items"]}
+
+    assert checks_by_key["active_system_admin_count"]["value"] == 1
+    assert checks_by_key["active_system_admin_count"]["level"] == "warning"
+    assert checks_by_key["active_system_admin_count"]["risk_grade"] == "高"
+    assert checks_by_key["active_system_admin_count"]["action_url"] == "/admin/account"
+    assert "管理员账号丢失" in checks_by_key["active_system_admin_count"]["reason"]
+
+    assert checks_by_key["active_brand_count"]["value"] == 0
+    assert checks_by_key["active_brand_count"]["level"] == "warning"
+    assert checks_by_key["active_brand_count"]["risk_grade"] == "高"
+    assert checks_by_key["active_brand_count"]["action_url"] == "/admin/settings"
+
+    for key in (
+        "request_types_missing_assignment_count",
+        "request_types_missing_sla_count",
+        "request_types_missing_template_count",
+    ):
+        assert checks_by_key[key]["level"] == "risk"
+        assert checks_by_key[key]["risk_grade"] == "高"
+        assert checks_by_key[key]["action_url"] == "/admin/ticket-rules"
+        assert checks_by_key[key]["affects_trial"] is True
+
+
+def test_p5b_audit_logs_page_access_filters_empty_and_permission_overview(tmp_path, monkeypatch):
+    client, main = build_client(tmp_path, monkeypatch, admin_users="admin:123456,viewer:123456")
+    unauthenticated = TestClient(main.app).get("/admin/audit-logs", follow_redirects=False)
+    assert unauthenticated.status_code == 303
+    assert unauthenticated.headers["location"].startswith("/admin/login")
+
+    assert_login_success(login_admin(client, "admin", "123456"))
+    main.audit_service.record_operation("admin", "p5b.audit", "ticket", "42", {"safe": True}, None)
+
+    page = client.get("/admin/audit-logs")
+    assert page.status_code == 200
+    assert "审计日志" in page.text
+    assert "登录日志" in page.text
+    assert "操作日志" in page.text
+    assert "admin" in page.text
+    assert "登录成功" in page.text
+    assert "p5b.audit" in page.text
+    assert "ticket" in page.text
+    assert "42" in page.text
+    assert "application/json" not in page.headers.get("content-type", "")
+
+    login_only = client.get("/admin/audit-logs?log_type=login&username=admin")
+    assert login_only.status_code == 200
+    assert "登录成功" in login_only.text
+    assert "p5b.audit" not in login_only.text
+
+    operation_only = client.get("/admin/audit-logs?log_type=operation&action=p5b.audit")
+    assert operation_only.status_code == 200
+    assert "p5b.audit" in operation_only.text
+
+    empty = client.get("/admin/audit-logs?username=missing-user")
+    assert empty.status_code == 200
+    assert "暂无日志" in empty.text
+
+    overview_context = main.permission_overview_context(main.app)
+    assert overview_context["high_risk_uncontrolled_count"] == 0
+    assert all(route["path"] != "/admin/audit-logs" for route in overview_context["uncontrolled_routes"])
+
+    account_role = create_role_with_permissions(tmp_path, "p5b-account-audit-viewer", ["account.view"])
+    update_admin_user_access(tmp_path, "viewer", account_role)
+    viewer_client = TestClient(main.app)
+    assert_login_success(login_admin(viewer_client, "viewer", "123456"))
+    assert viewer_client.get("/admin/audit-logs").status_code == 200
+
+    no_access_role = create_role_with_permissions(tmp_path, "p5b-no-audit-access", ["ticket.view"])
+    update_admin_user_access(tmp_path, "viewer", no_access_role)
+    denied = viewer_client.get("/admin/audit-logs")
+    assert_html_forbidden(denied)
 
 
 def test_p5a_permission_overview_role_acceptance_checklist_and_excel_export(tmp_path, monkeypatch):

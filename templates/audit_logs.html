@@ -1,0 +1,172 @@
+{% set page_title = '审计日志' %}
+{% set page_subtitle = '只读查看后台登录日志与操作日志，支持按类型、账号、动作和日期筛选。' %}
+{% set page_eyebrow = 'P5B 运维保障' %}
+{% set current_menu = 'audit-logs' %}
+{% extends "base_admin.html" %}
+
+{% block topbar_actions %}
+<a class="ghost-button compact" href="/admin/system-check">系统体检</a>
+<a class="ghost-button compact" href="/admin/permission-overview">权限总览</a>
+{% endblock %}
+
+{% block content %}
+<section class="stats-section work-card">
+  <div class="stats-grid">
+    <article class="stat-card">
+      <span>筛选结果</span>
+      <strong>{{ pagination.total_count }}</strong>
+      <small>登录日志 + 操作日志</small>
+    </article>
+    <article class="stat-card">
+      <span>当前页</span>
+      <strong>{{ pagination.page }}</strong>
+      <small>每页 {{ pagination.per_page }} 条</small>
+    </article>
+    <article class="stat-card">
+      <span>日志模式</span>
+      <strong>{% if filters.log_type == 'login' %}登录{% elif filters.log_type == 'operation' %}操作{% else %}全部{% endif %}</strong>
+      <small>只读审计</small>
+    </article>
+  </div>
+</section>
+
+<section class="work-card">
+  <div class="section-heading admin-section-heading">
+    <h2>日志筛选</h2>
+    <p>筛选不会修改数据；action 仅作用于操作日志。</p>
+  </div>
+  <form class="filter-form audit-filter-form" method="get" action="/admin/audit-logs">
+    <label>
+      <span>日志类型</span>
+      <select name="log_type">
+        <option value="all" {% if filters.log_type == 'all' %}selected{% endif %}>全部</option>
+        <option value="login" {% if filters.log_type == 'login' %}selected{% endif %}>登录日志</option>
+        <option value="operation" {% if filters.log_type == 'operation' %}selected{% endif %}>操作日志</option>
+      </select>
+    </label>
+    <label>
+      <span>操作人</span>
+      <input name="username" value="{{ filters.username }}" placeholder="username">
+    </label>
+    <label>
+      <span>action</span>
+      <input name="action" value="{{ filters.action }}" placeholder="ticket.update">
+    </label>
+    <label>
+      <span>开始日期</span>
+      <input name="date_from" type="date" value="{{ filters.date_from }}">
+    </label>
+    <label>
+      <span>结束日期</span>
+      <input name="date_to" type="date" value="{{ filters.date_to }}">
+    </label>
+    <label>
+      <span>每页</span>
+      <select name="per_page">
+        {% for size in [10, 20, 50, 100] %}
+        <option value="{{ size }}" {% if filters.per_page == size %}selected{% endif %}>{{ size }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <div class="form-actions">
+      <button class="primary-button compact" type="submit">筛选</button>
+      <a class="ghost-button compact" href="/admin/audit-logs">重置</a>
+    </div>
+  </form>
+</section>
+
+{% if not login_logs and not operation_logs %}
+<section class="work-card placeholder-panel">
+  <div class="section-heading admin-section-heading">
+    <h2>暂无日志</h2>
+    <p>当前筛选条件下没有匹配的登录日志或操作日志。</p>
+  </div>
+</section>
+{% endif %}
+
+{% if filters.log_type in ['all', 'login'] %}
+<section class="work-card">
+  <div class="section-heading admin-section-heading">
+    <h2>登录日志</h2>
+  </div>
+  <div class="table-wrapper">
+    <table class="admin-table audit-log-table">
+      <thead>
+        <tr>
+          <th>时间</th>
+          <th>用户名</th>
+          <th>是否成功</th>
+          <th>IP</th>
+          <th>User-Agent</th>
+          <th>消息</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for log in login_logs %}
+        <tr>
+          <td>{{ log.created_at }}</td>
+          <td>{{ log.username }}</td>
+          <td><span class="status-badge {% if log.success %}assignable-badge{% else %}inactive-badge{% endif %}">{{ '成功' if log.success else '失败' }}</span></td>
+          <td>{{ log.ip_address or '-' }}</td>
+          <td class="audit-log-detail">{{ log.user_agent or '-' }}</td>
+          <td>{{ log.message or '-' }}</td>
+        </tr>
+        {% else %}
+        <tr><td class="empty-cell" colspan="6">暂无登录日志。</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endif %}
+
+{% if filters.log_type in ['all', 'operation'] %}
+<section class="work-card">
+  <div class="section-heading admin-section-heading">
+    <h2>操作日志</h2>
+  </div>
+  <div class="table-wrapper">
+    <table class="admin-table audit-log-table">
+      <thead>
+        <tr>
+          <th>时间</th>
+          <th>操作人</th>
+          <th>动作</th>
+          <th>对象类型</th>
+          <th>对象 ID</th>
+          <th>详情</th>
+          <th>IP</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for log in operation_logs %}
+        <tr>
+          <td>{{ log.created_at }}</td>
+          <td>{{ log.username }}</td>
+          <td><code>{{ log.action }}</code></td>
+          <td>{{ log.target_type or '-' }}</td>
+          <td>{{ log.target_id or '-' }}</td>
+          <td class="audit-log-detail">{{ log.detail or '-' }}</td>
+          <td>{{ log.ip_address or '-' }}</td>
+        </tr>
+        {% else %}
+        <tr><td class="empty-cell" colspan="7">暂无操作日志。</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endif %}
+
+<section class="work-card pagination-card">
+  <div class="pagination">
+    {% if pagination.prev_page %}
+    <a class="ghost-button compact" href="/admin/audit-logs?log_type={{ filters.log_type }}&username={{ filters.username }}&action={{ filters.action }}&date_from={{ filters.date_from }}&date_to={{ filters.date_to }}&per_page={{ filters.per_page }}&page={{ pagination.prev_page }}">上一页</a>
+    {% endif %}
+    <span>第 {{ pagination.page }} / {{ pagination.total_pages }} 页</span>
+    {% if pagination.next_page %}
+    <a class="ghost-button compact" href="/admin/audit-logs?log_type={{ filters.log_type }}&username={{ filters.username }}&action={{ filters.action }}&date_from={{ filters.date_from }}&date_to={{ filters.date_to }}&per_page={{ filters.per_page }}&page={{ pagination.next_page }}">下一页</a>
+    {% endif %}
+  </div>
+</section>
+{% endblock %}

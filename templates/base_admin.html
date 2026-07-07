@@ -103,6 +103,11 @@
           <span>人员数据治理</span>
         </a>
         {% endif %}
+        {% if has_perm('system.view') or has_perm('account.view') %}
+        <a class="sidebar-link {% if current_menu == 'audit-logs' %}active{% endif %}" href="/admin/audit-logs">
+          <span>操作日志</span>
+        </a>
+        {% endif %}
         {% if has_perm('role.view') %}
         <a class="sidebar-link {% if current_menu == 'roles' %}active{% endif %}" href="/admin/roles">
           <span>角色权限</span>

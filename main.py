@@ -306,6 +306,7 @@ CANONICAL_ACCESS_PATHS = {
     "settings": "/admin/settings",
     "account": "/admin/account",
     "personnel_governance": "/admin/personnel-governance",
+    "audit_logs": "/admin/audit-logs",
     "system": "/admin/system",
     "embedded_pages": "/admin/embedded-pages",
     "route_health": "/admin/route-health",
@@ -332,6 +333,7 @@ REQUIRED_RUNTIME_ROUTES = [
     "/admin/settings",
     "/admin/account",
     "/admin/personnel-governance",
+    "/admin/audit-logs",
     "/admin/system",
     "/admin/embedded-pages",
     "/admin/route-health",
@@ -361,6 +363,7 @@ REQUIRED_RUNTIME_ROUTE_LABELS = {
     "/admin/settings": "配置管理",
     "/admin/account": "账号设置",
     "/admin/personnel-governance": "人员数据治理",
+    "/admin/audit-logs": "审计日志",
     "/admin/system": "系统设置",
     "/admin/embedded-pages": "嵌入页面管理",
     "/admin/route-health": "路由体检",
@@ -1017,6 +1020,7 @@ def should_redirect_to_login(request: Request) -> bool:
         or path == "/admin/account"
         or path == "/admin/roles"
         or path == "/admin/permission-overview"
+        or path == "/admin/audit-logs"
         or path == "/admin/system"
         or path == "/admin/route-health"
         or path == "/admin/my-work"
@@ -2419,6 +2423,154 @@ def record_operation_log(
     audit_service.record_operation(username, action, target_type, target_id, detail, request)
 
 
+def normalize_audit_log_type(log_type: str) -> str:
+    clean = str(log_type or "all").strip()
+    return clean if clean in {"all", "login", "operation"} else "all"
+
+
+def clamp_audit_page(value: int, default: int = 1) -> int:
+    try:
+        clean = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(clean, 1)
+
+
+def clamp_audit_page_size(value: int, default: int = 50) -> int:
+    try:
+        clean = int(value)
+    except (TypeError, ValueError):
+        return default
+    return min(max(clean, 10), 100)
+
+
+def audit_log_base_filters(username: str, date_from: str, date_to: str) -> Tuple[List[str], List[object]]:
+    clauses: List[str] = []
+    params: List[object] = []
+    clean_username = username.strip()
+    if clean_username:
+        clauses.append("username LIKE ?")
+        params.append(f"%{clean_username}%")
+    clean_date_from = date_from.strip()
+    if clean_date_from:
+        clauses.append("created_at >= ?")
+        params.append(f"{clean_date_from} 00:00:00")
+    clean_date_to = date_to.strip()
+    if clean_date_to:
+        clauses.append("created_at <= ?")
+        params.append(f"{clean_date_to} 23:59:59")
+    return clauses, params
+
+
+def audit_log_where_sql(clauses: List[str]) -> str:
+    return " WHERE " + " AND ".join(clauses) if clauses else ""
+
+
+def fetch_audit_log_page(
+    log_type: str = "all",
+    username: str = "",
+    action: str = "",
+    date_from: str = "",
+    date_to: str = "",
+    page: int = 1,
+    per_page: int = 50,
+) -> Dict[str, object]:
+    normalized_type = normalize_audit_log_type(log_type)
+    current_page = clamp_audit_page(page)
+    page_size = clamp_audit_page_size(per_page)
+    offset = (current_page - 1) * page_size
+    action_filter = action.strip()
+    selects: List[str] = []
+    params: List[object] = []
+    with get_connection() as connection:
+        if normalized_type in {"all", "login"} and not action_filter and table_exists(connection, "admin_login_logs"):
+            login_clauses, login_params = audit_log_base_filters(username, date_from, date_to)
+            selects.append(
+                """
+                SELECT
+                    'login' AS log_kind,
+                    id,
+                    created_at,
+                    username,
+                    success,
+                    ip_address,
+                    user_agent,
+                    message,
+                    '' AS action,
+                    '' AS target_type,
+                    '' AS target_id,
+                    '' AS detail
+                FROM admin_login_logs
+                """
+                + audit_log_where_sql(login_clauses)
+            )
+            params.extend(login_params)
+        if normalized_type in {"all", "operation"} and table_exists(connection, "admin_operation_logs"):
+            operation_clauses, operation_params = audit_log_base_filters(username, date_from, date_to)
+            if action_filter:
+                operation_clauses.append("action LIKE ?")
+                operation_params.append(f"%{action_filter}%")
+            selects.append(
+                """
+                SELECT
+                    'operation' AS log_kind,
+                    id,
+                    created_at,
+                    username,
+                    NULL AS success,
+                    ip_address,
+                    '' AS user_agent,
+                    '' AS message,
+                    action,
+                    target_type,
+                    target_id,
+                    detail
+                FROM admin_operation_logs
+                """
+                + audit_log_where_sql(operation_clauses)
+            )
+            params.extend(operation_params)
+        if not selects:
+            return {
+                "login_logs": [],
+                "operation_logs": [],
+                "pagination": {
+                    "page": current_page,
+                    "per_page": page_size,
+                    "total_count": 0,
+                    "total_pages": 1,
+                    "prev_page": None,
+                    "next_page": None,
+                },
+            }
+        union_sql = " UNION ALL ".join(selects)
+        total_row = connection.execute(f"SELECT COUNT(*) AS count FROM ({union_sql})", tuple(params)).fetchone()
+        total_count = int(total_row["count"] or 0) if total_row else 0
+        total_pages = max((total_count + page_size - 1) // page_size, 1)
+        if current_page > total_pages:
+            current_page = total_pages
+            offset = (current_page - 1) * page_size
+        rows = [
+            dict(row)
+            for row in connection.execute(
+                f"SELECT * FROM ({union_sql}) ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
+                tuple([*params, page_size, offset]),
+            ).fetchall()
+        ]
+    return {
+        "login_logs": [row for row in rows if row["log_kind"] == "login"],
+        "operation_logs": [row for row in rows if row["log_kind"] == "operation"],
+        "pagination": {
+            "page": current_page,
+            "per_page": page_size,
+            "total_count": total_count,
+            "total_pages": total_pages,
+            "prev_page": current_page - 1 if current_page > 1 else None,
+            "next_page": current_page + 1 if current_page < total_pages else None,
+        },
+    }
+
+
 def normalize_rule_text(value: object) -> str:
     return str(value or "").strip()
 
@@ -3161,6 +3313,7 @@ PERMISSION_ROUTE_RULES: List[Dict[str, str]] = [
     {"method": "POST", "path": "/admin/roles/{role_id}/permissions", "permission": "role.update", "module": "角色", "label": "编辑角色权限"},
     {"method": "GET", "path": "/admin/permission-overview", "permission": "role.view", "module": "角色", "label": "权限概览"},
     {"method": "GET", "path": "/admin/permission-overview/role-checklist/export", "permission": "role.view", "module": "角色", "label": "导出角色验收清单"},
+    {"method": "GET", "path": "/admin/audit-logs", "permission": "system.view", "module": "系统", "label": "审计日志"},
     {"method": "GET", "path": "/admin/system", "permission": "system.view", "module": "系统", "label": "系统信息"},
     {"method": "GET", "path": "/admin/system-check", "permission": "system.health", "module": "系统", "label": "系统正式使用检查"},
     {"method": "GET", "path": "/admin/route-health", "permission": "system.route_health", "module": "系统", "label": "路由健康"},
@@ -3303,7 +3456,19 @@ def readiness_level_label(level: str) -> str:
     return {"ok": "正常", "warning": "警告", "risk": "风险"}.get(level, "警告")
 
 
-def readiness_item(key: str, label: str, value: object, level: str, detail: str = "") -> Dict[str, object]:
+def readiness_item(
+    key: str,
+    label: str,
+    value: object,
+    level: str,
+    detail: str = "",
+    risk_grade: str = "",
+    reason: str = "",
+    action_label: str = "",
+    action_url: str = "",
+    trial_impact: str = "",
+    affects_trial: bool = False,
+) -> Dict[str, object]:
     normalized_level = level if level in {"ok", "warning", "risk"} else "warning"
     return {
         "key": key,
@@ -3312,7 +3477,21 @@ def readiness_item(key: str, label: str, value: object, level: str, detail: str 
         "level": normalized_level,
         "level_label": readiness_level_label(normalized_level),
         "detail": detail,
+        "risk_grade": risk_grade if normalized_level != "ok" else "",
+        "reason": reason if normalized_level != "ok" else "",
+        "action_label": action_label if normalized_level != "ok" else "",
+        "action_url": action_url if normalized_level != "ok" else "",
+        "trial_impact": trial_impact if normalized_level != "ok" else "",
+        "affects_trial": bool(affects_trial) if normalized_level != "ok" else False,
     }
+
+
+def readiness_gap_level(missing_count: int, active_count: int) -> Tuple[str, str]:
+    if missing_count <= 0:
+        return "ok", ""
+    if active_count > 0 and missing_count >= active_count:
+        return "risk", "高"
+    return "warning", "中"
 
 
 def latest_backup_time() -> str:
@@ -3545,6 +3724,12 @@ def system_check_context(app: FastAPI) -> Dict[str, object]:
     active_store_count = initialization["stores"]["active_count"]
     active_brand_count = initialization["brands"]["active_count"]
     active_request_type_count = initialization["request_types"]["active_count"]
+    missing_assignment_count = len(gaps["missing_assignment"])
+    missing_sla_count = len(gaps["missing_sla"])
+    missing_template_count = len(gaps["missing_template"])
+    assignment_level, assignment_grade = readiness_gap_level(missing_assignment_count, active_request_type_count)
+    sla_level, sla_grade = readiness_gap_level(missing_sla_count, active_request_type_count)
+    template_level, template_grade = readiness_gap_level(missing_template_count, active_request_type_count)
     with get_connection() as connection:
         active_admin_count = active_system_admin_count(connection)
         system_role_id = role_id_for_name(connection, SYSTEM_ADMIN_ROLE_NAME)
@@ -3553,6 +3738,10 @@ def system_check_context(app: FastAPI) -> Dict[str, object]:
         disabled_can_login_count = count_rows(connection, "admin_users", "COALESCE(is_active, 0) = 0 AND COALESCE(allow_login, 1) = 1")
         no_login_assignable_count = count_rows(connection, "admin_users", "COALESCE(allow_login, 1) = 0 AND COALESCE(is_assignable, 0) = 1")
         holiday_count = count_rows(connection, "holidays", "COALESCE(enabled, 0) = 1")
+    active_admin_level = "ok" if active_admin_count >= 2 else ("warning" if active_admin_count == 1 else "risk")
+    active_admin_grade = "" if active_admin_count >= 2 else ("高" if active_admin_count == 1 else "阻塞")
+    active_brand_level = "ok" if active_brand_count > 0 else "warning"
+    active_brand_grade = "" if active_brand_count > 0 else "高"
     sections = [
         {
             "key": "runtime",
@@ -3580,24 +3769,150 @@ def system_check_context(app: FastAPI) -> Dict[str, object]:
             "key": "permission",
             "title": "权限",
             "items": [
-                readiness_item("active_system_admin_count", "active 系统管理员数量", active_admin_count, "ok" if active_admin_count >= 2 else "risk", "正式启用建议至少保留 2 个。"),
-                readiness_item("system_admin_permission_missing_count", "系统管理员权限是否完整", len(missing_system_permissions), "ok" if not missing_system_permissions else "risk", "完整" if not missing_system_permissions else "缺少：" + "、".join(missing_system_permissions)),
-                readiness_item("disabled_can_login_count", "停用但仍可登录账号", disabled_can_login_count, "ok" if disabled_can_login_count == 0 else "risk"),
-                readiness_item("no_login_assignable_count", "allow_login=0 但 is_assignable=1", no_login_assignable_count, "ok" if no_login_assignable_count == 0 else "risk"),
-                readiness_item("high_risk_uncontrolled_post_count", "高风险 POST 未接入", overview["high_risk_uncontrolled_count"], "ok" if overview["high_risk_uncontrolled_count"] == 0 else "risk"),
+                readiness_item(
+                    "active_system_admin_count",
+                    "active 系统管理员数量",
+                    active_admin_count,
+                    active_admin_level,
+                    "正式启用建议至少保留 2 个。",
+                    risk_grade=active_admin_grade,
+                    reason="管理员账号丢失或停用时，系统需要第二个系统管理员完成自救。",
+                    action_label="前往人员与账号管理",
+                    action_url="/admin/account",
+                    trial_impact="小范围试运行可接受，但需指定账号兜底人；正式上线前建议补足。",
+                    affects_trial=active_admin_count == 0,
+                ),
+                readiness_item(
+                    "system_admin_permission_missing_count",
+                    "系统管理员权限是否完整",
+                    len(missing_system_permissions),
+                    "ok" if not missing_system_permissions else "risk",
+                    "完整" if not missing_system_permissions else "缺少：" + "、".join(missing_system_permissions),
+                    risk_grade="阻塞" if missing_system_permissions else "",
+                    reason="系统管理员角色缺少权限会导致后台自救和治理能力不完整。",
+                    action_label="前往角色权限",
+                    action_url="/admin/roles",
+                    trial_impact="会阻塞试运行。",
+                    affects_trial=bool(missing_system_permissions),
+                ),
+                readiness_item(
+                    "disabled_can_login_count",
+                    "停用但仍可登录账号",
+                    disabled_can_login_count,
+                    "ok" if disabled_can_login_count == 0 else "risk",
+                    risk_grade="高" if disabled_can_login_count else "",
+                    reason="停用账号仍可登录会扩大后台访问面。",
+                    action_label="前往人员与账号管理",
+                    action_url="/admin/account",
+                    trial_impact="会阻塞试运行。",
+                    affects_trial=disabled_can_login_count > 0,
+                ),
+                readiness_item(
+                    "no_login_assignable_count",
+                    "allow_login=0 但 is_assignable=1",
+                    no_login_assignable_count,
+                    "ok" if no_login_assignable_count == 0 else "warning",
+                    risk_grade="中" if no_login_assignable_count else "",
+                    reason="不可登录账号被设为可分派，可能造成工单分派后无人处理。",
+                    action_label="前往人员与账号管理",
+                    action_url="/admin/account",
+                    trial_impact="需上线前确认处理人配置。",
+                    affects_trial=False,
+                ),
+                readiness_item(
+                    "high_risk_uncontrolled_post_count",
+                    "高风险 POST 未接入",
+                    overview["high_risk_uncontrolled_count"],
+                    "ok" if overview["high_risk_uncontrolled_count"] == 0 else "risk",
+                    risk_grade="阻塞" if overview["high_risk_uncontrolled_count"] else "",
+                    reason="写操作未接入权限系统会造成越权修改风险。",
+                    action_label="前往权限总览",
+                    action_url="/admin/permission-overview",
+                    trial_impact="会阻塞试运行。",
+                    affects_trial=overview["high_risk_uncontrolled_count"] > 0,
+                ),
             ],
         },
         {
             "key": "config",
             "title": "配置",
             "items": [
-                readiness_item("active_store_count", "启用门店数量", active_store_count, "ok" if active_store_count > 0 else "risk"),
-                readiness_item("active_brand_count", "启用品牌数量", active_brand_count, "ok" if active_brand_count > 0 else "risk"),
-                readiness_item("active_request_type_count", "启用需求类型数量", active_request_type_count, "ok" if active_request_type_count > 0 else "risk"),
+                readiness_item(
+                    "active_store_count",
+                    "启用门店数量",
+                    active_store_count,
+                    "ok" if active_store_count > 0 else "risk",
+                    risk_grade="阻塞" if active_store_count <= 0 else "",
+                    reason="没有启用门店时，门店无法选择所属门店提交工单或查看排班。",
+                    action_label="前往配置管理",
+                    action_url="/admin/settings",
+                    trial_impact="会阻塞试运行。",
+                    affects_trial=active_store_count <= 0,
+                ),
+                readiness_item(
+                    "active_brand_count",
+                    "启用品牌数量",
+                    active_brand_count,
+                    active_brand_level,
+                    risk_grade=active_brand_grade,
+                    reason="品牌为空会影响商品类工单的填写、筛选和后续统计口径。",
+                    action_label="前往配置管理",
+                    action_url="/admin/settings",
+                    trial_impact="小范围试运行可接受，但商品类需求需人工兜底。",
+                    affects_trial=False,
+                ),
+                readiness_item(
+                    "active_request_type_count",
+                    "启用需求类型数量",
+                    active_request_type_count,
+                    "ok" if active_request_type_count > 0 else "risk",
+                    risk_grade="阻塞" if active_request_type_count <= 0 else "",
+                    reason="没有启用需求类型时，门店无法按类型提交工单。",
+                    action_label="前往配置管理",
+                    action_url="/admin/settings",
+                    trial_impact="会阻塞试运行。",
+                    affects_trial=active_request_type_count <= 0,
+                ),
                 readiness_item("holiday_count", "节假日配置数量", holiday_count, "ok" if holiday_count > 0 else "warning"),
-                readiness_item("request_types_missing_assignment_count", "缺自动分派的启用需求类型", len(gaps["missing_assignment"]), "ok" if not gaps["missing_assignment"] else "risk", "、".join(gaps["missing_assignment"])),
-                readiness_item("request_types_missing_sla_count", "缺 SLA 的启用需求类型", len(gaps["missing_sla"]), "ok" if not gaps["missing_sla"] else "risk", "、".join(gaps["missing_sla"])),
-                readiness_item("request_types_missing_template_count", "缺工单类型模板的启用需求类型", len(gaps["missing_template"]), "ok" if not gaps["missing_template"] else "risk", "、".join(gaps["missing_template"])),
+                readiness_item(
+                    "request_types_missing_assignment_count",
+                    "缺自动分派的启用需求类型",
+                    missing_assignment_count,
+                    assignment_level,
+                    "、".join(gaps["missing_assignment"]),
+                    risk_grade=assignment_grade,
+                    reason="缺自动分派时，新工单可能无法自动进入处理人队列。",
+                    action_label="前往工单规则",
+                    action_url="/admin/ticket-rules",
+                    trial_impact="全量缺失会影响试运行；部分缺失需限定试运行需求类型。",
+                    affects_trial=assignment_level == "risk",
+                ),
+                readiness_item(
+                    "request_types_missing_sla_count",
+                    "缺 SLA 的启用需求类型",
+                    missing_sla_count,
+                    sla_level,
+                    "、".join(gaps["missing_sla"]),
+                    risk_grade=sla_grade,
+                    reason="缺 SLA 时，工单无法稳定计算到期、超时和看板指标。",
+                    action_label="前往工单规则",
+                    action_url="/admin/ticket-rules",
+                    trial_impact="全量缺失会影响试运行；部分缺失需限定试运行需求类型。",
+                    affects_trial=sla_level == "risk",
+                ),
+                readiness_item(
+                    "request_types_missing_template_count",
+                    "缺工单类型模板的启用需求类型",
+                    missing_template_count,
+                    template_level,
+                    "、".join(gaps["missing_template"]),
+                    risk_grade=template_grade,
+                    reason="缺模板时，门店缺少填写提示，工单信息质量会不稳定。",
+                    action_label="前往工单规则",
+                    action_url="/admin/ticket-rules",
+                    trial_impact="全量缺失会影响试运行；部分缺失需限定试运行需求类型。",
+                    affects_trial=template_level == "risk",
+                ),
             ],
         },
         {
@@ -15804,6 +16119,48 @@ def create_app() -> FastAPI:
             output,
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"},
+        )
+
+    @app.get("/admin/audit-logs", response_class=HTMLResponse)
+    def admin_audit_logs(
+        request: Request,
+        current_user: Dict[str, object] = Depends(require_any_permission(["system.view", "account.view"])),
+        log_type: str = Query("all"),
+        username: str = Query(""),
+        action: str = Query(""),
+        date_from: str = Query(""),
+        date_to: str = Query(""),
+        page: int = Query(1),
+        per_page: int = Query(50),
+    ) -> HTMLResponse:
+        normalized_type = normalize_audit_log_type(log_type)
+        filters = {
+            "log_type": normalized_type,
+            "username": username.strip(),
+            "action": action.strip(),
+            "date_from": date_from.strip(),
+            "date_to": date_to.strip(),
+            "per_page": clamp_audit_page_size(per_page),
+        }
+        log_page = fetch_audit_log_page(
+            log_type=normalized_type,
+            username=filters["username"],
+            action=filters["action"],
+            date_from=filters["date_from"],
+            date_to=filters["date_to"],
+            page=page,
+            per_page=filters["per_page"],
+        )
+        return templates.TemplateResponse(
+            request,
+            "audit_logs.html",
+            {
+                "request": request,
+                "admin_user": str(current_user.get("username") or ""),
+                "csrf_token": current_csrf_token(request),
+                "filters": filters,
+                **log_page,
+            },
         )
 
     @app.get("/admin/system", response_class=HTMLResponse)

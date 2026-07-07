@@ -5944,6 +5944,22 @@ button[disabled],
   vertical-align: top;
 }
 
+.readiness-risk-copy {
+  display: grid;
+  gap: 4px;
+  max-width: 360px;
+}
+
+.readiness-risk-copy p {
+  margin: 0;
+}
+
+.readiness-risk-copy small,
+.audit-log-detail {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
 .readiness-badge {
   display: inline-flex;
   align-items: center;
@@ -5987,6 +6003,14 @@ button[disabled],
 
 .muted-cell {
   color: var(--muted-text);
+}
+
+.audit-filter-form {
+  align-items: end;
+}
+
+.audit-log-table {
+  table-layout: fixed;
 }
 
 @media (max-width: 1100px) {
