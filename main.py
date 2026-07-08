@@ -147,6 +147,7 @@ ADMIN_PERMISSION_KEYS = [
     "schedule.view",
     "schedule.create",
     "schedule.update",
+    "schedule.cancel",
     "schedule.delete",
     "schedule.export",
     "schedule.copy",
@@ -292,7 +293,18 @@ DEFAULT_ADMIN_ROLE_DEFINITIONS = [
     },
 ]
 DEFAULT_ADMIN_ROLE_NAMES = [str(role["role_name"]) for role in DEFAULT_ADMIN_ROLE_DEFINITIONS]
-LEGACY_DEFAULT_ADMIN_ROLE_NAMES = ["运营管理", "商品采购", "排班管理员", "只读账号"]
+LEGACY_SCHEDULE_ROLE_NAME = "排班管理员"
+LEGACY_DEFAULT_ADMIN_ROLE_NAMES = ["运营管理", "商品采购", LEGACY_SCHEDULE_ROLE_NAME, "只读账号"]
+LEGACY_SCHEDULE_ROLE_PERMISSIONS = [
+    "schedule.view",
+    "schedule.create",
+    "schedule.update",
+    "schedule.cancel",
+    "schedule.delete",
+    "schedule.export",
+    "schedule.copy",
+    "schedule.override_conflict",
+]
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 DATA_SCOPE_OPTIONS = {"all", "assigned", "stores"}
 PASSWORD_HASH_ITERATIONS = 260000
@@ -835,6 +847,30 @@ def current_admin_user(request: Request) -> Optional[Dict[str, object]]:
     return None
 
 
+def is_system_admin_user(user: Optional[Dict[str, object]]) -> bool:
+    if not user or int(user.get("is_active") or 0) != 1:
+        return False
+    role_name = str(user.get("role_name") or "").strip()
+    if role_name == SYSTEM_ADMIN_ROLE_NAME:
+        return True
+    permissions = {str(permission) for permission in user.get("permissions") or []}
+    return ADMIN_CRITICAL_PERMISSION_KEYS.issubset(permissions)
+
+
+def require_system_admin_user():
+    def dependency(request: Request) -> Dict[str, object]:
+        user = current_admin_user(request)
+        if not user:
+            if should_redirect_to_login(request):
+                raise HTTPException(status_code=303, detail="Login required.", headers={"Location": login_redirect_location(request)})
+            raise HTTPException(status_code=http_status.HTTP_401_UNAUTHORIZED, detail="Login required.")
+        if not is_system_admin_user(user):
+            raise HTTPException(status_code=http_status.HTTP_403_FORBIDDEN, detail="仅系统管理员可访问。")
+        return user
+
+    return dependency
+
+
 class PermissionService:
     def get_user_permissions(self, user: Optional[Dict[str, object]]) -> List[str]:
         if not user:
@@ -1263,10 +1299,17 @@ APP_GIT_COMMIT = current_git_commit()
 
 
 def current_asset_version() -> str:
-    commit = APP_GIT_COMMIT
-    if commit != "unknown":
-        return commit
-    return re.sub(r"\D+", "", APP_STARTED_AT) or "dev"
+    base_version = APP_GIT_COMMIT if APP_GIT_COMMIT != "unknown" else re.sub(r"\D+", "", APP_STARTED_AT) or "dev"
+    static_versions: List[str] = []
+    for relative_path in ("static/app.js", "static/style.css", "static/img/zhiyang-logo.png"):
+        try:
+            static_versions.append(str((BASE_DIR / relative_path).stat().st_mtime_ns))
+        except OSError:
+            continue
+    if not static_versions:
+        return base_version
+    digest = hashlib.sha1("|".join(static_versions).encode("ascii")).hexdigest()[:10]
+    return f"{base_version}-{digest}"
 
 
 def get_db_path() -> Path:
@@ -1386,6 +1429,7 @@ def ensure_admin_rbac_schema(connection: sqlite3.Connection) -> None:
             role_id INTEGER,
             is_active INTEGER NOT NULL DEFAULT 1,
             is_assignable INTEGER NOT NULL DEFAULT 1,
+            show_in_account_management INTEGER NOT NULL DEFAULT 1,
             data_scope TEXT NOT NULL DEFAULT 'all',
             store_names TEXT,
             last_login_at TEXT,
@@ -1430,6 +1474,7 @@ def ensure_admin_rbac_schema(connection: sqlite3.Connection) -> None:
     add_column_if_missing(connection, "admin_users", "role_id", "INTEGER")
     add_column_if_missing(connection, "admin_users", "is_active", "INTEGER NOT NULL DEFAULT 1")
     add_column_if_missing(connection, "admin_users", "is_assignable", "INTEGER NOT NULL DEFAULT 1")
+    add_column_if_missing(connection, "admin_users", "show_in_account_management", "INTEGER NOT NULL DEFAULT 1")
     add_column_if_missing(connection, "admin_users", "data_scope", "TEXT NOT NULL DEFAULT 'all'")
     add_column_if_missing(connection, "admin_users", "store_names", "TEXT")
     add_column_if_missing(connection, "admin_users", "last_login_at", "TEXT")
@@ -1439,6 +1484,7 @@ def ensure_admin_rbac_schema(connection: sqlite3.Connection) -> None:
     connection.execute("CREATE INDEX IF NOT EXISTS idx_admin_users_role_id ON admin_users(role_id)")
     connection.execute("CREATE INDEX IF NOT EXISTS idx_admin_users_employee_id ON admin_users(employee_id)")
     connection.execute("CREATE INDEX IF NOT EXISTS idx_admin_users_allow_login ON admin_users(allow_login)")
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_admin_users_show_in_account_management ON admin_users(show_in_account_management)")
     connection.execute("CREATE INDEX IF NOT EXISTS idx_admin_roles_role_name ON admin_roles(role_name)")
     connection.execute("CREATE INDEX IF NOT EXISTS idx_admin_role_permissions_role_id ON admin_role_permissions(role_id)")
     connection.execute("CREATE INDEX IF NOT EXISTS idx_admin_login_logs_username ON admin_login_logs(username)")
@@ -1487,6 +1533,16 @@ def seed_default_admin_roles(connection: sqlite3.Connection) -> None:
                     """,
                     (role_id, str(permission_key), timestamp),
                 )
+    legacy_schedule_role = connection.execute("SELECT id FROM admin_roles WHERE role_name = ?", (LEGACY_SCHEDULE_ROLE_NAME,)).fetchone()
+    if legacy_schedule_role:
+        for permission_key in LEGACY_SCHEDULE_ROLE_PERMISSIONS:
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO admin_role_permissions (role_id, permission_key, created_at)
+                VALUES (?, ?, ?)
+                """,
+                (int(legacy_schedule_role["id"]), permission_key, timestamp),
+            )
     placeholders = ",".join("?" for _ in LEGACY_DEFAULT_ADMIN_ROLE_NAMES)
     connection.execute(
         f"""
@@ -1555,6 +1611,7 @@ def active_system_admin_count(connection: sqlite3.Connection, excluding_user_id:
         FROM admin_users
         JOIN admin_roles ON admin_roles.id = admin_users.role_id
         WHERE admin_users.is_active = 1
+          AND COALESCE(admin_users.allow_login, 1) = 1
           AND admin_roles.role_name = ?
           {exclude_clause}
         """,
@@ -1758,6 +1815,7 @@ def row_to_admin_user(connection: sqlite3.Connection, row: sqlite3.Row) -> Dict[
         "permissions": permissions,
         "is_active": int(row["is_active"] or 0),
         "is_assignable": int(row["is_assignable"] or 0),
+        "show_in_account_management": int(row["show_in_account_management"] if "show_in_account_management" in row.keys() and row["show_in_account_management"] is not None else 1),
         "employee_id": int(row["employee_id"]) if "employee_id" in row.keys() and row["employee_id"] is not None else None,
         "allow_login": int(row["allow_login"] if "allow_login" in row.keys() and row["allow_login"] is not None else 1),
         "participate_schedule": int(row["participate_schedule"] if "participate_schedule" in row.keys() and row["participate_schedule"] is not None else 0),
@@ -1790,27 +1848,53 @@ def fetch_admin_user_by_id(user_id: int) -> Optional[Dict[str, object]]:
         return row_to_admin_user(connection, row)
 
 
-def fetch_admin_users_for_account_page() -> List[Dict[str, object]]:
+def fetch_admin_users_for_account_page(keyword: str = "", account_filter: str = "visible") -> List[Dict[str, object]]:
     with get_connection() as connection:
         people: List[Dict[str, object]] = []
+        normalized_filter = normalize_account_visibility_filter(account_filter)
+        clauses: List[str] = []
+        if normalized_filter == "visible":
+            clauses.append("COALESCE(admin_users.show_in_account_management, 1) = 1")
+        elif normalized_filter == "hidden":
+            clauses.append("COALESCE(admin_users.show_in_account_management, 1) = 0")
+        elif normalized_filter == "enabled":
+            clauses.append("COALESCE(admin_users.show_in_account_management, 1) = 1")
+            clauses.append("COALESCE(admin_users.allow_login, 1) = 1")
+            clauses.append("COALESCE(admin_users.is_active, 1) = 1")
+        elif normalized_filter == "disabled":
+            clauses.append("(COALESCE(admin_users.allow_login, 1) = 0 OR COALESCE(admin_users.is_active, 1) = 0)")
+        elif normalized_filter == "missing_employee":
+            clauses.append("employees.id IS NULL")
+        elif normalized_filter == "system_admin":
+            clauses.append("admin_roles.role_name = ?")
+        elif normalized_filter == "assignable":
+            clauses.append("COALESCE(admin_users.is_assignable, 0) = 1")
+        where_sql = "WHERE " + " AND ".join(clauses) if clauses else ""
+        params: List[object] = [SYSTEM_ADMIN_ROLE_NAME] if normalized_filter == "system_admin" else []
         user_rows = connection.execute(
-            """
+            f"""
             SELECT
                 admin_users.*,
                 employees.id AS linked_employee_id,
+                employees.employee_no AS linked_employee_no,
                 employees.employee_name AS linked_employee_name,
                 employees.phone AS linked_phone,
                 employees.role AS linked_employee_role,
                 employees.store_name AS linked_store_name,
                 employees.primary_store_name AS linked_primary_store_name,
                 employees.status AS linked_employee_status,
-                employees.participate_schedule AS linked_participate_schedule
+                employees.participate_schedule AS linked_participate_schedule,
+                employees.show_in_employee_management AS linked_show_in_employee_management
             FROM admin_users
             LEFT JOIN employees
               ON employees.id = admin_users.employee_id
               OR employees.user_id = admin_users.id
+            LEFT JOIN admin_roles
+              ON admin_roles.id = admin_users.role_id
+            {where_sql}
             ORDER BY admin_users.id
-            """
+            """,
+            params,
         ).fetchall()
         linked_employee_ids: set[int] = set()
         for row in user_rows:
@@ -1826,6 +1910,7 @@ def fetch_admin_users_for_account_page() -> List[Dict[str, object]]:
                 {
                     "person_kind": "user",
                     "person_name": str(row["linked_employee_name"] or user["display_name"] or user["username"]),
+                    "employee_no": str(row["linked_employee_no"] or ""),
                     "employee_id": int(linked_employee_id) if linked_employee_id is not None else user.get("employee_id"),
                     "employee_name": str(row["linked_employee_name"] or ""),
                     "phone": str(row["linked_phone"] or ""),
@@ -1835,55 +1920,22 @@ def fetch_admin_users_for_account_page() -> List[Dict[str, object]]:
                     "schedule_store_names_text": join_display_values(schedule_store_names),
                     "employee_status": str(row["linked_employee_status"] or ""),
                     "participate_schedule": int(row["linked_participate_schedule"] if row["linked_participate_schedule"] is not None else user.get("participate_schedule") or 0),
+                    "show_in_employee_management": int(row["linked_show_in_employee_management"] if row["linked_show_in_employee_management"] is not None else 0),
+                    "employee_file_status": "linked" if linked_employee_id is not None else "missing",
                 }
             )
-            people.append(user)
-
-        employee_rows = connection.execute(
-            """
-            SELECT *
-            FROM employees
-            WHERE id NOT IN (
-                SELECT employee_id FROM admin_users WHERE employee_id IS NOT NULL
-            )
-              AND (user_id IS NULL OR user_id NOT IN (SELECT id FROM admin_users))
-            ORDER BY id
-            """
-        ).fetchall()
-        employee_store_map = employee_store_map_for_ids(connection, [int(row["id"]) for row in employee_rows])
-        for row in employee_rows:
-            employee_id = int(row["id"])
-            primary_store = str(row["primary_store_name"] or row["store_name"] or "").strip()
-            schedule_store_names = unique_clean_values([primary_store, *employee_store_map.get(employee_id, [])])
-            people.append(
-                {
-                    "id": 0,
-                    "person_kind": "employee",
-                    "username": "",
-                    "display_name": str(row["employee_name"] or ""),
-                    "person_name": str(row["employee_name"] or ""),
-                    "role_id": 0,
-                    "role_name": "",
-                    "permissions": [],
-                    "is_active": 0,
-                    "is_assignable": 0,
-                    "employee_id": employee_id,
-                    "employee_name": str(row["employee_name"] or ""),
-                    "phone": str(row["phone"] or ""),
-                    "employee_role": str(row["role"] or ""),
-                    "primary_store_name": primary_store,
-                    "schedule_store_names": schedule_store_names,
-                    "schedule_store_names_text": join_display_values(schedule_store_names),
-                    "employee_status": str(row["status"] or ""),
-                    "allow_login": int(row["allow_login"] or 0),
-                    "participate_schedule": int(row["participate_schedule"] if row["participate_schedule"] is not None else 1),
-                    "data_scope": "all",
-                    "store_names": "",
-                    "last_login_at": "",
-                    "created_at": str(row["created_at"] or ""),
-                    "updated_at": str(row["updated_at"] or ""),
-                }
-            )
+            delete_assessment = admin_user_hard_delete_assessment(connection, int(user["id"]))
+            user["delete_assessment"] = delete_assessment
+            user["can_hard_delete"] = bool(delete_assessment.get("can_hard_delete"))
+            user["delete_block_reason"] = str(delete_assessment.get("reason_text") or "")
+            user["delete_recommendation"] = str(delete_assessment.get("recommendation") or "")
+            user["is_last_active_system_admin"] = bool(delete_assessment.get("is_last_active_system_admin"))
+            if normalized_filter == "safe_delete" and not user["can_hard_delete"]:
+                continue
+            if normalized_filter == "unsafe_delete" and user["can_hard_delete"]:
+                continue
+            if account_page_keyword_matches(user, keyword):
+                people.append(user)
         return people
 
 
@@ -2203,7 +2255,7 @@ def detect_historical_personnel_anomalies() -> List[Dict[str, object]]:
         mismatch_rows = connection.execute(
             """
             SELECT admin_users.id AS user_id, admin_users.username, admin_users.display_name,
-                   admin_users.employee_id, employees.id AS employee_id, employees.employee_name,
+                   admin_users.employee_id, employees.id AS employee_id, employees.employee_no, employees.employee_name,
                    employees.user_id AS employee_user_id
             FROM admin_users
             JOIN employees ON employees.id = admin_users.employee_id
@@ -2217,7 +2269,11 @@ def detect_historical_personnel_anomalies() -> List[Dict[str, object]]:
                     f"账号 {row['username']} 指向员工 #{row['employee_id']}，但该员工反向指向账号 #{row['employee_user_id']}。",
                     level="danger",
                     user={"id": int(row["user_id"]), "username": str(row["username"] or ""), "display_name": str(row["display_name"] or "")},
-                    employee={"id": int(row["employee_id"]), "employee_name": str(row["employee_name"] or "")},
+                    employee={
+                        "id": int(row["employee_id"]),
+                        "employee_no": str(row["employee_no"] or ""),
+                        "employee_name": str(row["employee_name"] or ""),
+                    },
                     actions=["unlink", "link"],
                 )
             )
@@ -2405,9 +2461,154 @@ def repair_historical_employee_anomaly(employee_id: int, action: str) -> Dict[st
     }
 
 
-def personnel_governance_context(filter_value: str = "unprocessed", active_tab: str = "matches") -> Dict[str, object]:
+def personnel_residue_cleanup_preview() -> List[Dict[str, object]]:
+    with get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT
+                employees.*,
+                COUNT(DISTINCT store_schedules.id) AS schedule_count,
+                MAX(store_schedules.schedule_date) AS recent_schedule_date,
+                COUNT(DISTINCT linked_users.id) AS linked_user_count,
+                GROUP_CONCAT(DISTINCT linked_users.username) AS linked_usernames
+            FROM employees
+            LEFT JOIN store_schedules ON store_schedules.employee_id = employees.id
+            LEFT JOIN admin_users AS linked_users
+              ON linked_users.employee_id = employees.id
+              OR linked_users.id = employees.user_id
+            WHERE COALESCE(employees.show_in_employee_management, 1) = 0
+               OR employees.archived_at IS NOT NULL
+               OR employees.deleted_at IS NOT NULL
+               OR employees.status IN ('离职', '停用')
+            GROUP BY employees.id
+            ORDER BY
+                CASE WHEN COUNT(DISTINCT store_schedules.id) = 0 AND COUNT(DISTINCT linked_users.id) = 0 THEN 0 ELSE 1 END,
+                employees.updated_at DESC,
+                employees.id DESC
+            LIMIT 80
+            """
+        ).fetchall()
+        ticket_counts: Dict[int, int] = {}
+        login_counts: Dict[int, int] = {}
+        delete_assessments: Dict[int, Dict[str, object]] = {}
+        for row in rows:
+            employee_id = int(row["id"])
+            usernames = split_multi_value_text(row["linked_usernames"])
+            names = unique_clean_values([row["employee_name"], *usernames])
+            if not names:
+                ticket_counts[employee_id] = 0
+            else:
+                placeholders = ",".join("?" for _ in names)
+                ticket_counts[employee_id] = int(
+                    connection.execute(
+                        f"SELECT COUNT(*) FROM tickets WHERE assigned_to IN ({placeholders})",
+                        names,
+                    ).fetchone()[0]
+                )
+            login_counts[employee_id] = count_exact_text_references(connection, "admin_login_logs", ["username"], usernames)
+            delete_assessments[employee_id] = employee_hard_delete_assessment(connection, employee_id)
+    items: List[Dict[str, object]] = []
+    for row in rows:
+        employee_id = int(row["id"])
+        schedule_count = int(row["schedule_count"] or 0)
+        linked_user_count = int(row["linked_user_count"] or 0)
+        ticket_count = ticket_counts.get(employee_id, 0)
+        assessment = delete_assessments.get(employee_id) or {"can_hard_delete": False, "counts": {}, "reasons": []}
+        assessment_counts = dict(assessment.get("counts") or {})
+        can_hard_delete = bool(assessment.get("can_hard_delete"))
+        reasons: List[str] = []
+        if int(row["show_in_employee_management"] if row["show_in_employee_management"] is not None else 1) == 0:
+            reasons.append("已隐藏")
+        if str(row["status"] or "") in {"离职", "停用"}:
+            reasons.append(str(row["status"] or ""))
+        if schedule_count:
+            reasons.append(f"{schedule_count} 条历史排班")
+        if linked_user_count:
+            reasons.append("有关联账号")
+        if ticket_count:
+            reasons.append(f"{ticket_count} 条历史工单")
+        if assessment_counts.get("operation_log_count"):
+            reasons.append(f"{assessment_counts.get('operation_log_count')} 条操作日志")
+        if login_counts.get(employee_id):
+            reasons.append(f"{login_counts.get(employee_id)} 条登录日志")
+        if can_hard_delete:
+            recommended_action = "可安全删除"
+        elif linked_user_count or int(row["user_id"] or 0):
+            recommended_action = "需要先解除账号关联"
+        elif schedule_count or ticket_count or assessment_counts.get("operation_log_count"):
+            recommended_action = "存在历史引用不可删除，建议归档/隐藏"
+        elif int(row["show_in_employee_management"] if row["show_in_employee_management"] is not None else 1) == 0:
+            recommended_action = "只能隐藏"
+        else:
+            recommended_action = "只能归档"
+        items.append(
+            {
+                "key": f"employee:{employee_id}",
+                "employee_id": employee_id,
+                "employee_no": str(row["employee_no"] or ""),
+                "employee_name": str(row["employee_name"] or ""),
+                "role": str(row["role"] or ""),
+                "status": str(row["status"] or ""),
+                "store_name": str(row["primary_store_name"] or row["store_name"] or ""),
+                "schedule_count": schedule_count,
+                "recent_schedule_date": str(row["recent_schedule_date"] or ""),
+                "linked_user_count": linked_user_count,
+                "linked_usernames": str(row["linked_usernames"] or ""),
+                "ticket_count": ticket_count,
+                "login_log_count": login_counts.get(employee_id, 0),
+                "operation_log_count": int(assessment_counts.get("operation_log_count") or 0),
+                "can_safe_delete": can_hard_delete,
+                "action_label": "可安全删除" if can_hard_delete else "只归档/隐藏",
+                "can_hard_delete": can_hard_delete,
+                "recommended_action": recommended_action,
+                "reason": "、".join(reasons) or "历史残留",
+            }
+        )
+    return items
+
+
+def cleanup_personnel_residue_targets(targets: Iterable[str], operator: str) -> Dict[str, object]:
+    preview_by_key = {str(item["key"]): item for item in personnel_residue_cleanup_preview()}
+    selected_keys = [str(value or "").strip() for value in targets if str(value or "").strip()]
+    timestamp = now_text()
+    result = {"hard_deleted": 0, "archived_hidden": 0, "skipped": 0, "targets": selected_keys}
+    with get_connection() as connection:
+        for target_key in selected_keys:
+            item = preview_by_key.get(target_key)
+            if not item:
+                result["skipped"] += 1
+                continue
+            employee_id = int(item["employee_id"])
+            if item.get("can_hard_delete"):
+                connection.execute("DELETE FROM employee_store_map WHERE employee_id = ?", (employee_id,))
+                connection.execute("DELETE FROM employees WHERE id = ?", (employee_id,))
+                result["hard_deleted"] += 1
+            else:
+                connection.execute(
+                    """
+                    UPDATE employees
+                    SET show_in_employee_management = 0,
+                        participate_schedule = 0,
+                        archived_at = COALESCE(archived_at, ?),
+                        archived_by = COALESCE(archived_by, ?),
+                        archive_reason = COALESCE(NULLIF(archive_reason, ''), '历史残留清理仅归档隐藏'),
+                        updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (timestamp, operator, timestamp, employee_id),
+                )
+                result["archived_hidden"] += 1
+    return result
+
+
+def personnel_governance_context(
+    filter_value: str = "unprocessed",
+    active_tab: str = "matches",
+    keyword: str = "",
+) -> Dict[str, object]:
     selected_tab = active_tab if active_tab in {"matches", "historical"} else "matches"
     selected_filter = filter_value if filter_value in {"all", "high", "medium", "low", "processed", "unprocessed", "ignored"} else "unprocessed"
+    clean_keyword = keyword.strip()
     all_candidates = build_personnel_match_candidates(include_ignored=True)
     pending_candidates = [candidate for candidate in all_candidates if not candidate["ignored"]]
     ignored_candidates = [candidate for candidate in all_candidates if candidate["ignored"]]
@@ -2424,8 +2625,20 @@ def personnel_governance_context(filter_value: str = "unprocessed", active_tab: 
         unlinked_employees = fetch_unlinked_employees_for_personnel(connection)
     anomalies = detect_personnel_link_anomalies()
     historical_anomalies = detect_historical_personnel_anomalies()
+    residue_items = personnel_residue_cleanup_preview()
+    if clean_keyword:
+        visible_candidates = [candidate for candidate in visible_candidates if personnel_keyword_matches(candidate, clean_keyword)]
+        ignored_candidates = [candidate for candidate in ignored_candidates if personnel_keyword_matches(candidate, clean_keyword)]
+        unlinked_users = [user for user in unlinked_users if personnel_keyword_matches(user, clean_keyword)]
+        unlinked_employees = [employee for employee in unlinked_employees if personnel_keyword_matches(employee, clean_keyword)]
+        anomalies = [anomaly for anomaly in anomalies if personnel_keyword_matches(anomaly, clean_keyword)]
+        historical_anomalies = [
+            anomaly for anomaly in historical_anomalies if personnel_keyword_matches(anomaly, clean_keyword)
+        ]
+        residue_items = [item for item in residue_items if personnel_keyword_matches(item, clean_keyword)]
     return {
         "active_tab": selected_tab,
+        "keyword": clean_keyword,
         "governance_tabs": [
             {"value": "matches", "label": "账号员工关联"},
             {"value": "historical", "label": "历史员工异常修复"},
@@ -2446,6 +2659,7 @@ def personnel_governance_context(filter_value: str = "unprocessed", active_tab: 
         "unlinked_employees": unlinked_employees,
         "anomalies": anomalies,
         "historical_anomalies": historical_anomalies,
+        "residue_items": residue_items,
         "stats": {
             "suspicious_count": len(pending_candidates),
             "high_count": sum(1 for candidate in pending_candidates if candidate["confidence"] == "high"),
@@ -2454,6 +2668,7 @@ def personnel_governance_context(filter_value: str = "unprocessed", active_tab: 
             "unlinked_employee_count": len(unlinked_employees),
             "anomaly_count": len(anomalies),
             "historical_anomaly_count": len(historical_anomalies),
+            "residue_count": len(residue_items),
         },
     }
 
@@ -3598,6 +3813,7 @@ def admin_permission_groups() -> List[Dict[str, object]]:
         "schedule.view": "查看排班",
         "schedule.create": "新增排班",
         "schedule.update": "编辑排班",
+        "schedule.cancel": "取消排班",
         "schedule.delete": "删除排班",
         "schedule.export": "导出排班",
         "schedule.copy": "复制排班",
@@ -3702,17 +3918,28 @@ PERMISSION_ROUTE_RULES: List[Dict[str, str]] = [
     {"method": "POST", "path": "/admin/schedules/copy-day", "permission": "schedule.copy", "module": "排班", "label": "复制排班"},
     {"method": "POST", "path": "/admin/schedules/copy-preview", "permission": "schedule.copy", "module": "排班", "label": "复制排班预览"},
     {"method": "POST", "path": "/admin/schedules/copy-confirm", "permission": "schedule.copy", "module": "排班", "label": "确认复制排班"},
-    {"method": "POST", "path": "/admin/schedules/clear-employee", "permission": "schedule.delete", "module": "排班", "label": "清空员工排班"},
-    {"method": "POST", "path": "/admin/schedules/{schedule_id}/delete", "permission": "schedule.delete", "module": "排班", "label": "删除排班"},
+    {"method": "POST", "path": "/admin/schedules/clear-employee", "permission": "schedule.cancel", "module": "排班", "label": "清空员工排班"},
+    {"method": "POST", "path": "/admin/schedules/{schedule_id}/cancel", "permission": "schedule.cancel", "module": "排班", "label": "取消排班"},
+    {"method": "POST", "path": "/admin/schedules/bulk-cancel", "permission": "schedule.cancel", "module": "排班", "label": "批量取消排班"},
+    {"method": "POST", "path": "/admin/schedules/{schedule_id}/delete", "permission": "schedule.cancel", "module": "排班", "label": "取消排班（兼容删除入口）"},
     {"method": "GET", "path": "/admin/schedules/export", "permission": "schedule.export", "module": "排班", "label": "导出排班"},
     {"method": "GET", "path": "/admin/employees", "permission": "employee.view", "module": "员工", "label": "员工列表"},
     {"method": "POST", "path": "/admin/employees", "permission": "employee.create", "module": "员工", "label": "新增员工"},
+    {"method": "POST", "path": "/admin/employees/build-from-account", "permission": "employee.create", "module": "员工", "label": "从账号补建员工档案"},
     {"method": "POST", "path": "/admin/employees/{employee_id}/update", "permission": "employee.update", "module": "员工", "label": "编辑员工"},
+    {"method": "POST", "path": "/admin/employees/{employee_id}/unlink-account", "permission": "employee.update", "module": "员工", "label": "解除员工账号关联"},
+    {"method": "POST", "path": "/admin/employees/{employee_id}/create-account", "permission": "account.create", "module": "员工", "label": "开通后台账号"},
+    {"method": "POST", "path": "/admin/employees/{employee_id}/hide", "permission": "employee.update", "module": "员工", "label": "隐藏人员"},
+    {"method": "POST", "path": "/admin/employees/{employee_id}/show", "permission": "employee.update", "module": "员工", "label": "恢复显示人员"},
+    {"method": "POST", "path": "/admin/employees/{employee_id}/schedule", "permission": "employee.update", "module": "员工", "label": "设置员工排班状态"},
     {"method": "POST", "path": "/admin/employees/{employee_id}/disable", "permission": "employee.update", "module": "员工", "label": "停用员工"},
     {"method": "POST", "path": "/admin/employees/{employee_id}/archive", "permission": "employee.archive", "module": "员工", "label": "归档员工"},
     {"method": "POST", "path": "/admin/employees/{employee_id}/unarchive", "permission": "employee.archive", "module": "员工", "label": "取消归档员工"},
     {"method": "POST", "path": "/admin/employees/{employee_id}/delete", "permission": "employee.delete", "module": "员工", "label": "删除员工"},
     {"method": "POST", "path": "/admin/employees/{employee_id}/restore", "permission": "employee.delete", "module": "员工", "label": "恢复员工"},
+    {"method": "POST", "path": "/admin/employees/{employee_id}/disable-schedule", "permission": "employee.update", "module": "员工", "label": "停止排班"},
+    {"method": "POST", "path": "/admin/employees/{employee_id}/enable-schedule", "permission": "employee.update", "module": "员工", "label": "重新参与排班"},
+    {"method": "POST", "path": "/admin/employees/{employee_id}/safe-delete", "permission": "employee.hard_delete", "module": "员工", "label": "安全删除员工"},
     {"method": "POST", "path": "/admin/employees/{employee_id}/hard-delete", "permission": "employee.hard_delete", "module": "员工", "label": "永久删除员工"},
     {"method": "GET", "path": "/admin/shift-types", "permission": "shift.view", "module": "班次", "label": "班次列表"},
     {"method": "POST", "path": "/admin/shift-types", "permission": "shift.create", "module": "班次", "label": "新增班次"},
@@ -3768,11 +3995,23 @@ PERMISSION_ROUTE_RULES: List[Dict[str, str]] = [
     {"method": "POST", "path": "/admin/account/users/{user_id}/disable", "permission": "account.disable", "module": "账号", "label": "停用账号"},
     {"method": "POST", "path": "/admin/account/users/{user_id}/enable", "permission": "account.disable", "module": "账号", "label": "启用账号"},
     {"method": "POST", "path": "/admin/account/users/{user_id}/reset-password", "permission": "account.reset_password", "module": "账号", "label": "重置密码"},
+    {"method": "POST", "path": "/admin/account/users/{user_id}/delete", "permission": "account.update", "module": "账号", "label": "安全删除账号"},
+    {"method": "POST", "path": "/admin/account/users/{user_id}/hide", "permission": "account.update", "module": "账号", "label": "隐藏账号"},
+    {"method": "POST", "path": "/admin/account/users/{user_id}/show", "permission": "account.update", "module": "账号", "label": "恢复显示账号"},
+    {"method": "POST", "path": "/admin/account/users/{user_id}/unlink-employee", "permission": "account.update", "module": "账号", "label": "解除账号与人员关联"},
+    {"method": "POST", "path": "/admin/accounts/{user_id}/disable-login", "permission": "account.disable", "module": "账号", "label": "关闭后台账号"},
+    {"method": "POST", "path": "/admin/accounts/{user_id}/enable-login", "permission": "account.disable", "module": "账号", "label": "启用后台账号"},
+    {"method": "POST", "path": "/admin/accounts/{user_id}/reset-password", "permission": "account.reset_password", "module": "账号", "label": "重置密码"},
+    {"method": "POST", "path": "/admin/accounts/{user_id}/safe-delete", "permission": "account.update", "module": "账号", "label": "安全删除账号"},
+    {"method": "POST", "path": "/admin/accounts/{user_id}/hide", "permission": "account.update", "module": "账号", "label": "隐藏账号"},
+    {"method": "POST", "path": "/admin/accounts/{user_id}/show", "permission": "account.update", "module": "账号", "label": "显示账号"},
+    {"method": "POST", "path": "/admin/accounts/{user_id}/unlink-employee", "permission": "account.update", "module": "账号", "label": "解除账号关联"},
     {"method": "POST", "path": "/admin/personnel-governance/link", "permission": "account.update", "module": "账号", "label": "关联人员与账号"},
     {"method": "POST", "path": "/admin/personnel-governance/unlink", "permission": "account.update", "module": "账号", "label": "解除人员与账号关联"},
     {"method": "POST", "path": "/admin/personnel-governance/ignore", "permission": "account.update", "module": "账号", "label": "忽略疑似重复"},
     {"method": "POST", "path": "/admin/personnel-governance/unignore", "permission": "account.update", "module": "账号", "label": "取消忽略疑似重复"},
     {"method": "POST", "path": "/admin/personnel-governance/repair/employee/{employee_id}", "permission": "account.update", "module": "账号", "label": "历史员工异常修复"},
+    {"method": "POST", "path": "/admin/personnel-governance/residue-cleanup", "permission": "employee.hard_delete", "module": "账号", "label": "历史残留清理"},
     {"method": "GET", "path": "/admin/roles", "permission": "role.view", "module": "角色", "label": "角色管理"},
     {"method": "POST", "path": "/admin/roles/{role_id}/permissions", "permission": "role.update", "module": "角色", "label": "编辑角色权限"},
     {"method": "GET", "path": "/admin/permission-overview", "permission": "role.view", "module": "角色", "label": "权限概览"},
@@ -4741,6 +4980,75 @@ def normalize_employee_record_scope(value: str) -> str:
     return clean_value if clean_value in {"active", "archive", "trash"} else "active"
 
 
+def normalize_employee_visibility(value: str) -> str:
+    clean_value = value.strip()
+    return clean_value if clean_value in {"visible", "hidden", "all", "departed"} else "visible"
+
+
+def normalize_employee_quick_filter(value: str) -> str:
+    clean_value = value.strip()
+    return clean_value if clean_value in {
+        "default",
+        "archived",
+        "hidden",
+        "schedule",
+        "no_schedule",
+        "safe_delete",
+        "unsafe_delete",
+    } else ""
+
+
+def apply_employee_quick_filter(
+    quick_filter: str,
+    scope: str,
+    visibility: str,
+    schedule_status: str,
+    delete_status: str,
+) -> Tuple[str, str, str, str]:
+    normalized_filter = normalize_employee_quick_filter(quick_filter)
+    if normalized_filter == "archived":
+        return "archive", "all", "all", "all"
+    if normalized_filter == "hidden":
+        return "active", "hidden", "all", "all"
+    if normalized_filter == "schedule":
+        return "active", "visible", "schedule", "all"
+    if normalized_filter == "no_schedule":
+        return "active", "visible", "no_schedule", "all"
+    if normalized_filter == "safe_delete":
+        return "active", "visible", "all", "safe_delete"
+    if normalized_filter == "unsafe_delete":
+        return "active", "visible", "all", "unsafe_delete"
+    if normalized_filter == "default":
+        return "active", "visible", "all", "all"
+    return scope, visibility, schedule_status, delete_status
+
+
+def normalize_employee_source(value: str) -> str:
+    clean_value = value.strip()
+    return clean_value if clean_value in {"all", "linked", "unlinked_account", "employee_only", "account_only"} else "all"
+
+
+def normalize_account_visibility_filter(value: str) -> str:
+    clean_value = value.strip()
+    return clean_value if clean_value in {
+        "visible",
+        "hidden",
+        "all",
+        "enabled",
+        "disabled",
+        "safe_delete",
+        "unsafe_delete",
+        "missing_employee",
+        "system_admin",
+        "assignable",
+    } else "visible"
+
+
+def normalize_employee_binary_filter(value: str, allowed: Tuple[str, str]) -> str:
+    clean_value = value.strip()
+    return clean_value if clean_value in set(allowed) | {"all"} else "all"
+
+
 def normalize_schedule_store_filter(
     raw_store_names: Optional[List[object]],
     legacy_store_name: str,
@@ -5048,7 +5356,7 @@ def store_schedules_has_employee_date_unique_constraint(connection: sqlite3.Conn
             continue
         index_name = str(index_row["name"] or "")
         columns = [str(row["name"]) for row in connection.execute(f"PRAGMA index_info({index_name})").fetchall()]
-        if columns == ["employee_id", "schedule_date"]:
+        if columns in (["employee_id", "schedule_date"], ["store_name", "employee_id", "schedule_date"]):
             return True
     return False
 
@@ -5080,10 +5388,13 @@ def recreate_store_schedules_with_store_date_unique(connection: sqlite3.Connecti
             custom_end_time TEXT,
             custom_duration_hours REAL,
             custom_label TEXT,
+            is_cancelled INTEGER NOT NULL DEFAULT 0,
+            cancelled_at TEXT,
+            cancelled_by TEXT,
+            cancel_reason TEXT,
             created_by TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
-            UNIQUE(store_name, employee_id, schedule_date),
             FOREIGN KEY (employee_id) REFERENCES employees(id),
             FOREIGN KEY (shift_type_id) REFERENCES shift_types(id)
         )
@@ -5094,7 +5405,8 @@ def recreate_store_schedules_with_store_date_unique(connection: sqlite3.Connecti
         INSERT INTO store_schedules (
             id, store_name, employee_id, schedule_date, shift_type_id, note,
             is_custom_time, custom_start_time, custom_end_time, custom_duration_hours,
-            custom_label, created_by, created_at, updated_at
+            custom_label, is_cancelled, cancelled_at, cancelled_by, cancel_reason,
+            created_by, created_at, updated_at
         )
         SELECT
             {source_expr('id', 'NULL')},
@@ -5108,6 +5420,10 @@ def recreate_store_schedules_with_store_date_unique(connection: sqlite3.Connecti
             {source_expr('custom_end_time', "''")},
             {source_expr('custom_duration_hours', 'NULL')},
             {source_expr('custom_label', "''")},
+            {source_expr('is_cancelled', '0')},
+            {source_expr('cancelled_at', 'NULL')},
+            {source_expr('cancelled_by', "''")},
+            {source_expr('cancel_reason', "''")},
             {source_expr('created_by', "''")},
             {source_expr('created_at', "datetime('now')")},
             {source_expr('updated_at', "datetime('now')")}
@@ -5150,7 +5466,19 @@ def ensure_schedule_schema_migrations(connection: sqlite3.Connection) -> None:
     add_column_if_missing(connection, "store_schedules", "custom_end_time", "TEXT")
     add_column_if_missing(connection, "store_schedules", "custom_duration_hours", "REAL")
     add_column_if_missing(connection, "store_schedules", "custom_label", "TEXT")
+    add_column_if_missing(connection, "store_schedules", "is_cancelled", "INTEGER NOT NULL DEFAULT 0")
+    add_column_if_missing(connection, "store_schedules", "cancelled_at", "TEXT")
+    add_column_if_missing(connection, "store_schedules", "cancelled_by", "TEXT")
+    add_column_if_missing(connection, "store_schedules", "cancel_reason", "TEXT")
     recreate_store_schedules_with_store_date_unique(connection)
+    connection.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_store_schedules_active_unique
+        ON store_schedules(store_name, employee_id, schedule_date)
+        WHERE COALESCE(is_cancelled, 0) = 0
+        """
+    )
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_store_schedules_is_cancelled ON store_schedules(is_cancelled)")
 
 
 STORE_STATUSES = ["营业", "筹备", "暂停", "闭店"]
@@ -5583,12 +5911,14 @@ def init_db() -> None:
             """
             CREATE TABLE IF NOT EXISTS employees (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                employee_no TEXT,
                 employee_name TEXT NOT NULL,
                 store_name TEXT NOT NULL,
                 primary_store_name TEXT,
                 user_id INTEGER,
                 allow_login INTEGER NOT NULL DEFAULT 0,
                 participate_schedule INTEGER NOT NULL DEFAULT 1,
+                show_in_employee_management INTEGER NOT NULL DEFAULT 1,
                 role TEXT,
                 phone TEXT,
                 status TEXT NOT NULL DEFAULT '在职',
@@ -5670,10 +6000,13 @@ def init_db() -> None:
                 custom_end_time TEXT,
                 custom_duration_hours REAL,
                 custom_label TEXT,
+                is_cancelled INTEGER NOT NULL DEFAULT 0,
+                cancelled_at TEXT,
+                cancelled_by TEXT,
+                cancel_reason TEXT,
                 created_by TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
-                UNIQUE(store_name, employee_id, schedule_date),
                 FOREIGN KEY (employee_id) REFERENCES employees(id),
                 FOREIGN KEY (shift_type_id) REFERENCES shift_types(id)
             )
@@ -5721,15 +6054,37 @@ def init_db() -> None:
         connection.execute("CREATE INDEX IF NOT EXISTS idx_notification_reads_username ON notification_reads(username)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_embedded_pages_enabled ON embedded_pages(enabled)")
         add_column_if_missing(connection, "employees", "primary_store_name", "TEXT")
+        add_column_if_missing(connection, "employees", "employee_no", "TEXT")
         add_column_if_missing(connection, "employees", "user_id", "INTEGER")
         add_column_if_missing(connection, "employees", "allow_login", "INTEGER NOT NULL DEFAULT 0")
         add_column_if_missing(connection, "employees", "participate_schedule", "INTEGER NOT NULL DEFAULT 1")
+        add_column_if_missing(connection, "employees", "show_in_employee_management", "INTEGER NOT NULL DEFAULT 1")
         add_archive_columns(connection, "employees")
         add_soft_delete_columns(connection, "employees")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_employees_store_name ON employees(store_name)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_employees_employee_no ON employees(employee_no)")
+        duplicate_employee_no = connection.execute(
+            """
+            SELECT employee_no
+            FROM employees
+            WHERE employee_no IS NOT NULL AND TRIM(employee_no) != ''
+            GROUP BY employee_no
+            HAVING COUNT(*) > 1
+            LIMIT 1
+            """
+        ).fetchone()
+        if not duplicate_employee_no:
+            connection.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_employees_employee_no_unique
+                ON employees(employee_no)
+                WHERE employee_no IS NOT NULL AND TRIM(employee_no) != ''
+                """
+            )
         connection.execute("CREATE INDEX IF NOT EXISTS idx_employees_primary_store_name ON employees(primary_store_name)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_employees_user_id ON employees(user_id)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_employees_participate_schedule ON employees(participate_schedule)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_employees_show_in_employee_management ON employees(show_in_employee_management)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_employees_deleted_at ON employees(deleted_at)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_employees_archived_at ON employees(archived_at)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_employee_store_map_employee_id ON employee_store_map(employee_id)")
@@ -8283,6 +8638,16 @@ def build_schedule_calendar_summary(days: List[Dict[str, object]], rows: List[Di
     return summary
 
 
+def normalize_schedule_selected_date(value: object) -> str:
+    clean_value = str(value or "").strip()
+    if not clean_value:
+        return ""
+    try:
+        return date.fromisoformat(clean_value).isoformat()
+    except ValueError:
+        return ""
+
+
 def build_daily_schedule_overview(days: List[Dict[str, object]], rows: List[Dict[str, object]]) -> List[Dict[str, object]]:
     rows_by_date: Dict[str, List[Dict[str, object]]] = {}
     for row in rows:
@@ -8492,6 +8857,7 @@ def attach_employee_store_bindings(
         employee["store_names_text"] = join_display_values(effective_store_names)
         employee["secondary_store_names"] = [store_name for store_name in effective_store_names if store_name != primary_store]
         employee["secondary_store_names_text"] = join_display_values(employee["secondary_store_names"])
+        employee["show_in_employee_management"] = int(employee.get("show_in_employee_management") if employee.get("show_in_employee_management") is not None else 1)
         employee["schedule_url"] = build_employee_schedule_url(employee)
     return employees
 
@@ -8543,7 +8909,109 @@ def shift_type_scope_clause(data_scope: str) -> str:
     return "deleted_at IS NULL AND archived_at IS NULL"
 
 
-def fetch_employees(store_name: str = "", status: str = "", scope: str = "active") -> List[Dict[str, object]]:
+def normalize_employee_no(value: object) -> str:
+    return re.sub(r"\s+", "", str(value or "").strip())
+
+
+def ensure_unique_employee_no(
+    connection: sqlite3.Connection,
+    employee_no: str,
+    employee_id: int = 0,
+) -> None:
+    clean_employee_no = normalize_employee_no(employee_no)
+    if not clean_employee_no:
+        return
+    params: List[object] = [clean_employee_no]
+    clause = "employee_no = ?"
+    if int(employee_id or 0) > 0:
+        clause += " AND id != ?"
+        params.append(int(employee_id))
+    row = connection.execute(f"SELECT id FROM employees WHERE {clause} LIMIT 1", params).fetchone()
+    if row:
+        raise ValueError("工号已存在，请检查后再保存。")
+
+
+def searchable_text_matches(keyword: str, values: Iterable[object]) -> bool:
+    clean_keyword = str(keyword or "").strip().lower()
+    if not clean_keyword:
+        return True
+    return any(clean_keyword in str(value or "").strip().lower() for value in values if str(value or "").strip())
+
+
+def employee_management_keyword_matches(
+    person: Dict[str, object],
+    keyword: str,
+    can_view_account_sensitive: bool,
+) -> bool:
+    values: List[object] = [
+        person.get("employee_no"),
+        person.get("employee_name"),
+        person.get("person_name"),
+        person.get("display_name"),
+        person.get("phone"),
+    ]
+    if can_view_account_sensitive:
+        values.extend([person.get("username"), person.get("linked_username"), person.get("linked_display_name")])
+    return searchable_text_matches(keyword, values)
+
+
+def account_page_keyword_matches(person: Dict[str, object], keyword: str) -> bool:
+    return searchable_text_matches(
+        keyword,
+        [
+            person.get("employee_no"),
+            person.get("person_name"),
+            person.get("employee_name"),
+            person.get("display_name"),
+            person.get("username"),
+            person.get("phone"),
+        ],
+    )
+
+
+def personnel_keyword_matches(payload: object, keyword: str) -> bool:
+    clean_keyword = str(keyword or "").strip().lower()
+    if not clean_keyword:
+        return True
+    values: List[object] = []
+
+    def collect(value: object) -> None:
+        if isinstance(value, dict):
+            for key in (
+                "employee_no",
+                "employee_name",
+                "person_name",
+                "display_name",
+                "username",
+                "phone",
+                "message",
+                "type_label",
+                "employee_id",
+            ):
+                if key in value:
+                    values.append(value.get(key))
+            for nested_key in ("user", "employee", "candidate"):
+                if nested_key in value:
+                    collect(value.get(nested_key))
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                collect(item)
+        else:
+            values.append(value)
+
+    collect(payload)
+    return searchable_text_matches(clean_keyword, values)
+
+
+def fetch_employees(
+    store_name: str = "",
+    status: str = "",
+    scope: str = "active",
+    visibility: str = "all",
+    role: str = "",
+    login_status: str = "all",
+    schedule_status: str = "all",
+) -> List[Dict[str, object]]:
     clauses: List[str] = []
     params: List[object] = []
     join_sql = ""
@@ -8554,27 +9022,589 @@ def fetch_employees(store_name: str = "", status: str = "", scope: str = "active
     if status.strip():
         clauses.append("employees.status = ?")
         params.append(status.strip())
-    clauses.append("COALESCE(employees.participate_schedule, 1) = 1")
+    if role.strip():
+        clauses.append("employees.role = ?")
+        params.append(role.strip())
+    normalized_visibility = normalize_employee_visibility(visibility)
+    if normalized_visibility == "visible":
+        clauses.append("COALESCE(employees.show_in_employee_management, 1) = 1")
+    elif normalized_visibility == "hidden":
+        clauses.append("COALESCE(employees.show_in_employee_management, 1) = 0")
+    elif normalized_visibility == "departed":
+        clauses.append("employees.status IN ('离职', '停用')")
+    normalized_login_status = normalize_employee_binary_filter(login_status, ("login", "no_login"))
+    if normalized_login_status == "login":
+        clauses.append("(COALESCE(employees.allow_login, 0) = 1 OR linked_user.id IS NOT NULL)")
+    elif normalized_login_status == "no_login":
+        clauses.append("COALESCE(employees.allow_login, 0) = 0 AND linked_user.id IS NULL")
+    normalized_schedule_status = normalize_employee_binary_filter(schedule_status, ("schedule", "no_schedule"))
+    if normalized_schedule_status == "schedule":
+        clauses.append("COALESCE(employees.participate_schedule, 1) = 1")
+    elif normalized_schedule_status == "no_schedule":
+        clauses.append("COALESCE(employees.participate_schedule, 1) = 0")
     clauses.append(employee_record_scope_clause(scope))
     where_sql = "WHERE " + " AND ".join(clauses) if clauses else ""
     with get_connection() as connection:
         rows = connection.execute(
             f"""
             SELECT
-                employees.id, employees.employee_name, employees.store_name, employees.primary_store_name,
+                employees.id, employees.employee_no, employees.employee_name, employees.store_name, employees.primary_store_name,
                 employees.user_id, employees.allow_login, employees.participate_schedule,
+                employees.show_in_employee_management,
                 employees.role, employees.phone, employees.status,
                 employees.archived_at, employees.archived_by, employees.archive_reason,
                 employees.deleted_at, employees.deleted_by, employees.delete_reason,
-                employees.created_at, employees.updated_at
+                employees.created_at, employees.updated_at,
+                linked_user.id AS linked_user_id,
+                linked_user.username AS linked_username,
+                linked_user.display_name AS linked_display_name,
+                linked_user.role_id AS linked_role_id,
+                linked_user.allow_login AS linked_allow_login,
+                linked_user.is_active AS linked_is_active,
+                linked_user.is_assignable AS linked_is_assignable,
+                linked_user.data_scope AS linked_data_scope,
+                linked_user.store_names AS linked_data_store_names,
+                admin_roles.role_name AS linked_role_name
             FROM employees
+            LEFT JOIN admin_users AS linked_user
+              ON linked_user.employee_id = employees.id
+              OR linked_user.id = employees.user_id
+            LEFT JOIN admin_roles
+              ON admin_roles.id = linked_user.role_id
             {join_sql}
             {where_sql}
             ORDER BY COALESCE(NULLIF(employees.primary_store_name, ''), employees.store_name), employees.status, employees.employee_name, employees.id
             """,
             params,
         ).fetchall()
-        return attach_employee_store_bindings(connection, rows)
+        employees = attach_employee_store_bindings(connection, rows)
+        return annotate_employee_management_rows(connection, employees)
+
+
+def annotate_employee_management_rows(
+    connection: sqlite3.Connection,
+    employees: List[Dict[str, object]],
+) -> List[Dict[str, object]]:
+    if not employees:
+        return employees
+    employee_ids = [int(employee["id"]) for employee in employees if int(employee.get("id") or 0) > 0]
+    schedule_counts: Dict[int, int] = {}
+    recent_schedule_dates: Dict[int, str] = {}
+    if employee_ids:
+        placeholders = ",".join("?" for _ in employee_ids)
+        for row in connection.execute(
+            f"""
+            SELECT employee_id, COUNT(*) AS total, MAX(schedule_date) AS recent_schedule_date
+            FROM store_schedules
+            WHERE employee_id IN ({placeholders})
+            GROUP BY employee_id
+            """,
+            employee_ids,
+        ).fetchall():
+            employee_id = int(row["employee_id"])
+            schedule_counts[employee_id] = int(row["total"] or 0)
+            recent_schedule_dates[employee_id] = str(row["recent_schedule_date"] or "")
+    usernames = unique_clean_values([employee.get("linked_username") for employee in employees])
+    ticket_counts: Dict[str, int] = {}
+    if usernames:
+        placeholders = ",".join("?" for _ in usernames)
+        for row in connection.execute(
+            f"""
+            SELECT assigned_to, COUNT(*) AS total
+            FROM tickets
+            WHERE assigned_to IN ({placeholders})
+            GROUP BY assigned_to
+            """,
+            usernames,
+        ).fetchall():
+            ticket_counts[str(row["assigned_to"] or "")] = int(row["total"] or 0)
+    seen_employee_ids: set[int] = set()
+    annotated: List[Dict[str, object]] = []
+    for employee in employees:
+        employee_id = int(employee.get("id") or 0)
+        if employee_id in seen_employee_ids:
+            continue
+        seen_employee_ids.add(employee_id)
+        linked_user_id = int(employee.get("linked_user_id") or employee.get("user_id") or 0)
+        linked_username = str(employee.get("linked_username") or "").strip()
+        source = "linked" if linked_user_id else "employee_only"
+        employee.update(
+            {
+                "person_kind": source,
+                "source": source,
+                "source_label": "已关联账号" if source == "linked" else "员工档案",
+                "user_id": linked_user_id or None,
+                "username": linked_username,
+                "person_name": str(employee.get("employee_name") or employee.get("linked_display_name") or linked_username),
+                "role_name": str(employee.get("linked_role_name") or ""),
+                "data_scope": str(employee.get("linked_data_scope") or "all"),
+                "data_store_names": str(employee.get("linked_data_store_names") or ""),
+                "allow_login": int(employee.get("linked_allow_login") if employee.get("linked_allow_login") is not None else employee.get("allow_login") or 0),
+                "is_active": int(employee.get("linked_is_active") if employee.get("linked_is_active") is not None else 0),
+                "is_assignable": int(employee.get("linked_is_assignable") if employee.get("linked_is_assignable") is not None else 0),
+                "schedule_count": schedule_counts.get(employee_id, 0),
+                "recent_schedule_date": recent_schedule_dates.get(employee_id, ""),
+                "ticket_count": ticket_counts.get(linked_username, 0),
+                "has_employee_file": True,
+            }
+        )
+        delete_assessment = employee_hard_delete_assessment(connection, employee_id)
+        employee["delete_assessment"] = delete_assessment
+        employee["can_hard_delete"] = bool(delete_assessment.get("can_hard_delete"))
+        employee["delete_block_reason"] = str(delete_assessment.get("reason_text") or "")
+        employee["delete_recommendation"] = str(delete_assessment.get("recommendation") or "")
+        annotated.append(employee)
+    return annotated
+
+
+def fetch_account_only_employee_people(user_id: int = 0) -> List[Dict[str, object]]:
+    with get_connection() as connection:
+        clauses = [
+            "COALESCE(admin_users.allow_login, 1) = 1",
+            "COALESCE(admin_users.show_in_account_management, 1) = 1",
+            "admin_users.employee_id IS NULL",
+            "NOT EXISTS (SELECT 1 FROM employees WHERE employees.user_id = admin_users.id)",
+        ]
+        params: List[object] = []
+        if int(user_id or 0) > 0:
+            clauses.append("admin_users.id = ?")
+            params.append(int(user_id))
+        rows = connection.execute(
+            f"""
+            SELECT admin_users.*, admin_roles.role_name
+            FROM admin_users
+            LEFT JOIN admin_roles ON admin_roles.id = admin_users.role_id
+            WHERE {" AND ".join(clauses)}
+            ORDER BY admin_users.id
+            """,
+            params,
+        ).fetchall()
+        usernames = unique_clean_values([row["username"] for row in rows])
+        ticket_counts: Dict[str, int] = {}
+        if usernames:
+            placeholders = ",".join("?" for _ in usernames)
+            for ticket_row in connection.execute(
+                f"""
+                SELECT assigned_to, COUNT(*) AS total
+                FROM tickets
+                WHERE assigned_to IN ({placeholders})
+                GROUP BY assigned_to
+                """,
+                usernames,
+            ).fetchall():
+                ticket_counts[str(ticket_row["assigned_to"] or "")] = int(ticket_row["total"] or 0)
+    people: List[Dict[str, object]] = []
+    for row in rows:
+        username = str(row["username"] or "")
+        display_name = str(row["display_name"] or username)
+        people.append(
+            {
+                "id": 0,
+                "employee_id": 0,
+                "employee_no": "",
+                "user_id": int(row["id"]),
+                "person_kind": "account_only",
+                "source": "account_only",
+                "source_label": "账号型人员",
+                "has_employee_file": False,
+                "employee_name": "",
+                "person_name": display_name,
+                "username": username,
+                "display_name": display_name,
+                "role": str(row["role_name"] or ""),
+                "role_name": str(row["role_name"] or ""),
+                "phone": "",
+                "primary_store_name": "",
+                "store_name": "",
+                "store_names": [],
+                "store_names_text": "",
+                "secondary_store_names": [],
+                "secondary_store_names_text": "",
+                "status": "在职",
+                "employee_status": "",
+                "allow_login": int(row["allow_login"] if row["allow_login"] is not None else 1),
+                "participate_schedule": int(row["participate_schedule"] if row["participate_schedule"] is not None else 0),
+                "show_in_employee_management": 1,
+                "is_active": int(row["is_active"] or 0),
+                "is_assignable": int(row["is_assignable"] or 0),
+                "data_scope": str(row["data_scope"] or "all"),
+                "data_store_names": str(row["store_names"] or ""),
+                "schedule_count": 0,
+                "recent_schedule_date": "",
+                "ticket_count": ticket_counts.get(username, 0),
+                "schedule_url": "/admin/schedules",
+                "created_at": str(row["created_at"] or ""),
+                "updated_at": str(row["updated_at"] or ""),
+            }
+        )
+    return people
+
+
+def fetch_employee_management_people(
+    store_name: str = "",
+    status: str = "",
+    scope: str = "active",
+    visibility: str = "visible",
+    source: str = "all",
+    role: str = "",
+    login_status: str = "all",
+    schedule_status: str = "all",
+    assignable_status: str = "all",
+    delete_status: str = "all",
+    user_id: int = 0,
+) -> List[Dict[str, object]]:
+    normalized_source = normalize_employee_source(source)
+    selected_scope = normalize_employee_record_scope(scope)
+    selected_visibility = normalize_employee_visibility(visibility)
+    selected_login_status = normalize_employee_binary_filter(login_status, ("login", "no_login"))
+    selected_schedule_status = normalize_employee_binary_filter(schedule_status, ("schedule", "no_schedule"))
+    selected_assignable_status = normalize_employee_binary_filter(assignable_status, ("assignable", "not_assignable"))
+    people: List[Dict[str, object]] = []
+    if normalized_source != "account_only":
+        employee_source_filter = "linked" if normalized_source == "linked" else "all"
+        employees = fetch_employees(
+            store_name,
+            status,
+            scope,
+            visibility=selected_visibility,
+            role=role,
+            login_status=selected_login_status,
+            schedule_status=selected_schedule_status,
+        )
+        for employee in employees:
+            if employee_source_filter == "linked" and employee.get("source") != "linked":
+                continue
+            if normalized_source in {"employee_only", "unlinked_account"} and employee.get("source") != "employee_only":
+                continue
+            if selected_assignable_status == "assignable" and int(employee.get("is_assignable") or 0) != 1:
+                continue
+            if selected_assignable_status == "not_assignable" and int(employee.get("is_assignable") or 0) == 1:
+                continue
+            if delete_status == "safe_delete" and not employee.get("can_hard_delete"):
+                continue
+            if delete_status == "unsafe_delete" and employee.get("can_hard_delete"):
+                continue
+            if int(user_id or 0) > 0 and int(employee.get("user_id") or 0) != int(user_id):
+                continue
+            people.append(employee)
+    if (
+        selected_scope == "active"
+        and normalized_source in {"all", "account_only", "unlinked_account"}
+        and selected_visibility in {"visible", "all"}
+    ):
+        for account_person in fetch_account_only_employee_people(user_id):
+            if role.strip() and str(account_person.get("role") or "") != role.strip():
+                continue
+            if selected_login_status == "no_login":
+                continue
+            if selected_schedule_status == "schedule" and int(account_person.get("participate_schedule") or 0) != 1:
+                continue
+            if selected_schedule_status == "no_schedule" and int(account_person.get("participate_schedule") or 0) == 1:
+                continue
+            if selected_assignable_status == "assignable" and int(account_person.get("is_assignable") or 0) != 1:
+                continue
+            if selected_assignable_status == "not_assignable" and int(account_person.get("is_assignable") or 0) == 1:
+                continue
+            if delete_status in {"safe_delete", "unsafe_delete"}:
+                continue
+            people.append(account_person)
+    return sorted(people, key=employee_sort_key)
+
+
+def employee_store_names_for_scope(person: Dict[str, object]) -> List[str]:
+    stores = unique_clean_values(person.get("store_names") or [])
+    primary_store = str(person.get("primary_store_name") or person.get("store_name") or "").strip()
+    data_store_names = split_multi_value_text(person.get("data_store_names"))
+    return unique_clean_values(stores + ([primary_store] if primary_store else []) + data_store_names)
+
+
+def employee_visible_for_admin_scope(person: Dict[str, object], user: Optional[Dict[str, object]]) -> bool:
+    if is_system_admin_user(user):
+        return True
+    if not user:
+        return False
+    data_scope = normalize_admin_data_scope(str(user.get("data_scope") or "all"))
+    if data_scope == "all":
+        return True
+    if data_scope == "stores":
+        allowed_stores = set(split_multi_value_text(user.get("store_names")))
+        if not allowed_stores:
+            return False
+        return bool(allowed_stores & set(employee_store_names_for_scope(person)))
+    if data_scope == "assigned":
+        username = str(user.get("username") or "").strip()
+        user_id = int(user.get("id") or 0)
+        return bool(
+            username
+            and username == str(person.get("username") or "").strip()
+            or user_id > 0
+            and user_id == int(person.get("user_id") or 0)
+        )
+    return False
+
+
+def filter_employee_management_people_for_user(
+    people: List[Dict[str, object]],
+    user: Optional[Dict[str, object]],
+    can_view_account_sensitive: bool,
+) -> List[Dict[str, object]]:
+    filtered: List[Dict[str, object]] = []
+    for person in people:
+        if not can_view_account_sensitive and str(person.get("source") or "") == "account_only":
+            continue
+        if not employee_visible_for_admin_scope(person, user):
+            continue
+        filtered.append(person)
+    return filtered
+
+
+EMPLOYEE_ACCOUNT_SENSITIVE_FORM_FIELDS = {
+    "account",
+    "account_id",
+    "admin_user_id",
+    "allow_login",
+    "data_scope",
+    "is_assignable",
+    "password",
+    "password_confirm",
+    "role_id",
+    "user_id",
+    "username",
+}
+
+
+async def reject_sensitive_employee_account_form_fields(request: Request, user: Optional[Dict[str, object]]) -> None:
+    if is_system_admin_user(user):
+        return
+    form = await request.form()
+    submitted_sensitive_fields = sorted(set(form.keys()) & EMPLOYEE_ACCOUNT_SENSITIVE_FORM_FIELDS)
+    if submitted_sensitive_fields:
+        raise HTTPException(
+            status_code=http_status.HTTP_403_FORBIDDEN,
+            detail="账号权限信息仅系统管理员可维护。",
+        )
+
+
+def employee_has_linked_admin_account(employee_id: int) -> bool:
+    with get_connection() as connection:
+        employee_row = connection.execute(
+            "SELECT user_id FROM employees WHERE id = ?",
+            (int(employee_id),),
+        ).fetchone()
+        if not employee_row:
+            return False
+        linked_user_id = int(employee_row["user_id"] or 0)
+        row = connection.execute(
+            "SELECT 1 FROM admin_users WHERE employee_id = ? OR id = ? LIMIT 1",
+            (int(employee_id), linked_user_id),
+        ).fetchone()
+    return row is not None
+
+
+def count_query(connection: sqlite3.Connection, sql: str, params: Iterable[object] = ()) -> int:
+    row = connection.execute(sql, tuple(params)).fetchone()
+    if row is None:
+        return 0
+    return int(row[0] or 0)
+
+
+def count_exact_text_references(
+    connection: sqlite3.Connection,
+    table_name: str,
+    column_names: Iterable[str],
+    values: Iterable[object],
+) -> int:
+    clean_values = unique_clean_values(values)
+    clean_columns = [str(column).strip() for column in column_names if str(column).strip()]
+    if not clean_values or not clean_columns or not table_exists(connection, table_name):
+        return 0
+    placeholders = ",".join("?" for _ in clean_values)
+    clauses = [f"{column} IN ({placeholders})" for column in clean_columns]
+    params: List[object] = []
+    for _column in clean_columns:
+        params.extend(clean_values)
+    return count_query(connection, f"SELECT COUNT(*) FROM {table_name} WHERE {' OR '.join(clauses)}", params)
+
+
+def employee_hard_delete_assessment(connection: sqlite3.Connection, employee_id: int) -> Dict[str, object]:
+    employee_row = connection.execute("SELECT * FROM employees WHERE id = ?", (int(employee_id),)).fetchone()
+    if not employee_row:
+        return {
+            "exists": False,
+            "can_hard_delete": False,
+            "reasons": ["员工不存在。"],
+            "recommendation": "不存在",
+        }
+    linked_users = connection.execute(
+        """
+        SELECT id, username, display_name
+        FROM admin_users
+        WHERE employee_id = ? OR id = ?
+        ORDER BY id
+        """,
+        (int(employee_id), int(employee_row["user_id"] or 0)),
+    ).fetchall()
+    reference_names = unique_clean_values(
+        [
+            employee_row["employee_name"],
+            *(row["username"] for row in linked_users),
+            *(row["display_name"] for row in linked_users),
+        ]
+    )
+    schedule_count = count_query(
+        connection,
+        "SELECT COUNT(*) FROM store_schedules WHERE employee_id = ?",
+        (int(employee_id),),
+    )
+    ticket_count = count_exact_text_references(connection, "tickets", ["assigned_to"], reference_names)
+    task_count = count_exact_text_references(connection, "ticket_tasks", ["assignee"], reference_names)
+    comment_count = count_exact_text_references(connection, "ticket_comments", ["author_name"], reference_names)
+    participant_count = count_exact_text_references(connection, "ticket_participants", ["participant_name"], reference_names)
+    ticket_log_count = count_exact_text_references(
+        connection,
+        "ticket_logs",
+        ["operator", "old_assigned_to", "new_assigned_to"],
+        reference_names,
+    )
+    schedule_log_count = count_exact_text_references(connection, "schedule_logs", ["operator"], reference_names)
+    operation_log_count = count_query(
+        connection,
+        """
+        SELECT COUNT(*)
+        FROM admin_operation_logs
+        WHERE target_type = 'employee' AND target_id = ?
+        """,
+        (str(int(employee_id)),),
+    )
+    linked_account_count = len(linked_users)
+    counts = {
+        "schedule_count": schedule_count,
+        "ticket_count": ticket_count + task_count + comment_count + participant_count,
+        "ticket_log_count": ticket_log_count,
+        "schedule_log_count": schedule_log_count,
+        "operation_log_count": operation_log_count,
+        "linked_account_count": linked_account_count,
+    }
+    reasons: List[str] = []
+    if schedule_count:
+        reasons.append(f"存在历史排班 {schedule_count} 条")
+    if counts["ticket_count"]:
+        reasons.append(f"存在历史工单/协作记录 {counts['ticket_count']} 条")
+    if ticket_log_count:
+        reasons.append(f"存在历史工单日志 {ticket_log_count} 条")
+    if schedule_log_count:
+        reasons.append(f"存在历史排班日志 {schedule_log_count} 条")
+    if linked_account_count:
+        reasons.append("存在账号记录或账号关联")
+    can_hard_delete = not reasons
+    return {
+        "exists": True,
+        "can_hard_delete": can_hard_delete,
+        "counts": counts,
+        "reasons": reasons,
+        "reason_text": "；".join(reasons),
+        "recommendation": "可安全删除" if can_hard_delete else "归档/隐藏",
+        "action_label": "可安全删除" if can_hard_delete else "只能归档/隐藏",
+        "linked_usernames": join_display_values([row["username"] for row in linked_users]),
+    }
+
+
+def can_hard_delete_employee(employee_id: int) -> Dict[str, object]:
+    with get_connection() as connection:
+        return employee_hard_delete_assessment(connection, int(employee_id))
+
+
+def admin_user_hard_delete_assessment(connection: sqlite3.Connection, user_id: int) -> Dict[str, object]:
+    row = connection.execute("SELECT * FROM admin_users WHERE id = ?", (int(user_id),)).fetchone()
+    if not row:
+        return {
+            "exists": False,
+            "can_hard_delete": False,
+            "reasons": ["账号不存在。"],
+            "recommendation": "不存在",
+        }
+    user = row_to_admin_user(connection, row)
+    username = str(user.get("username") or "").strip()
+    reference_names = unique_clean_values([username, user.get("display_name")])
+    ticket_count = count_exact_text_references(connection, "tickets", ["assigned_to"], [username])
+    task_count = count_exact_text_references(connection, "ticket_tasks", ["assignee"], reference_names)
+    comment_count = count_exact_text_references(connection, "ticket_comments", ["author_name"], reference_names)
+    participant_count = count_exact_text_references(connection, "ticket_participants", ["participant_name"], reference_names)
+    ticket_log_count = count_exact_text_references(
+        connection,
+        "ticket_logs",
+        ["operator", "old_assigned_to", "new_assigned_to"],
+        reference_names,
+    )
+    login_log_count = count_query(
+        connection,
+        "SELECT COUNT(*) FROM admin_login_logs WHERE username = ?",
+        (username,),
+    )
+    operation_log_count = count_query(
+        connection,
+        """
+        SELECT COUNT(*)
+        FROM admin_operation_logs
+        WHERE username = ?
+           OR (target_type = 'admin_user' AND target_id = ?)
+        """,
+        (username, str(int(user_id))),
+    )
+    authored_account_count = count_exact_text_references(
+        connection,
+        "admin_users",
+        ["created_by", "updated_by"],
+        [username],
+    )
+    linked_employee_count = count_query(
+        connection,
+        "SELECT COUNT(*) FROM employees WHERE user_id = ? OR id = ?",
+        (int(user_id), int(user.get("employee_id") or 0)),
+    )
+    is_last_active_system_admin = (
+        str(user.get("role_name") or "") == SYSTEM_ADMIN_ROLE_NAME
+        and int(user.get("is_active") or 0) == 1
+        and int(user.get("allow_login") or 0) == 1
+        and active_system_admin_count(connection, int(user_id)) <= 0
+    )
+    counts = {
+        "ticket_count": ticket_count + task_count + comment_count + participant_count,
+        "ticket_log_count": ticket_log_count,
+        "login_log_count": login_log_count,
+        "operation_log_count": operation_log_count,
+        "authored_account_count": authored_account_count,
+        "linked_employee_count": linked_employee_count,
+    }
+    reasons: List[str] = []
+    if counts["ticket_count"]:
+        reasons.append(f"存在历史工单/协作记录 {counts['ticket_count']} 条")
+    if ticket_log_count:
+        reasons.append("存在工单处理日志")
+    if login_log_count:
+        reasons.append(f"存在登录日志 {login_log_count} 条")
+    if operation_log_count:
+        reasons.append(f"存在操作日志 {operation_log_count} 条")
+    if authored_account_count:
+        reasons.append("存在账号创建/更新记录")
+    if is_last_active_system_admin:
+        reasons.append("不能删除最后一个可登录系统管理员")
+    can_hard_delete = not reasons
+    return {
+        "exists": True,
+        "can_hard_delete": can_hard_delete,
+        "counts": counts,
+        "reasons": reasons,
+        "reason_text": "；".join(reasons),
+        "recommendation": "可安全删除" if can_hard_delete else "关闭并隐藏",
+        "action_label": "可安全删除" if can_hard_delete else "只能关闭/隐藏",
+        "is_last_active_system_admin": is_last_active_system_admin,
+    }
+
+
+def can_hard_delete_admin_user(user_id: int) -> Dict[str, object]:
+    with get_connection() as connection:
+        return admin_user_hard_delete_assessment(connection, int(user_id))
 
 
 def fetch_employee(employee_id: int) -> Optional[Dict[str, object]]:
@@ -8614,6 +9644,14 @@ def fetch_schedulable_employees_for_stores(
     selected_store_set = set(clean_stores)
     result: List[Dict[str, object]] = []
     for employee in employees:
+        if int(employee.get("participate_schedule") or 0) != 1:
+            continue
+        if int(employee.get("show_in_employee_management") or 0) != 1:
+            continue
+        if str(employee.get("status") or "") in {"离职", "停用"}:
+            continue
+        if employee.get("archived_at") or employee.get("deleted_at"):
+            continue
         if clean_statuses and str(employee.get("status") or "") not in clean_statuses:
             continue
         employee_stores = set(employee.get("store_names") or [])
@@ -8639,8 +9677,12 @@ def create_employee(
     config: AppConfig,
     store_names: Optional[List[str]] = None,
     primary_store_name: str = "",
+    participate_schedule: Optional[bool] = None,
+    show_in_employee_management: bool = True,
+    employee_no: str = "",
 ) -> int:
     clean_name = employee_name.strip()
+    clean_employee_no = normalize_employee_no(employee_no)
     clean_status = status.strip() or "在职"
     if not clean_name:
         raise ValueError("请填写员工姓名。")
@@ -8648,20 +9690,24 @@ def create_employee(
     if clean_status not in EMPLOYEE_STATUSES:
         raise ValueError("员工状态不正确。")
     timestamp = now_text()
+    schedule_flag = 0 if clean_status in {"离职", "停用"} else int(1 if participate_schedule is None else bool(participate_schedule))
     with get_connection() as connection:
+        ensure_unique_employee_no(connection, clean_employee_no)
         cursor = connection.execute(
             """
             INSERT INTO employees (
-                employee_name, store_name, primary_store_name, user_id, allow_login, participate_schedule,
-                role, phone, status, created_at, updated_at
+                employee_no, employee_name, store_name, primary_store_name, user_id, allow_login, participate_schedule,
+                show_in_employee_management, role, phone, status, created_at, updated_at
             )
-            VALUES (?, ?, ?, NULL, 0, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, NULL, 0, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
+                clean_employee_no or None,
                 clean_name,
                 primary_store,
                 primary_store,
-                0 if clean_status == "离职" else 1,
+                schedule_flag,
+                int(bool(show_in_employee_management)),
                 role.strip(),
                 phone.strip(),
                 clean_status,
@@ -8684,11 +9730,17 @@ def update_employee(
     config: AppConfig,
     store_names: Optional[List[str]] = None,
     primary_store_name: str = "",
+    participate_schedule: Optional[bool] = None,
+    show_in_employee_management: Optional[bool] = None,
+    employee_no: Optional[str] = None,
 ) -> None:
     existing_employee = fetch_employee(employee_id)
     if not existing_employee:
         raise HTTPException(status_code=404, detail="员工不存在")
     clean_name = employee_name.strip()
+    clean_employee_no = normalize_employee_no(
+        employee_no if employee_no is not None else existing_employee.get("employee_no")
+    )
     clean_status = status.strip() or "在职"
     if not clean_name:
         raise ValueError("请填写员工姓名。")
@@ -8697,22 +9749,31 @@ def update_employee(
     if clean_status not in EMPLOYEE_STATUSES:
         raise ValueError("员工状态不正确。")
     timestamp = now_text()
+    existing_schedule = int(existing_employee.get("participate_schedule") if existing_employee.get("participate_schedule") is not None else 1)
+    schedule_flag = existing_schedule if participate_schedule is None else int(bool(participate_schedule))
+    if clean_status in {"离职", "停用"}:
+        schedule_flag = 0
+    existing_show = int(existing_employee.get("show_in_employee_management") if existing_employee.get("show_in_employee_management") is not None else 1)
+    show_flag = existing_show if show_in_employee_management is None else int(bool(show_in_employee_management))
     with get_connection() as connection:
+        ensure_unique_employee_no(connection, clean_employee_no, employee_id)
         connection.execute(
             """
             UPDATE employees
-            SET employee_name = ?, store_name = ?, primary_store_name = ?, role = ?, phone = ?,
-                status = ?, participate_schedule = ?, updated_at = ?
+            SET employee_no = ?, employee_name = ?, store_name = ?, primary_store_name = ?, role = ?, phone = ?,
+                status = ?, participate_schedule = ?, show_in_employee_management = ?, updated_at = ?
             WHERE id = ?
             """,
             (
+                clean_employee_no or None,
                 clean_name,
                 primary_store,
                 primary_store,
                 role.strip(),
                 phone.strip(),
                 clean_status,
-                0 if clean_status == "离职" else 1,
+                schedule_flag,
+                show_flag,
                 timestamp,
                 employee_id,
             ),
@@ -8756,7 +9817,7 @@ def archive_employee(employee_id: int, operator: str, archive_reason: str = "") 
         connection.execute(
             """
             UPDATE employees
-            SET archived_at = ?, archived_by = ?, archive_reason = ?, updated_at = ?
+            SET archived_at = ?, archived_by = ?, archive_reason = ?, participate_schedule = 0, updated_at = ?
             WHERE id = ? AND deleted_at IS NULL AND archived_at IS NULL
             """,
             (timestamp, operator, archive_reason.strip() or "后台归档员工", timestamp, employee_id),
@@ -8810,14 +9871,134 @@ def hard_delete_employee(employee_id: int) -> None:
     if not fetch_employee(employee_id):
         raise HTTPException(status_code=404, detail="员工不存在")
     with get_connection() as connection:
-        schedule_count = connection.execute(
-            "SELECT COUNT(*) AS total FROM store_schedules WHERE employee_id = ?",
-            (employee_id,),
-        ).fetchone()["total"]
-        if int(schedule_count or 0) > 0:
-            raise ValueError("该员工已有排班记录，建议归档而不是永久删除。")
+        assessment = employee_hard_delete_assessment(connection, int(employee_id))
+        if not assessment.get("can_hard_delete"):
+            reason_text = str(assessment.get("reason_text") or "存在历史记录")
+            raise ValueError(f"该人员{reason_text}，不能永久删除，可归档或隐藏。")
         connection.execute("DELETE FROM employee_store_map WHERE employee_id = ?", (employee_id,))
         connection.execute("DELETE FROM employees WHERE id = ?", (employee_id,))
+
+
+def admin_user_linked_employee_ids(connection: sqlite3.Connection, user_row: sqlite3.Row) -> List[int]:
+    user_id = int(user_row["id"])
+    ids: List[int] = []
+    if user_row["employee_id"] is not None:
+        ids.append(int(user_row["employee_id"]))
+    rows = connection.execute("SELECT id FROM employees WHERE user_id = ?", (user_id,)).fetchall()
+    ids.extend(int(row["id"]) for row in rows)
+    return sorted(set(employee_id for employee_id in ids if employee_id > 0))
+
+
+def delete_admin_user_identity(user_id: int, operator: str) -> Dict[str, object]:
+    timestamp = now_text()
+    with get_connection() as connection:
+        user_row = connection.execute("SELECT * FROM admin_users WHERE id = ?", (int(user_id),)).fetchone()
+        if not user_row:
+            raise ValueError("账号不存在。")
+        target_user = row_to_admin_user(connection, user_row)
+        assessment = admin_user_hard_delete_assessment(connection, int(user_id))
+        if str(target_user.get("username") or "") == operator:
+            if assessment.get("is_last_active_system_admin"):
+                raise ValueError("不能删除最后一个可登录系统管理员。")
+            raise ValueError("不能删除当前登录账号。")
+        if not assessment.get("can_hard_delete"):
+            if assessment.get("is_last_active_system_admin"):
+                raise ValueError("不能删除最后一个可登录系统管理员。")
+            raise ValueError("该账号存在历史登录/操作/工单记录，不能永久删除，可关闭并隐藏。")
+        employee_ids = admin_user_linked_employee_ids(connection, user_row)
+        if employee_ids:
+            placeholders = ",".join("?" for _ in employee_ids)
+            connection.execute(
+                f"""
+                UPDATE employees
+                SET user_id = NULL, allow_login = 0, updated_at = ?
+                WHERE user_id = ? OR id IN ({placeholders})
+                """,
+                [timestamp, int(user_id), *employee_ids],
+            )
+        else:
+            connection.execute(
+                "UPDATE employees SET user_id = NULL, allow_login = 0, updated_at = ? WHERE user_id = ?",
+                (timestamp, int(user_id)),
+            )
+        connection.execute("DELETE FROM admin_users WHERE id = ?", (int(user_id),))
+        return {
+            "user_id": int(user_id),
+            "username": str(target_user.get("username") or ""),
+            "employee_ids": employee_ids,
+        }
+
+
+def hide_admin_user_identity(user_id: int, operator: str) -> Dict[str, object]:
+    timestamp = now_text()
+    with get_connection() as connection:
+        user_row = connection.execute("SELECT * FROM admin_users WHERE id = ?", (int(user_id),)).fetchone()
+        if not user_row:
+            raise ValueError("账号不存在。")
+        target_user = row_to_admin_user(connection, user_row)
+        errors = deactivate_admin_user_errors(target_user, operator)
+        if errors:
+            raise ValueError("，".join(errors) + "。")
+        employee_ids = admin_user_linked_employee_ids(connection, user_row)
+        connection.execute(
+            """
+            UPDATE admin_users
+            SET allow_login = 0, is_active = 0, is_assignable = 0, show_in_account_management = 0,
+                updated_at = ?, updated_by = ?
+            WHERE id = ?
+            """,
+            (timestamp, operator, int(user_id)),
+        )
+        if employee_ids:
+            placeholders = ",".join("?" for _ in employee_ids)
+            connection.execute(
+                f"UPDATE employees SET allow_login = 0, updated_at = ? WHERE user_id = ? OR id IN ({placeholders})",
+                [timestamp, int(user_id), *employee_ids],
+            )
+        else:
+            connection.execute(
+                "UPDATE employees SET allow_login = 0, updated_at = ? WHERE user_id = ?",
+                (timestamp, int(user_id)),
+            )
+        return {"user_id": int(user_id), "username": str(target_user.get("username") or ""), "employee_ids": employee_ids}
+
+
+def show_admin_user_identity(user_id: int, operator: str) -> Dict[str, object]:
+    timestamp = now_text()
+    with get_connection() as connection:
+        user_row = connection.execute("SELECT * FROM admin_users WHERE id = ?", (int(user_id),)).fetchone()
+        if not user_row:
+            raise ValueError("账号不存在。")
+        connection.execute(
+            "UPDATE admin_users SET show_in_account_management = 1, updated_at = ?, updated_by = ? WHERE id = ?",
+            (timestamp, operator, int(user_id)),
+        )
+        return {"user_id": int(user_id), "username": str(user_row["username"] or "")}
+
+
+def unlink_admin_user_employee_identity(user_id: int, operator: str) -> Dict[str, object]:
+    timestamp = now_text()
+    with get_connection() as connection:
+        user_row = connection.execute("SELECT * FROM admin_users WHERE id = ?", (int(user_id),)).fetchone()
+        if not user_row:
+            raise ValueError("账号不存在。")
+        employee_ids = admin_user_linked_employee_ids(connection, user_row)
+        if not employee_ids:
+            raise ValueError("该账号未关联员工档案。")
+        placeholders = ",".join("?" for _ in employee_ids)
+        connection.execute(
+            "UPDATE admin_users SET employee_id = NULL, updated_at = ?, updated_by = ? WHERE id = ?",
+            (timestamp, operator, int(user_id)),
+        )
+        connection.execute(
+            f"""
+            UPDATE employees
+            SET user_id = NULL, allow_login = 0, updated_at = ?
+            WHERE user_id = ? OR id IN ({placeholders})
+            """,
+            [timestamp, int(user_id), *employee_ids],
+        )
+        return {"user_id": int(user_id), "username": str(user_row["username"] or ""), "employee_ids": employee_ids}
 
 
 def fetch_shift_types(
@@ -9121,6 +10302,7 @@ def schedule_redirect_url(
     month: str,
     saved: int = 0,
     deleted: int = 0,
+    cancelled: int = 0,
     error: str = "",
     saved_count: int = 0,
     created_count: int = 0,
@@ -9145,10 +10327,21 @@ def schedule_redirect_url(
         params["skipped_count"] = str(skipped_count)
     if deleted:
         params["deleted"] = str(deleted)
+    if cancelled:
+        params["cancelled"] = str(cancelled)
     if error:
         params["error"] = error
     hash_fragment = f"#{anchor.strip()}" if anchor.strip() else ""
     return "/admin/schedules?" + urlencode({key: value for key, value in params.items() if value}) + hash_fragment
+
+
+def normalize_schedule_state(value: object) -> str:
+    clean_value = str(value or "active").strip().lower()
+    if clean_value in {"cancelled", "canceled", "已取消"}:
+        return "cancelled"
+    if clean_value in {"all", "全部"}:
+        return "all"
+    return "active"
 
 
 def schedule_filters(
@@ -9161,6 +10354,7 @@ def schedule_filters(
     shift_type_ids: Optional[List[int]] = None,
     include_custom_shift: bool = False,
     is_all_stores: bool = False,
+    schedule_state: str = "active",
 ) -> Dict[str, object]:
     selected_store_names = unique_clean_values(store_names or ([store_name.strip()] if store_name.strip() and not is_all_stores else []))
     selected_employee_statuses = unique_clean_values(employee_statuses or ([employee_status.strip()] if employee_status.strip() else []))
@@ -9176,6 +10370,7 @@ def schedule_filters(
         "shift_type_id": str(selected_shift_type_ids[0]) if len(selected_shift_type_ids) == 1 and not include_custom_shift else "",
         "shift_type_ids": [str(value) for value in selected_shift_type_ids],
         "include_custom_shift": include_custom_shift,
+        "schedule_state": normalize_schedule_state(schedule_state),
     }
 
 
@@ -9190,6 +10385,7 @@ def fetch_schedule_rows(
     include_custom_shift: bool = False,
     is_all_stores: bool = False,
     selected_employee_ids: Optional[List[int]] = None,
+    schedule_state: str = "active",
 ) -> List[Dict[str, object]]:
     filters = schedule_filters(
         store_name,
@@ -9201,6 +10397,7 @@ def fetch_schedule_rows(
         shift_type_ids=shift_type_ids,
         include_custom_shift=include_custom_shift,
         is_all_stores=is_all_stores,
+        schedule_state=schedule_state,
     )
     year, month_number = [int(part) for part in filters["month"].split("-")]
     last_day = calendar.monthrange(year, month_number)[1]
@@ -9233,6 +10430,10 @@ def fetch_schedule_rows(
         params.extend(selected_shift_type_ids)
     elif include_custom:
         clauses.append("COALESCE(schedules.is_custom_time, 0) = 1")
+    if filters["schedule_state"] == "cancelled":
+        clauses.append("COALESCE(schedules.is_cancelled, 0) = 1")
+    elif filters["schedule_state"] != "all":
+        clauses.append("COALESCE(schedules.is_cancelled, 0) = 0")
     where_sql = " AND ".join(clauses)
     with get_connection() as connection:
         rows = connection.execute(
@@ -9241,9 +10442,11 @@ def fetch_schedule_rows(
                 schedules.id, schedules.store_name, schedules.employee_id, schedules.schedule_date,
                 schedules.shift_type_id, schedules.note, schedules.created_by,
                 COALESCE(schedules.is_custom_time, 0) AS is_custom_time,
+                COALESCE(schedules.is_cancelled, 0) AS is_cancelled,
+                schedules.cancelled_at, schedules.cancelled_by, schedules.cancel_reason,
                 schedules.custom_start_time, schedules.custom_end_time,
                 schedules.custom_duration_hours, schedules.custom_label,
-                employees.employee_name, employees.role, employees.status AS employee_status,
+                employees.employee_no, employees.employee_name, employees.role, employees.status AS employee_status,
                 shift_types.shift_name, shift_types.start_time, shift_types.end_time,
                 shift_types.duration_hours, shift_types.color, shift_types.is_active,
                 shift_types.store_name AS shift_store_name, shift_types.is_global AS shift_is_global
@@ -9289,6 +10492,8 @@ def fetch_schedule_context(
     include_custom_shift: bool = False,
     is_all_stores: bool = False,
     store_scope: str = "selected_stores",
+    selected_date: str = "",
+    schedule_state: str = "active",
 ) -> Dict[str, object]:
     normalized_view = normalize_schedule_view(view)
     normalized_store_scope = normalize_schedule_store_scope(store_scope)
@@ -9315,6 +10520,7 @@ def fetch_schedule_context(
         shift_type_ids=shift_type_ids,
         include_custom_shift=include_custom_shift,
         is_all_stores=normalized_scope == "all",
+        schedule_state=schedule_state,
     )
     year, month_number = [int(part) for part in str(filters["month"]).split("-")]
     calendar_days = build_month_calendar(year, month_number)
@@ -9345,24 +10551,26 @@ def fetch_schedule_context(
         include_custom_shift=bool(filters["include_custom_shift"]),
         is_all_stores=is_all,
         selected_employee_ids=selected_ids,
+        schedule_state=str(filters["schedule_state"]),
     )
     quality = schedule_validation_service.build_schedule_quality(rows, str(filters["month"]))
     rows = list(quality["rows"])
+    active_rows = [row for row in rows if int(row.get("is_cancelled") or 0) == 0]
     schedule_map: Dict[str, Dict[int, Dict[str, object]]] = {}
     daily_store_counts: Dict[str, Dict[str, int]] = {}
     for row in rows:
         schedule_map.setdefault(str(row["schedule_date"]), {})[int(row["employee_id"])] = row
         daily_store_counts.setdefault(str(row["schedule_date"]), {}).setdefault(str(row["store_name"]), 0)
         daily_store_counts[str(row["schedule_date"])][str(row["store_name"])] += 1
-    dashboard = build_schedule_dashboard(rows, str(filters["month"]))
-    total_hours = round(sum(float(row.get("duration_hours") or 0) for row in rows), 2)
-    scheduled_dates = {str(row["schedule_date"]) for row in rows}
+    dashboard = build_schedule_dashboard(active_rows, str(filters["month"]))
+    total_hours = round(sum(float(row.get("duration_hours") or 0) for row in active_rows), 2)
+    scheduled_dates = {str(row["schedule_date"]) for row in active_rows}
     stats = {
         "scheduled_day_count": len(scheduled_dates),
         "employee_count": len(employees),
         "total_hours": total_hours,
         "unscheduled_day_count": max(len(days) - len(scheduled_dates), 0),
-        "rest_shift_count": sum(1 for row in rows if str(row.get("shift_name") or "") == "休息"),
+        "rest_shift_count": sum(1 for row in active_rows if str(row.get("shift_name") or "") == "休息"),
         "conflict_count": int(quality["conflict_count"] or 0),
         "warning_count": int(quality["warning_count"] or 0),
     }
@@ -9372,6 +10580,7 @@ def fetch_schedule_context(
         ("employee_scope", normalized_employee_scope),
         ("scope", normalized_scope),
         ("store_scope", normalized_store_scope),
+        ("schedule_state", str(filters["schedule_state"])),
     ]
     if selected_store_names:
         query_items.extend(("store_names", store) for store in selected_store_names)
@@ -9384,6 +10593,9 @@ def fetch_schedule_context(
     query_items.extend(("employee_ids", employee_id) for employee_id in selected_id_strings)
     if show_cross_store:
         query_items.append(("show_cross_store", "1"))
+    normalized_selected_date = normalize_schedule_selected_date(selected_date)
+    if not normalized_selected_date and rows:
+        normalized_selected_date = str(rows[0]["schedule_date"])
     view_anchors = {
         "calendar": "schedule-calendar-view",
         "employee": "employee-schedule-view",
@@ -9403,11 +10615,24 @@ def fetch_schedule_context(
         [("store_names", "__all__"), ("month", str(filters["month"])), ("scope", "all"), ("view_mode", "store-summary")]
     ) + "#store-summary-view"
     calendar_summary = build_schedule_calendar_summary(calendar_days, rows)
+    for item in calendar_summary:
+        date_text = str(item["day"]["date"])
+        item["is_selected"] = bool(normalized_selected_date and date_text == normalized_selected_date)
+        item["detail_url"] = "/admin/schedules?" + urlencode(
+            [*query_items, ("view_mode", "calendar"), ("selected_date", date_text)]
+        ) + "#schedule-day-detail"
+    selected_day_summary = next(
+        (item for item in calendar_summary if str(item["day"]["date"]) == normalized_selected_date),
+        None,
+    )
+    selected_day_schedules = list(selected_day_summary["rows"]) if selected_day_summary else []
+    selected_date_label = f"{normalized_selected_date} {weekday_label(normalized_selected_date)}" if normalized_selected_date else "请选择日期"
     daily_overview = build_daily_schedule_overview(days, rows)
     export_query = [("month", filters["month"])]
     export_query.extend(("store_names", store) for store in selected_store_names)
     export_query.extend(("employee_statuses", status) for status in filters["employee_statuses"])
     export_query.extend(("shift_type_ids", shift_id) for shift_id in filters["shift_type_ids"])
+    export_query.append(("schedule_state", str(filters["schedule_state"])))
     if filters["include_custom_shift"]:
         export_query.append(("shift_type_ids", "custom"))
     is_single_store = len(selected_store_names) == 1 and not is_all
@@ -9440,10 +10665,14 @@ def fetch_schedule_context(
         "daily_overview": daily_overview,
         "calendar_summary": calendar_summary,
         "store_summary_calendar": calendar_summary,
+        "selected_date": normalized_selected_date,
+        "selected_date_label": selected_date_label,
+        "selected_day_schedules": selected_day_schedules,
+        "selected_day_summary": selected_day_summary,
         "stats": stats,
         "dashboard": dashboard,
         "calendar_weeks": calendar_week_rows(days),
-        "employee_summaries": build_schedule_employee_summaries(employees, rows, days),
+        "employee_summaries": build_schedule_employee_summaries(employees, active_rows if filters["schedule_state"] != "cancelled" else rows, days),
         "view": normalized_view,
         "show_cross_store": show_cross_store,
         "scope": normalized_scope,
@@ -9546,7 +10775,11 @@ def upsert_schedule(
     }
     with get_connection() as connection:
         existing = connection.execute(
-            "SELECT * FROM store_schedules WHERE store_name = ? AND employee_id = ? AND schedule_date = ?",
+            """
+            SELECT * FROM store_schedules
+            WHERE store_name = ? AND employee_id = ? AND schedule_date = ?
+              AND COALESCE(is_cancelled, 0) = 0
+            """,
             (clean_store, employee_id, clean_date),
         ).fetchone()
         if existing:
@@ -9614,7 +10847,7 @@ def existing_schedule_for(employee_id: int, schedule_date: str, store_name: str 
         params.append(clean_store)
     with get_connection() as connection:
         row = connection.execute(
-            f"SELECT * FROM store_schedules WHERE {' AND '.join(clauses)} ORDER BY id LIMIT 1",
+            f"SELECT * FROM store_schedules WHERE {' AND '.join(clauses)} AND COALESCE(is_cancelled, 0) = 0 ORDER BY id LIMIT 1",
             params,
         ).fetchone()
     return dict(row) if row else None
@@ -9815,6 +11048,7 @@ class ScheduleValidationService:
                 WHERE schedules.employee_id = ?
                   AND schedules.schedule_date >= ?
                   AND schedules.schedule_date <= ?
+                  AND COALESCE(schedules.is_cancelled, 0) = 0
                 ORDER BY schedules.schedule_date, schedules.id
                 """,
                 (int(employee_id), from_date, to_date),
@@ -9878,7 +11112,11 @@ class ScheduleValidationService:
 
     def build_schedule_warnings(self, employee_id: int, month: str, rows: List[Dict[str, object]]) -> List[Dict[str, object]]:
         _normalized_month = normalize_month(month)
-        employee_rows = [dict(row) for row in rows if int(row.get("employee_id") or 0) == int(employee_id)]
+        employee_rows = [
+            dict(row)
+            for row in rows
+            if int(row.get("employee_id") or 0) == int(employee_id) and int(row.get("is_cancelled") or 0) == 0
+        ]
         rows_by_date: Dict[str, List[Dict[str, object]]] = {}
         for row in employee_rows:
             rows_by_date.setdefault(str(row.get("schedule_date") or ""), []).append(row)
@@ -9928,7 +11166,8 @@ class ScheduleValidationService:
             by_id[int(row["id"])] = row
         by_employee: Dict[int, List[Dict[str, object]]] = {}
         for row in quality_rows:
-            by_employee.setdefault(int(row.get("employee_id") or 0), []).append(row)
+            if int(row.get("is_cancelled") or 0) == 0:
+                by_employee.setdefault(int(row.get("employee_id") or 0), []).append(row)
         conflict_count = 0
         for employee_rows in by_employee.values():
             for index, first in enumerate(employee_rows):
@@ -10079,16 +11318,41 @@ def bulk_upsert_schedules(
     }
 
 
-def delete_schedule(schedule_id: int, operator: str) -> Dict[str, object]:
+def cancel_schedule(schedule_id: int, operator: str, cancel_reason: str = "") -> Dict[str, object]:
     timestamp = now_text()
+    clean_reason = str(cancel_reason or "").strip()
     with get_connection() as connection:
         row = connection.execute("SELECT * FROM store_schedules WHERE id = ?", (schedule_id,)).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="排班不存在")
         old_value = dict(row)
-        connection.execute("DELETE FROM store_schedules WHERE id = ?", (schedule_id,))
-        insert_schedule_log(connection, schedule_id, "删除排班", old_value, "", operator, timestamp)
+        if int(old_value.get("is_cancelled") or 0) == 1:
+            raise ValueError("该排班已取消。")
+        new_value = {
+            **old_value,
+            "is_cancelled": 1,
+            "cancelled_at": timestamp,
+            "cancelled_by": operator,
+            "cancel_reason": clean_reason,
+        }
+        connection.execute(
+            """
+            UPDATE store_schedules
+            SET is_cancelled = 1,
+                cancelled_at = ?,
+                cancelled_by = ?,
+                cancel_reason = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (timestamp, operator, clean_reason, timestamp, schedule_id),
+        )
+        insert_schedule_log(connection, schedule_id, "取消排班", old_value, new_value, operator, timestamp)
     return old_value
+
+
+def delete_schedule(schedule_id: int, operator: str) -> Dict[str, object]:
+    return cancel_schedule(schedule_id, operator, "兼容删除入口取消")
 
 
 def normalize_schedule_copy_dates(source_start_date: str, source_end_date: str, target_start_date: str) -> Dict[str, object]:
@@ -10142,6 +11406,7 @@ def fetch_schedule_rows_between(
         params.extend(selected_shift_ids)
     elif include_custom_shift:
         clauses.append("COALESCE(schedules.is_custom_time, 0) = 1")
+    clauses.append("COALESCE(schedules.is_cancelled, 0) = 0")
     with get_connection() as connection:
         rows = connection.execute(
             f"""
@@ -10149,6 +11414,8 @@ def fetch_schedule_rows_between(
                 schedules.id, schedules.store_name, schedules.employee_id, schedules.schedule_date,
                 schedules.shift_type_id, schedules.note, schedules.created_by,
                 COALESCE(schedules.is_custom_time, 0) AS is_custom_time,
+                COALESCE(schedules.is_cancelled, 0) AS is_cancelled,
+                schedules.cancelled_at, schedules.cancelled_by, schedules.cancel_reason,
                 schedules.custom_start_time, schedules.custom_end_time,
                 schedules.custom_duration_hours, schedules.custom_label,
                 employees.employee_name, employees.role, employees.status AS employee_status,
@@ -10183,7 +11450,11 @@ def fetch_schedule_rows_between(
 
 def existing_schedule_by_store_employee_date(connection: sqlite3.Connection, store_name: str, employee_id: int, schedule_date: str) -> Optional[Dict[str, object]]:
     row = connection.execute(
-        "SELECT * FROM store_schedules WHERE store_name = ? AND employee_id = ? AND schedule_date = ?",
+        """
+        SELECT * FROM store_schedules
+        WHERE store_name = ? AND employee_id = ? AND schedule_date = ?
+          AND COALESCE(is_cancelled, 0) = 0
+        """,
         (store_name, employee_id, schedule_date),
     ).fetchone()
     return dict(row) if row else None
@@ -10348,7 +11619,32 @@ def insert_copied_schedule(connection: sqlite3.Connection, item: Dict[str, objec
     candidate = dict(item["candidate"])
     existing = item.get("existing_schedule")
     if existing and item.get("will_overwrite"):
-        connection.execute("DELETE FROM store_schedules WHERE id = ?", (int(existing["id"]),))
+        schedule_id = int(existing["id"])
+        connection.execute(
+            """
+            UPDATE store_schedules
+            SET store_name = ?, employee_id = ?, schedule_date = ?, shift_type_id = ?, note = ?,
+                is_custom_time = ?, custom_start_time = ?, custom_end_time = ?,
+                custom_duration_hours = ?, custom_label = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                candidate["store_name"],
+                int(candidate["employee_id"]),
+                candidate["schedule_date"],
+                int(candidate.get("shift_type_id") or 0),
+                candidate.get("note") or "",
+                int(candidate.get("is_custom_time") or 0),
+                candidate.get("custom_start_time") or "",
+                candidate.get("custom_end_time") or "",
+                candidate.get("custom_duration_hours"),
+                candidate.get("custom_label") or "",
+                timestamp,
+                schedule_id,
+            ),
+        )
+        insert_schedule_log(connection, schedule_id, "覆盖复制排班", existing, candidate, operator, timestamp)
+        return schedule_id
     cursor = connection.execute(
         """
         INSERT INTO store_schedules (
@@ -10421,6 +11717,7 @@ def copy_previous_day_schedules(store_name: str, target_date: str, operator: str
                 custom_start_time, custom_end_time, custom_duration_hours, custom_label
             FROM store_schedules
             WHERE store_name = ? AND schedule_date = ?
+              AND COALESCE(is_cancelled, 0) = 0
             ORDER BY employee_id
             """,
             (clean_store, source_date),
@@ -10463,7 +11760,7 @@ def clear_employee_month_schedules(store_name: str, employee_id: int, month: str
         params.append(clean_store)
     with get_connection() as connection:
         rows = connection.execute(
-            f"SELECT id FROM store_schedules WHERE {' AND '.join(clauses)} ORDER BY schedule_date",
+            f"SELECT id FROM store_schedules WHERE {' AND '.join(clauses)} AND COALESCE(is_cancelled, 0) = 0 ORDER BY schedule_date",
             params,
         ).fetchall()
     for row in rows:
@@ -10475,7 +11772,10 @@ def build_schedule_excel(rows: List[Dict[str, object]]) -> BytesIO:
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "门店排班"
-    headers = ["门店", "员工", "日期", "星期", "班次", "排班时间", "工时", "是否自定义", "备注", "是否冲突", "工时异常", "异常说明"]
+    headers = ["门店", "员工", "日期", "星期", "班次", "排班时间", "工时", "是否自定义", "备注", "工号", "是否冲突", "工时异常", "异常说明"]
+    include_cancel_columns = any(int(row.get("is_cancelled") or 0) == 1 for row in rows)
+    if include_cancel_columns:
+        headers.extend(["是否已取消", "取消时间", "取消人", "取消原因"])
     sheet.append(headers)
     header_fill = PatternFill(fill_type="solid", fgColor="E8EEF7")
     for cell in sheet[1]:
@@ -10483,23 +11783,34 @@ def build_schedule_excel(rows: List[Dict[str, object]]) -> BytesIO:
         cell.fill = header_fill
         cell.alignment = Alignment(horizontal="center", vertical="center")
     for row in rows:
-        sheet.append(
-            [
-                row.get("store_name"),
-                row.get("employee_name"),
-                row.get("schedule_date"),
-                row.get("weekday"),
-                row.get("shift_name"),
-                row.get("display_time") or "-",
-                row.get("display_hours") or f"{format_hours_value(row.get('duration_hours'))} 小时",
-                "是" if int(row.get("is_custom_time") or 0) == 1 else "否",
-                row.get("note") or "",
-                "是" if row.get("has_conflict") else "否",
-                "是" if row.get("warnings") else "否",
-                "；".join([str(item.get("message") or item) for item in row.get("warnings") or []] + [str(item) for item in row.get("conflicts") or []]),
-            ]
-        )
-    widths = [18, 16, 14, 10, 14, 18, 12, 12, 28, 10, 12, 40]
+        row_values = [
+            row.get("store_name"),
+            row.get("employee_name"),
+            row.get("schedule_date"),
+            row.get("weekday"),
+            row.get("shift_name"),
+            row.get("display_time") or "-",
+            row.get("display_hours") or f"{format_hours_value(row.get('duration_hours'))} 小时",
+            "是" if int(row.get("is_custom_time") or 0) == 1 else "否",
+            row.get("note") or "",
+            row.get("employee_no") or "",
+            "是" if row.get("has_conflict") else "否",
+            "是" if row.get("warnings") else "否",
+            "；".join([str(item.get("message") or item) for item in row.get("warnings") or []] + [str(item) for item in row.get("conflicts") or []]),
+        ]
+        if include_cancel_columns:
+            row_values.extend(
+                [
+                    "是" if int(row.get("is_cancelled") or 0) == 1 else "否",
+                    row.get("cancelled_at") or "",
+                    row.get("cancelled_by") or "",
+                    row.get("cancel_reason") or "",
+                ]
+            )
+        sheet.append(row_values)
+    widths = [18, 16, 14, 10, 14, 18, 12, 12, 28, 14, 10, 12, 40]
+    if include_cancel_columns:
+        widths.extend([12, 20, 14, 30])
     for index, width in enumerate(widths, start=1):
         sheet.column_dimensions[get_column_letter(index)].width = width
     for row in sheet.iter_rows(min_row=2):
@@ -12727,11 +14038,102 @@ def dashboard_schedule_employee_options(store_names: List[str]) -> List[Dict[str
     store_set = set(store_names)
     options = []
     for employee in employees:
+        if int(employee.get("participate_schedule") or 0) != 1:
+            continue
+        if int(employee.get("show_in_employee_management") or 0) != 1:
+            continue
+        if str(employee.get("status") or "") in {"离职", "停用"}:
+            continue
         employee_stores = set(employee.get("store_names") or [])
         if store_set and not (employee_stores & store_set):
             continue
         options.append(employee)
     return sorted(options, key=employee_sort_key)
+
+
+DASHBOARD_DATE_RANGE_LABELS = {
+    "today": "今日",
+    "last7": "近7天",
+    "this_month": "本月",
+    "last_month": "上月",
+    "custom": "自定义",
+}
+
+
+def dashboard_data_scope_label(user: Optional[Dict[str, object]]) -> str:
+    scope = normalize_admin_data_scope(str((user or {}).get("data_scope") or "all"))
+    if scope == "stores":
+        store_count = len(split_multi_value_text((user or {}).get("store_names")))
+        return f"授权门店 {store_count} 个" if store_count else "授权门店"
+    if scope == "assigned":
+        return "仅本人处理工单"
+    return "全部可见范围"
+
+
+def dashboard_manager_alert_items(
+    stats: Dict[str, object],
+    schedule_stats: Dict[str, object],
+    request_type_gaps: Dict[str, object],
+    can_view_schedule_dashboard: bool,
+) -> List[Dict[str, object]]:
+    schedule_summary = schedule_stats.get("summary") or {}
+    candidates = [
+        {
+            "label": "今日到期工单",
+            "count": int(stats.get("due_today_count") or 0),
+            "tone": "warning",
+            "hint": "今天需要收口",
+            "url": "/admin?due_status=今日到期",
+        },
+        {
+            "label": "已超时工单",
+            "count": int(stats.get("overdue_count") or 0),
+            "tone": "danger",
+            "hint": "优先处理",
+            "url": "/admin?due_status=已超时",
+        },
+        {
+            "label": "未分派工单",
+            "count": int(stats.get("unassigned_ticket_count") or 0),
+            "tone": "warning",
+            "hint": "需要明确处理人",
+            "url": "/admin",
+        },
+        {
+            "label": "缺自动分派规则的需求类型",
+            "count": len(request_type_gaps.get("missing_assignment") or []),
+            "tone": "warning",
+            "hint": "可能影响自动派单",
+            "url": "/admin/ticket-rules",
+        },
+        {
+            "label": "缺 SLA 的需求类型",
+            "count": len(request_type_gaps.get("missing_sla") or []),
+            "tone": "warning",
+            "hint": "可能影响到期与超时判断",
+            "url": "/admin/ticket-rules",
+        },
+    ]
+    if can_view_schedule_dashboard:
+        candidates.extend(
+            [
+                {
+                    "label": "排班冲突",
+                    "count": int(schedule_summary.get("conflict_schedule_count") or 0),
+                    "tone": "danger",
+                    "hint": "同人同日时间冲突",
+                    "url": "/admin/schedules",
+                },
+                {
+                    "label": "严重工时异常",
+                    "count": int(schedule_summary.get("daily_over_12_count") or 0),
+                    "tone": "danger",
+                    "hint": "单日超过 12 小时",
+                    "url": "/admin/schedules",
+                },
+            ]
+        )
+    return [item for item in candidates if int(item.get("count") or 0) > 0]
 
 
 def fetch_dashboard_stats(filters: Dict[str, object]) -> Dict[str, object]:
@@ -12995,8 +14397,13 @@ def create_app() -> FastAPI:
     def template_has_perm(context, permission_key: str) -> bool:
         return permission_service.has_permission(template_current_admin(context), permission_key)
 
+    @pass_context
+    def template_is_system_admin(context) -> bool:
+        return is_system_admin_user(template_current_admin(context))
+
     templates.env.globals["current_admin"] = template_current_admin
     templates.env.globals["has_perm"] = template_has_perm
+    templates.env.globals["is_system_admin"] = template_is_system_admin
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
     @app.get("/__version")
@@ -13188,11 +14595,14 @@ def create_app() -> FastAPI:
         success: str = "",
         status_code: int = 200,
         permission_denied: bool = False,
+        keyword: str = "",
     ) -> HTMLResponse:
         current_user = current_admin_user(request)
-        can_view_accounts = has_permission(current_user, "account.view")
+        can_view_accounts = is_system_admin_user(current_user)
         roles = fetch_admin_roles() if can_view_accounts else []
-        users = fetch_admin_users_for_account_page() if can_view_accounts else []
+        clean_keyword = keyword.strip()
+        account_filter = normalize_account_visibility_filter(request.query_params.get("filter", "visible"))
+        users = fetch_admin_users_for_account_page(clean_keyword, account_filter) if can_view_accounts else []
         config = load_app_config()
         return templates.TemplateResponse(
             request,
@@ -13207,16 +14617,17 @@ def create_app() -> FastAPI:
                 "roles": roles,
                 "stores": config.stores,
                 "employee_statuses": EMPLOYEE_STATUSES,
-                "account_filter": request.query_params.get("filter", ""),
+                "account_filter": account_filter,
+                "keyword": clean_keyword,
                 "data_scope_options": [
                     {"value": "all", "label": "全部数据"},
                     {"value": "assigned", "label": "仅自己处理"},
                     {"value": "stores", "label": "指定门店"},
                 ],
-                "can_create_account": has_permission(current_user, "account.create"),
-                "can_update_account": has_permission(current_user, "account.update"),
-                "can_disable_account": has_permission(current_user, "account.disable"),
-                "can_reset_password": has_permission(current_user, "account.reset_password"),
+                "can_create_account": can_view_accounts and has_permission(current_user, "account.create"),
+                "can_update_account": can_view_accounts and has_permission(current_user, "account.update"),
+                "can_disable_account": can_view_accounts and has_permission(current_user, "account.disable"),
+                "can_reset_password": can_view_accounts and has_permission(current_user, "account.reset_password"),
                 "permission_denied": permission_denied,
                 "error": error,
                 "success": success,
@@ -13232,19 +14643,23 @@ def create_app() -> FastAPI:
         success: str = "",
         status_code: int = 200,
     ) -> HTMLResponse:
+        current_user = current_admin_user(request)
+        can_manage_sensitive_accounts = is_system_admin_user(current_user)
         context = personnel_governance_context(
             request.query_params.get("filter", "unprocessed"),
             request.query_params.get("tab", "matches"),
+            request.query_params.get("keyword", ""),
         )
         context.update(
             {
                 "request": request,
                 "admin_user": admin,
-                "current_user": current_admin_user(request),
+                "current_user": current_user,
                 "error": error,
                 "success": success,
                 "csrf_token": current_csrf_token(request),
-                "can_update_account": has_permission(current_admin_user(request), "account.update"),
+                "can_update_account": can_manage_sensitive_accounts,
+                "can_cleanup_residue": can_manage_sensitive_accounts,
             }
         )
         return templates.TemplateResponse(
@@ -13263,14 +14678,15 @@ def create_app() -> FastAPI:
         status_code: int = 200,
     ) -> HTMLResponse:
         context = personnel_detail_context(user_id, employee_id)
+        current_user = current_admin_user(request)
         context.update(
             {
                 "request": request,
                 "admin_user": admin,
-                "current_user": current_admin_user(request),
+                "current_user": current_user,
                 "error": error,
                 "csrf_token": current_csrf_token(request),
-                "can_update_account": has_permission(current_admin_user(request), "account.update"),
+                "can_update_account": is_system_admin_user(current_user),
             }
         )
         return templates.TemplateResponse(
@@ -13513,17 +14929,77 @@ def create_app() -> FastAPI:
     def render_employees_page(
         request: Request,
         admin: str,
+        keyword: str = "",
         store_name: str = "",
         status: str = "",
         scope: str = "active",
+        visibility: str = "visible",
+        source: str = "all",
+        role: str = "",
+        login_status: str = "all",
+        schedule_status: str = "all",
+        assignable_status: str = "all",
+        delete_status: str = "all",
+        quick_filter: str = "",
+        user_id: int = 0,
         page: int = 1,
         error: str = "",
         success: str = "",
         status_code: int = 200,
+        current_user: Optional[Dict[str, object]] = None,
     ) -> HTMLResponse:
         config = load_app_config()
+        active_user = current_user or current_admin_user(request)
+        can_view_account_sensitive = is_system_admin_user(active_user)
+        selected_quick_filter = normalize_employee_quick_filter(quick_filter)
+        if selected_quick_filter:
+            scope, visibility, schedule_status, delete_status = apply_employee_quick_filter(
+                selected_quick_filter,
+                scope,
+                visibility,
+                schedule_status,
+                delete_status,
+            )
         selected_scope = normalize_employee_record_scope(scope)
-        all_employees = fetch_employees(store_name, status, selected_scope)
+        selected_visibility = normalize_employee_visibility(visibility)
+        selected_source = normalize_employee_source(source)
+        selected_login_status = normalize_employee_binary_filter(login_status, ("login", "no_login"))
+        selected_schedule_status = normalize_employee_binary_filter(schedule_status, ("schedule", "no_schedule"))
+        selected_assignable_status = normalize_employee_binary_filter(assignable_status, ("assignable", "not_assignable"))
+        selected_delete_status = normalize_employee_binary_filter(delete_status, ("safe_delete", "unsafe_delete"))
+        selected_user_id = int(user_id or 0)
+        if not can_view_account_sensitive:
+            if selected_source == "account_only":
+                selected_source = "all"
+            selected_login_status = "all"
+            selected_assignable_status = "all"
+            selected_delete_status = "all"
+            selected_user_id = 0
+        all_employees = fetch_employee_management_people(
+            store_name,
+            status,
+            selected_scope,
+            visibility=selected_visibility,
+            source=selected_source,
+            role=role,
+            login_status=selected_login_status,
+            schedule_status=selected_schedule_status,
+            assignable_status=selected_assignable_status,
+            delete_status=selected_delete_status,
+            user_id=selected_user_id,
+        )
+        all_employees = filter_employee_management_people_for_user(
+            all_employees,
+            active_user,
+            can_view_account_sensitive,
+        )
+        clean_keyword = keyword.strip()
+        if clean_keyword:
+            all_employees = [
+                employee
+                for employee in all_employees
+                if employee_management_keyword_matches(employee, clean_keyword, can_view_account_sensitive)
+            ]
         grouped_all_employees = group_employees_by_role(all_employees)
         sorted_all_employees = [
             employee
@@ -13537,17 +15013,54 @@ def create_app() -> FastAPI:
         start_index = (current_page - 1) * page_size
         employees = sorted_all_employees[start_index : start_index + page_size]
         employee_role_groups = group_employees_by_role(employees)
-        filters = {"store_name": store_name.strip(), "status": status.strip(), "scope": selected_scope}
+        filters = {
+            "keyword": clean_keyword,
+            "store_name": store_name.strip(),
+            "status": status.strip(),
+            "scope": selected_scope,
+            "visibility": selected_visibility,
+            "source": selected_source,
+            "role": role.strip(),
+            "login_status": selected_login_status,
+            "schedule_status": selected_schedule_status,
+            "assignable_status": selected_assignable_status,
+            "delete_status": selected_delete_status,
+            "filter": selected_quick_filter,
+            "user_id": str(selected_user_id) if selected_user_id > 0 else "",
+        }
         base_params = {key: value for key, value in filters.items() if value}
+        store_options = config.stores
+        if not can_view_account_sensitive and normalize_admin_data_scope(str((active_user or {}).get("data_scope") or "all")) == "stores":
+            allowed_stores = set(split_multi_value_text((active_user or {}).get("store_names")))
+            store_options = [store for store in config.stores if store in allowed_stores]
+        roles = fetch_admin_roles() if can_view_account_sensitive else []
         return templates.TemplateResponse(
             request,
             "employees.html",
             {
                 "request": request,
                 "employees": employees,
+                "has_employee_records": any(str(employee.get("source") or "") != "account_only" for employee in employees),
                 "employee_role_groups": employee_role_groups,
-                "stores": config.stores,
+                "stores": store_options,
+                "roles": roles,
+                "data_scope_options": [
+                    {"value": "all", "label": "全部数据"},
+                    {"value": "assigned", "label": "仅自己处理"},
+                    {"value": "stores", "label": "指定门店"},
+                ],
                 "statuses": EMPLOYEE_STATUSES,
+                "role_filter_options": [
+                    "总部管理层",
+                    "采购",
+                    "财务",
+                    "设计",
+                    "运营经理",
+                    "区域经理",
+                    "店长",
+                    "店员",
+                    "兼职",
+                ],
                 "filters": filters,
                 "pagination": {
                     "current_page": current_page,
@@ -13559,6 +15072,8 @@ def create_app() -> FastAPI:
                     "next_url": "/admin/employees?"
                     + urlencode({**base_params, "page": min(current_page + 1, total_pages)}),
                 },
+                "can_view_account_sensitive": can_view_account_sensitive,
+                "can_manage_account_sensitive": can_view_account_sensitive,
                 "error": error,
                 "success": success,
                 "admin_user": admin,
@@ -13657,10 +15172,13 @@ def create_app() -> FastAPI:
         updated_count: int = 0,
         skipped_count: int = 0,
         deleted: int = 0,
+        cancelled: int = 0,
         error: str = "",
         copy_preview: Optional[Dict[str, object]] = None,
         status_code: int = 200,
         current_user: Optional[Dict[str, object]] = None,
+        selected_date: str = "",
+        schedule_state: str = "active",
     ) -> HTMLResponse:
         config = load_app_config()
         selected_view = normalize_schedule_view(view)
@@ -13716,6 +15234,8 @@ def create_app() -> FastAPI:
             include_custom_shift=include_custom_shift,
             is_all_stores=selected_scope == "all",
             store_scope=normalized_store_scope,
+            selected_date=selected_date,
+            schedule_state=schedule_state,
         )
         return templates.TemplateResponse(
             request,
@@ -13730,6 +15250,7 @@ def create_app() -> FastAPI:
                 "updated_count": max(updated_count, 0),
                 "skipped_count": max(skipped_count, 0),
                 "deleted": max(deleted, 0),
+                "cancelled": max(cancelled, 0),
                 "error": combined_error,
                 "copy_preview": copy_preview,
                 "admin_user": admin,
@@ -14442,31 +15963,65 @@ def create_app() -> FastAPI:
     def admin_employees(
         request: Request,
         current_user: Dict[str, object] = Depends(require_permission("employee.view")),
+        keyword: str = Query(""),
         store_name: str = Query(""),
         status: str = Query(""),
         scope: str = Query("active"),
+        visibility: str = Query("visible"),
+        source: str = Query("all"),
+        role: str = Query(""),
+        login_status: str = Query("all"),
+        schedule_status: str = Query("all"),
+        assignable_status: str = Query("all"),
+        delete_status: str = Query("all"),
+        filter: str = Query(""),
+        user_id: int = Query(0),
         page: int = Query(1),
         error: str = Query(""),
         success: str = Query(""),
     ) -> HTMLResponse:
         admin = str(current_user.get("username") or "")
-        return render_employees_page(request, admin, store_name, status, scope=scope, page=page, error=error, success=success)
+        return render_employees_page(
+            request,
+            admin,
+            keyword=keyword,
+            store_name=store_name,
+            status=status,
+            scope=scope,
+            visibility=visibility,
+            source=source,
+            role=role,
+            login_status=login_status,
+            schedule_status=schedule_status,
+            assignable_status=assignable_status,
+            delete_status=delete_status,
+            quick_filter=filter,
+            user_id=user_id,
+            page=page,
+            error=error,
+            success=success,
+            current_user=current_user,
+        )
 
     @app.post("/admin/employees")
-    def create_employee_route(
+    async def create_employee_route(
         request: Request,
         current_user: Dict[str, object] = Depends(require_permission("employee.create")),
         employee_name: str = Form(""),
+        employee_no: str = Form(""),
         store_name: str = Form(""),
         primary_store_name: str = Form(""),
         store_names: Optional[List[str]] = Form(None),
         role: str = Form(""),
         phone: str = Form(""),
         status: str = Form("在职"),
+        show_in_employee_management: str = Form("1"),
+        participate_schedule: str = Form("1"),
         csrf_token: str = Form(""),
     ) -> RedirectResponse:
         admin = str(current_user.get("username") or "")
         require_admin_csrf(request, csrf_token)
+        await reject_sensitive_employee_account_form_fields(request, current_user)
         try:
             employee_id = create_employee(
                 employee_name,
@@ -14477,9 +16032,14 @@ def create_app() -> FastAPI:
                 load_app_config(),
                 store_names=store_names,
                 primary_store_name=primary_store_name,
+                participate_schedule=participate_schedule == "1",
+                show_in_employee_management=show_in_employee_management == "1",
+                employee_no=employee_no,
             )
         except (ValueError, HTTPException) as exc:
             return RedirectResponse(url="/admin/employees?" + urlencode({"error": form_error_message(exc)}), status_code=303)
+        except sqlite3.IntegrityError:
+            return RedirectResponse(url="/admin/employees?" + urlencode({"error": "工号已存在，请检查后再保存。"}), status_code=303)
         record_operation_log(
             admin,
             "employee.create",
@@ -14491,21 +16051,30 @@ def create_app() -> FastAPI:
         return RedirectResponse(url="/admin/employees?" + urlencode({"success": "已新增员工。"}), status_code=303)
 
     @app.post("/admin/employees/{employee_id}/update")
-    def update_employee_route(
+    async def update_employee_route(
         request: Request,
         employee_id: int,
         current_user: Dict[str, object] = Depends(require_permission("employee.update")),
         employee_name: str = Form(""),
+        employee_no: str = Form(""),
         store_name: str = Form(""),
         primary_store_name: str = Form(""),
         store_names: Optional[List[str]] = Form(None),
         role: str = Form(""),
         phone: str = Form(""),
         status: str = Form("在职"),
+        show_in_employee_management: str = Form("__missing__"),
+        participate_schedule: str = Form("__missing__"),
         csrf_token: str = Form(""),
     ) -> RedirectResponse:
         admin = str(current_user.get("username") or "")
         require_admin_csrf(request, csrf_token)
+        await reject_sensitive_employee_account_form_fields(request, current_user)
+        if status.strip() in {"离职", "停用"} and employee_has_linked_admin_account(employee_id) and not is_system_admin_user(current_user):
+            raise HTTPException(
+                status_code=http_status.HTTP_403_FORBIDDEN,
+                detail="关联后台账号的离职/停用操作仅系统管理员可执行。",
+            )
         try:
             update_employee(
                 employee_id,
@@ -14517,9 +16086,14 @@ def create_app() -> FastAPI:
                 load_app_config(),
                 store_names=store_names,
                 primary_store_name=primary_store_name,
+                participate_schedule=None if participate_schedule == "__missing__" else participate_schedule == "1",
+                show_in_employee_management=None if show_in_employee_management == "__missing__" else show_in_employee_management == "1",
+                employee_no=employee_no,
             )
         except (ValueError, HTTPException) as exc:
             return RedirectResponse(url="/admin/employees?" + urlencode({"error": form_error_message(exc)}), status_code=303)
+        except sqlite3.IntegrityError:
+            return RedirectResponse(url="/admin/employees?" + urlencode({"error": "工号已存在，请检查后再保存。"}), status_code=303)
         record_operation_log(
             admin,
             "employee.update",
@@ -14530,6 +16104,339 @@ def create_app() -> FastAPI:
         )
         return RedirectResponse(url="/admin/employees?" + urlencode({"success": "员工信息已保存。"}), status_code=303)
 
+    @app.post("/admin/employees/build-from-account")
+    def build_employee_from_account_route(
+        request: Request,
+        current_user: Dict[str, object] = Depends(require_system_admin_user()),
+        csrf_token: str = Form(""),
+        user_id: int = Form(0),
+        employee_name: str = Form(""),
+        role: str = Form(""),
+        phone: str = Form(""),
+        status: str = Form("在职"),
+        primary_store_name: str = Form(""),
+        store_names: Optional[List[str]] = Form(None),
+    ) -> RedirectResponse:
+        admin = str(current_user.get("username") or "")
+        require_admin_csrf(request, csrf_token)
+        config = load_app_config()
+        timestamp = now_text()
+        try:
+            with get_connection() as connection:
+                user_row = connection.execute(
+                    """
+                    SELECT admin_users.*, admin_roles.role_name
+                    FROM admin_users
+                    LEFT JOIN admin_roles ON admin_roles.id = admin_users.role_id
+                    WHERE admin_users.id = ?
+                    """,
+                    (int(user_id),),
+                ).fetchone()
+                if not user_row:
+                    raise ValueError("账号不存在。")
+                if user_row["employee_id"] is not None or connection.execute(
+                    "SELECT 1 FROM employees WHERE user_id = ?",
+                    (int(user_id),),
+                ).fetchone():
+                    raise ValueError("该账号已经关联员工档案。")
+                clean_status = status.strip() or "在职"
+                if clean_status not in EMPLOYEE_STATUSES:
+                    raise ValueError("员工状态不正确。")
+                clean_name = employee_name.strip() or str(user_row["display_name"] or user_row["username"] or "").strip()
+                if not clean_name:
+                    raise ValueError("请填写人员姓名。")
+                fallback_store = primary_store_name or (config.stores[0] if config.stores else "")
+                primary_store, clean_stores = normalize_employee_store_data(
+                    primary_store_name,
+                    store_names,
+                    fallback_store,
+                    config,
+                )
+                cursor = connection.execute(
+                    """
+                    INSERT INTO employees (
+                        employee_name, store_name, primary_store_name, user_id, allow_login, participate_schedule,
+                        show_in_employee_management, role, phone, status, created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, 0, 1, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        clean_name,
+                        primary_store,
+                        primary_store,
+                        int(user_id),
+                        int(user_row["allow_login"] if user_row["allow_login"] is not None else 1),
+                        role.strip() or str(user_row["role_name"] or ""),
+                        phone.strip(),
+                        clean_status,
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+                employee_id = int(cursor.lastrowid)
+                replace_employee_store_bindings(connection, employee_id, clean_stores, timestamp)
+                connection.execute(
+                    "UPDATE admin_users SET employee_id = ?, updated_at = ?, updated_by = ? WHERE id = ?",
+                    (employee_id, timestamp, admin, int(user_id)),
+                )
+        except (ValueError, sqlite3.Error) as exc:
+            return RedirectResponse(url="/admin/employees?" + urlencode({"source": "account_only", "error": form_error_message(exc)}), status_code=303)
+        record_operation_log(
+            admin,
+            "employee.build_from_account",
+            "personnel",
+            linked_personnel_target_id(user_id, employee_id),
+            {"user_id": int(user_id), "employee_id": employee_id, "employee_name": clean_name},
+            request,
+        )
+        return RedirectResponse(url="/admin/employees?" + urlencode({"success": "员工档案已补建。"}), status_code=303)
+
+    @app.post("/admin/employees/{employee_id}/unlink-account")
+    def unlink_employee_account_route(
+        request: Request,
+        employee_id: int,
+        current_user: Dict[str, object] = Depends(require_system_admin_user()),
+        csrf_token: str = Form(""),
+    ) -> RedirectResponse:
+        admin = str(current_user.get("username") or "")
+        require_admin_csrf(request, csrf_token)
+        try:
+            with get_connection() as connection:
+                employee_row = connection.execute("SELECT * FROM employees WHERE id = ?", (int(employee_id),)).fetchone()
+                if not employee_row:
+                    raise ValueError("员工不存在。")
+                user_row = connection.execute(
+                    "SELECT * FROM admin_users WHERE employee_id = ? OR id = ? ORDER BY id LIMIT 1",
+                    (int(employee_id), int(employee_row["user_id"] or 0)),
+                ).fetchone()
+                if not user_row:
+                    raise ValueError("该员工未关联账号。")
+                user_id = int(user_row["id"])
+                connection.execute(
+                    "UPDATE admin_users SET employee_id = NULL, updated_at = ?, updated_by = ? WHERE id = ?",
+                    (now_text(), admin, user_id),
+                )
+                connection.execute(
+                    "UPDATE employees SET user_id = NULL, allow_login = 0, updated_at = ? WHERE id = ?",
+                    (now_text(), int(employee_id)),
+                )
+        except (ValueError, sqlite3.Error) as exc:
+            return RedirectResponse(url="/admin/employees?" + urlencode({"error": form_error_message(exc)}), status_code=303)
+        record_operation_log(
+            admin,
+            "employee.unlink_account",
+            "personnel",
+            linked_personnel_target_id(user_id, employee_id),
+            {"user_id": user_id, "employee_id": int(employee_id)},
+            request,
+        )
+        return RedirectResponse(url="/admin/employees?" + urlencode({"success": "账号关联已解除。"}), status_code=303)
+
+    @app.post("/admin/employees/{employee_id}/create-account")
+    def create_employee_account_route(
+        request: Request,
+        employee_id: int,
+        current_user: Dict[str, object] = Depends(require_system_admin_user()),
+        csrf_token: str = Form(""),
+        username: str = Form(""),
+        password: str = Form(""),
+        password_confirm: str = Form(""),
+        role_id: int = Form(0),
+        data_scope: str = Form("all"),
+        store_names: str = Form(""),
+        allow_login: str = Form("1"),
+        is_active: str = Form("1"),
+        is_assignable: str = Form(""),
+    ) -> RedirectResponse:
+        admin = str(current_user.get("username") or "")
+        require_admin_csrf(request, csrf_token)
+        clean_username = username.strip()
+        redirect_base = "/admin/employees"
+        if not clean_username or not USERNAME_RE.match(clean_username):
+            return RedirectResponse(
+                url=redirect_base + "?" + urlencode({"error": "用户名只能使用字母、数字、下划线和短横线。"}),
+                status_code=303,
+            )
+        password_error = validate_account_password(password, password_confirm)
+        if password_error:
+            return RedirectResponse(url=redirect_base + "?" + urlencode({"error": password_error}), status_code=303)
+
+        timestamp = now_text()
+        try:
+            with get_connection() as connection:
+                employee_row = connection.execute("SELECT * FROM employees WHERE id = ?", (int(employee_id),)).fetchone()
+                if not employee_row:
+                    raise ValueError("员工不存在。")
+                existing_link = connection.execute(
+                    "SELECT id FROM admin_users WHERE employee_id = ? OR id = ? LIMIT 1",
+                    (int(employee_id), int(employee_row["user_id"] or 0)),
+                ).fetchone()
+                if existing_link:
+                    raise ValueError("该人员已绑定后台账号，请先解除账号关联。")
+                role_row = connection.execute("SELECT id FROM admin_roles WHERE id = ?", (int(role_id),)).fetchone()
+                if not role_row:
+                    raise ValueError("请选择有效角色。")
+                allow_login_flag = 1 if allow_login == "1" else 0
+                active_flag = 1 if allow_login_flag and is_active == "1" else 0
+                assignable_flag = 1 if is_assignable == "1" else 0
+                participate_schedule_flag = int(employee_row["participate_schedule"] or 0)
+                clean_data_scope = normalize_admin_data_scope(data_scope)
+                clean_store_names = store_names.strip() if clean_data_scope == "stores" else ""
+                cursor = connection.execute(
+                    """
+                    INSERT INTO admin_users (
+                        username, display_name, password_hash, role_id, employee_id,
+                        allow_login, participate_schedule, is_active, is_assignable,
+                        data_scope, store_names, created_at, updated_at, created_by, updated_by
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        clean_username,
+                        str(employee_row["employee_name"] or clean_username).strip() or clean_username,
+                        hash_password(password),
+                        int(role_id),
+                        int(employee_id),
+                        allow_login_flag,
+                        participate_schedule_flag,
+                        active_flag,
+                        assignable_flag,
+                        clean_data_scope,
+                        clean_store_names,
+                        timestamp,
+                        timestamp,
+                        admin,
+                        admin,
+                    ),
+                )
+                user_id = int(cursor.lastrowid)
+                connection.execute(
+                    "UPDATE employees SET user_id = ?, allow_login = ?, updated_at = ? WHERE id = ?",
+                    (user_id, allow_login_flag, timestamp, int(employee_id)),
+                )
+        except sqlite3.IntegrityError:
+            return RedirectResponse(url=redirect_base + "?" + urlencode({"error": "用户名已存在。"}), status_code=303)
+        except (ValueError, sqlite3.Error) as exc:
+            return RedirectResponse(url=redirect_base + "?" + urlencode({"error": form_error_message(exc)}), status_code=303)
+
+        record_operation_log(
+            admin,
+            "employee.create_account",
+            "personnel",
+            linked_personnel_target_id(user_id, employee_id),
+            {"user_id": user_id, "employee_id": int(employee_id), "username": clean_username},
+            request,
+        )
+        return RedirectResponse(url=redirect_base + "?" + urlencode({"success": "后台账号已开通。"}), status_code=303)
+
+    @app.post("/admin/employees/{employee_id}/hide")
+    def hide_employee_route(
+        request: Request,
+        employee_id: int,
+        current_user: Dict[str, object] = Depends(require_permission("employee.update")),
+        csrf_token: str = Form(""),
+    ) -> RedirectResponse:
+        admin = str(current_user.get("username") or "")
+        require_admin_csrf(request, csrf_token)
+        with get_connection() as connection:
+            connection.execute(
+                "UPDATE employees SET show_in_employee_management = 0, participate_schedule = 0, updated_at = ? WHERE id = ?",
+                (now_text(), int(employee_id)),
+            )
+        record_operation_log(admin, "employee.hide", "employee", employee_id, {}, request)
+        return RedirectResponse(url="/admin/employees?" + urlencode({"success": "人员已隐藏。"}), status_code=303)
+
+    @app.post("/admin/employees/{employee_id}/show")
+    def show_employee_route(
+        request: Request,
+        employee_id: int,
+        current_user: Dict[str, object] = Depends(require_permission("employee.update")),
+        csrf_token: str = Form(""),
+    ) -> RedirectResponse:
+        admin = str(current_user.get("username") or "")
+        require_admin_csrf(request, csrf_token)
+        with get_connection() as connection:
+            connection.execute(
+                "UPDATE employees SET show_in_employee_management = 1, updated_at = ? WHERE id = ?",
+                (now_text(), int(employee_id)),
+            )
+        record_operation_log(admin, "employee.show", "employee", employee_id, {}, request)
+        return RedirectResponse(url="/admin/employees?visibility=hidden&" + urlencode({"success": "人员已恢复显示。"}), status_code=303)
+
+    @app.post("/admin/employees/{employee_id}/schedule")
+    def set_employee_schedule_route(
+        request: Request,
+        employee_id: int,
+        current_user: Dict[str, object] = Depends(require_permission("employee.update")),
+        csrf_token: str = Form(""),
+        participate_schedule: str = Form("0"),
+    ) -> RedirectResponse:
+        admin = str(current_user.get("username") or "")
+        require_admin_csrf(request, csrf_token)
+        flag = 1 if participate_schedule == "1" else 0
+        with get_connection() as connection:
+            row = connection.execute("SELECT status FROM employees WHERE id = ?", (int(employee_id),)).fetchone()
+            if not row:
+                return RedirectResponse(url="/admin/employees?" + urlencode({"error": "员工不存在。"}), status_code=303)
+            if flag and str(row["status"] or "") in {"离职", "停用"}:
+                return RedirectResponse(url="/admin/employees?" + urlencode({"error": "离职或停用人员不能参与排班。"}), status_code=303)
+            connection.execute(
+                """
+                UPDATE employees
+                SET participate_schedule = ?, show_in_employee_management = 1, updated_at = ?
+                WHERE id = ?
+                """,
+                (flag, now_text(), int(employee_id)),
+            )
+        record_operation_log(admin, "employee.schedule", "employee", employee_id, {"participate_schedule": flag}, request)
+        return RedirectResponse(url="/admin/employees?" + urlencode({"success": "人员排班状态已更新。"}), status_code=303)
+
+    @app.post("/admin/employees/{employee_id}/disable-schedule")
+    def disable_employee_schedule_route(
+        request: Request,
+        employee_id: int,
+        current_user: Dict[str, object] = Depends(require_permission("employee.update")),
+        csrf_token: str = Form(""),
+    ) -> RedirectResponse:
+        admin = str(current_user.get("username") or "")
+        require_admin_csrf(request, csrf_token)
+        with get_connection() as connection:
+            row = connection.execute("SELECT id FROM employees WHERE id = ?", (int(employee_id),)).fetchone()
+            if not row:
+                return RedirectResponse(url="/admin/employees?" + urlencode({"error": "员工不存在。"}), status_code=303)
+            connection.execute(
+                "UPDATE employees SET participate_schedule = 0, updated_at = ? WHERE id = ?",
+                (now_text(), int(employee_id)),
+            )
+        record_operation_log(admin, "employee.schedule.disable", "employee", employee_id, {"participate_schedule": 0}, request)
+        return RedirectResponse(url="/admin/employees?" + urlencode({"success": "人员已停止参与排班。"}), status_code=303)
+
+    @app.post("/admin/employees/{employee_id}/enable-schedule")
+    def enable_employee_schedule_route(
+        request: Request,
+        employee_id: int,
+        current_user: Dict[str, object] = Depends(require_permission("employee.update")),
+        csrf_token: str = Form(""),
+    ) -> RedirectResponse:
+        admin = str(current_user.get("username") or "")
+        require_admin_csrf(request, csrf_token)
+        with get_connection() as connection:
+            row = connection.execute("SELECT status FROM employees WHERE id = ?", (int(employee_id),)).fetchone()
+            if not row:
+                return RedirectResponse(url="/admin/employees?" + urlencode({"error": "员工不存在。"}), status_code=303)
+            if str(row["status"] or "") in {"离职", "停用"}:
+                return RedirectResponse(url="/admin/employees?" + urlencode({"error": "离职或停用人员不能参与排班。"}), status_code=303)
+            connection.execute(
+                """
+                UPDATE employees
+                SET participate_schedule = 1, show_in_employee_management = 1, updated_at = ?
+                WHERE id = ?
+                """,
+                (now_text(), int(employee_id)),
+            )
+        record_operation_log(admin, "employee.schedule.enable", "employee", employee_id, {"participate_schedule": 1}, request)
+        return RedirectResponse(url="/admin/employees?" + urlencode({"success": "人员已重新参与排班。"}), status_code=303)
+
     @app.post("/admin/employees/{employee_id}/disable")
     def disable_employee_route(
         request: Request,
@@ -14539,6 +16446,11 @@ def create_app() -> FastAPI:
     ) -> RedirectResponse:
         admin = str(current_user.get("username") or "")
         require_admin_csrf(request, csrf_token)
+        if employee_has_linked_admin_account(employee_id) and not is_system_admin_user(current_user):
+            raise HTTPException(
+                status_code=http_status.HTTP_403_FORBIDDEN,
+                detail="关联后台账号的离职操作仅系统管理员可执行。",
+            )
         try:
             disable_employee(employee_id)
         except HTTPException as exc:
@@ -14612,24 +16524,30 @@ def create_app() -> FastAPI:
         record_operation_log(admin, "employee.restore", "employee", employee_id, {}, request)
         return RedirectResponse(url="/admin/employees?" + urlencode({"success": "员工已恢复。"}), status_code=303)
 
+    @app.post("/admin/employees/{employee_id}/safe-delete")
     @app.post("/admin/employees/{employee_id}/hard-delete")
     def hard_delete_employee_route(
         request: Request,
         employee_id: int,
         current_user: Dict[str, object] = Depends(require_permission("employee.hard_delete")),
         confirm_delete: str = Form(""),
+        source_scope: str = Form("trash"),
         csrf_token: str = Form(""),
     ) -> RedirectResponse:
         admin = str(current_user.get("username") or "")
         require_admin_csrf(request, csrf_token)
+        redirect_scope = normalize_employee_record_scope(source_scope)
+        redirect_url = "/admin/employees?" + urlencode({"scope": redirect_scope})
+        if not is_system_admin_user(current_user):
+            raise HTTPException(status_code=http_status.HTTP_403_FORBIDDEN, detail="仅系统管理员可永久删除人员。")
         if confirm_delete != "1":
-            return RedirectResponse(url="/admin/employees?scope=trash&" + urlencode({"error": "请二次确认后再永久删除员工。"}), status_code=303)
+            return RedirectResponse(url=redirect_url + "&" + urlencode({"error": "请二次确认后再永久删除员工。"}), status_code=303)
         try:
             hard_delete_employee(employee_id)
         except (ValueError, HTTPException) as exc:
-            return RedirectResponse(url="/admin/employees?scope=trash&" + urlencode({"error": form_error_message(exc)}), status_code=303)
+            return RedirectResponse(url=redirect_url + "&" + urlencode({"error": form_error_message(exc)}), status_code=303)
         record_operation_log(admin, "employee.hard_delete", "employee", employee_id, {}, request)
-        return RedirectResponse(url="/admin/employees?scope=trash&" + urlencode({"success": "员工已永久删除。"}), status_code=303)
+        return RedirectResponse(url="/admin/employees?" + urlencode({"success": "人员档案已安全删除。"}), status_code=303)
 
     @app.get("/admin/shift-types", response_class=HTMLResponse)
     def admin_shift_types(
@@ -14928,6 +16846,9 @@ def create_app() -> FastAPI:
         updated_count: int = Query(0),
         skipped_count: int = Query(0),
         deleted: int = Query(0),
+        cancelled: int = Query(0),
+        selected_date: str = Query(""),
+        schedule_state: str = Query("active"),
         error: str = Query(""),
     ) -> HTMLResponse:
         admin = str(current_user.get("username") or "")
@@ -14977,6 +16898,9 @@ def create_app() -> FastAPI:
             updated_count=updated_count,
             skipped_count=skipped_count,
             deleted=deleted,
+            cancelled=cancelled,
+            selected_date=selected_date,
+            schedule_state=schedule_state,
             error=combine_error_messages(error, parameter_error),
         )
 
@@ -15269,7 +17193,7 @@ def create_app() -> FastAPI:
     @app.post("/admin/schedules/clear-employee")
     def clear_employee_schedule_route(
         request: Request,
-        current_user: Dict[str, object] = Depends(require_permission("schedule.delete")),
+        current_user: Dict[str, object] = Depends(require_any_permission(["schedule.cancel", "schedule.delete"])),
         store_name: str = Form(""),
         employee_id: str = Form(""),
         month: str = Form(""),
@@ -15282,47 +17206,96 @@ def create_app() -> FastAPI:
             clean_employee_id = parse_optional_positive_int(employee_id)
             if clean_employee_id is None:
                 raise ValueError("员工不存在。")
-            deleted_count = clear_employee_month_schedules(store_name, clean_employee_id, month_for_return, admin)
+            cancelled_count = clear_employee_month_schedules(store_name, clean_employee_id, month_for_return, admin)
         except (ValueError, HTTPException) as exc:
             return RedirectResponse(url=schedule_redirect_url(store_name, month_for_return, error=form_error_message(exc)), status_code=303)
         record_operation_log(
             admin,
-            "schedule.delete",
+            "schedule.cancel.bulk",
             "schedule",
             "",
-            {"mode": "clear_employee", "store_name": store_name, "employee_id": employee_id, "month": month_for_return, "count": deleted_count},
+            {"mode": "clear_employee", "store_name": store_name, "employee_id": employee_id, "month": month_for_return, "count": cancelled_count},
             request,
         )
         return RedirectResponse(
-            url=schedule_redirect_url(store_name, month_for_return, deleted=deleted_count),
+            url=schedule_redirect_url(store_name, month_for_return, cancelled=cancelled_count),
             status_code=303,
         )
+
+    @app.post("/admin/schedules/{schedule_id}/cancel")
+    def cancel_schedule_route(
+        request: Request,
+        schedule_id: int,
+        current_user: Dict[str, object] = Depends(require_any_permission(["schedule.cancel", "schedule.delete"])),
+        csrf_token: str = Form(""),
+        cancel_reason: str = Form(""),
+        return_url: str = Form(""),
+    ) -> RedirectResponse:
+        admin = str(current_user.get("username") or "")
+        require_admin_csrf(request, csrf_token)
+        try:
+            old_schedule = cancel_schedule(schedule_id, admin, cancel_reason)
+        except (ValueError, HTTPException) as exc:
+            return RedirectResponse(url=schedule_redirect_url("", datetime.now().strftime("%Y-%m"), error=form_error_message(exc)), status_code=303)
+        record_operation_log(
+            admin,
+            "schedule.cancel",
+            "schedule",
+            schedule_id,
+            {"store_name": old_schedule.get("store_name"), "schedule_date": old_schedule.get("schedule_date"), "cancel_reason": cancel_reason.strip()},
+            request,
+        )
+        if return_url.strip():
+            return RedirectResponse(url=safe_admin_return_url(return_url), status_code=303)
+        return RedirectResponse(
+            url=schedule_redirect_url(str(old_schedule.get("store_name") or ""), str(old_schedule.get("schedule_date") or "")[:7], cancelled=1),
+            status_code=303,
+        )
+
+    @app.post("/admin/schedules/bulk-cancel")
+    def bulk_cancel_schedule_route(
+        request: Request,
+        current_user: Dict[str, object] = Depends(require_any_permission(["schedule.cancel", "schedule.delete"])),
+        schedule_ids: Optional[List[str]] = Form(None),
+        cancel_reason: str = Form(""),
+        return_url: str = Form(""),
+        csrf_token: str = Form(""),
+    ) -> RedirectResponse:
+        admin = str(current_user.get("username") or "")
+        require_admin_csrf(request, csrf_token)
+        parsed_ids, _invalid_ids = parse_optional_int_list(schedule_ids)
+        if not parsed_ids:
+            return RedirectResponse(url=schedule_redirect_url("", datetime.now().strftime("%Y-%m"), error="请选择要取消的排班。"), status_code=303)
+        cancelled_count = 0
+        errors: List[str] = []
+        for item_id in parsed_ids:
+            try:
+                cancel_schedule(int(item_id), admin, cancel_reason)
+                cancelled_count += 1
+            except (ValueError, HTTPException) as exc:
+                errors.append(form_error_message(exc))
+        record_operation_log(
+            admin,
+            "schedule.cancel.bulk",
+            "schedule",
+            "",
+            {"schedule_ids": parsed_ids, "cancel_reason": cancel_reason.strip(), "cancelled_count": cancelled_count, "errors": errors},
+            request,
+        )
+        if return_url.strip() and not errors:
+            return RedirectResponse(url=safe_admin_return_url(return_url), status_code=303)
+        if errors:
+            return RedirectResponse(url=schedule_redirect_url("", datetime.now().strftime("%Y-%m"), cancelled=cancelled_count, error="；".join(errors[:3])), status_code=303)
+        return RedirectResponse(url=schedule_redirect_url("", datetime.now().strftime("%Y-%m"), cancelled=cancelled_count), status_code=303)
 
     @app.post("/admin/schedules/{schedule_id}/delete")
     def delete_schedule_route(
         request: Request,
         schedule_id: int,
-        current_user: Dict[str, object] = Depends(require_permission("schedule.delete")),
+        current_user: Dict[str, object] = Depends(require_any_permission(["schedule.cancel", "schedule.delete"])),
         csrf_token: str = Form(""),
     ) -> RedirectResponse:
-        admin = str(current_user.get("username") or "")
-        require_admin_csrf(request, csrf_token)
-        try:
-            old_schedule = delete_schedule(schedule_id, admin)
-        except HTTPException as exc:
-            return RedirectResponse(url=schedule_redirect_url("", datetime.now().strftime("%Y-%m"), error=form_error_message(exc)), status_code=303)
-        record_operation_log(
-            admin,
-            "schedule.delete",
-            "schedule",
-            schedule_id,
-            {"store_name": old_schedule.get("store_name"), "schedule_date": old_schedule.get("schedule_date")},
-            request,
-        )
-        return RedirectResponse(
-            url=schedule_redirect_url(str(old_schedule.get("store_name") or ""), str(old_schedule.get("schedule_date") or "")[:7], deleted=1),
-            status_code=303,
-        )
+        return cancel_schedule_route(request, schedule_id, current_user, csrf_token, "兼容删除入口取消", "")
 
     @app.get("/admin/dashboard", response_class=HTMLResponse)
     def admin_dashboard(
@@ -15381,6 +17354,7 @@ def create_app() -> FastAPI:
             schedule_stats = fetch_schedule_operations_stats(schedule_filters)
             schedule_employee_options = dashboard_schedule_employee_options(schedule_store_options)
             schedule_shift_options = fetch_shift_types(active_only=False, store_names=schedule_store_options or None, global_scope="all")
+        request_type_gaps = configured_request_type_gaps()
         return templates.TemplateResponse(
             request,
             "dashboard.html",
@@ -15398,6 +17372,10 @@ def create_app() -> FastAPI:
                 "schedule_shift_options": schedule_shift_options,
                 "stats": stats,
                 "today_label": datetime.now().strftime("%Y-%m-%d"),
+                "dashboard_range_label": DASHBOARD_DATE_RANGE_LABELS.get(str(filters.get("date_range") or "last7"), "近7天"),
+                "dashboard_scope_label": dashboard_data_scope_label(current_user),
+                "dashboard_role_label": str(current_user.get("role_name") or "未设置角色"),
+                "manager_alerts": dashboard_manager_alert_items(stats, schedule_stats, request_type_gaps, can_view_schedule_dashboard),
                 "admin_user": str(current_user.get("username") or ""),
                 "csrf_token": current_csrf_token(request),
             },
@@ -16020,7 +17998,8 @@ def create_app() -> FastAPI:
     @app.get("/admin/account", response_class=HTMLResponse)
     def admin_account(
         request: Request,
-        current_user: Dict[str, object] = Depends(require_permission("account.view")),
+        current_user: Dict[str, object] = Depends(require_system_admin_user()),
+        keyword: str = Query(""),
         success: str = Query(""),
     ) -> HTMLResponse:
         admin = str(current_user.get("username") or "")
@@ -16030,14 +18009,19 @@ def create_app() -> FastAPI:
             "disabled": "账号已停用。",
             "enabled": "账号已启用。",
             "password_reset": "密码已重置。",
+            "deleted": "后台账号已安全删除，人员档案仍保留。",
+            "hidden": "后台账号已关闭并隐藏。",
+            "shown": "后台账号已恢复显示。",
+            "unlinked": "账号与人员档案关联已解除。",
         }
-        return render_account_page(request, admin, success=success_messages.get(success, ""))
+        return render_account_page(request, admin, success=success_messages.get(success, ""), keyword=keyword)
 
     @app.get("/admin/personnel-governance", response_class=HTMLResponse)
     def admin_personnel_governance(
         request: Request,
-        current_user: Dict[str, object] = Depends(require_permission("account.view")),
+        current_user: Dict[str, object] = Depends(require_any_permission(["employee.update", "account.view"])),
         success: str = Query(""),
+        error: str = Query(""),
     ) -> HTMLResponse:
         admin = str(current_user.get("username") or "")
         success_messages = {
@@ -16046,13 +18030,14 @@ def create_app() -> FastAPI:
             "ignored": "疑似重复已忽略。",
             "unignored": "已取消忽略。",
             "repaired": "历史员工异常已修复。",
+            "residue_cleaned": "历史残留清理已完成。",
         }
-        return render_personnel_governance_page(request, admin, success=success_messages.get(success, ""))
+        return render_personnel_governance_page(request, admin, error=error, success=success_messages.get(success, ""))
 
     @app.get("/admin/account/detail", response_class=HTMLResponse)
     def admin_personnel_detail(
         request: Request,
-        current_user: Dict[str, object] = Depends(require_permission("account.view")),
+        current_user: Dict[str, object] = Depends(require_system_admin_user()),
         user_id: int = Query(0),
         employee_id: int = Query(0),
     ) -> HTMLResponse:
@@ -16064,7 +18049,7 @@ def create_app() -> FastAPI:
     @app.post("/admin/personnel-governance/link", response_class=HTMLResponse)
     def link_personnel_governance(
         request: Request,
-        current_user: Dict[str, object] = Depends(require_permission("account.update")),
+        current_user: Dict[str, object] = Depends(require_system_admin_user()),
         csrf_token: str = Form(""),
         user_id: int = Form(0),
         employee_id: int = Form(0),
@@ -16090,7 +18075,7 @@ def create_app() -> FastAPI:
     @app.post("/admin/personnel-governance/unlink", response_class=HTMLResponse)
     def unlink_personnel_governance(
         request: Request,
-        current_user: Dict[str, object] = Depends(require_permission("account.update")),
+        current_user: Dict[str, object] = Depends(require_system_admin_user()),
         csrf_token: str = Form(""),
         user_id: int = Form(0),
         employee_id: int = Form(0),
@@ -16168,12 +18153,17 @@ def create_app() -> FastAPI:
     def repair_personnel_employee_governance(
         request: Request,
         employee_id: int,
-        current_user: Dict[str, object] = Depends(require_permission("account.update")),
+        current_user: Dict[str, object] = Depends(require_any_permission(["employee.update", "account.update"])),
         csrf_token: str = Form(""),
         action: str = Form(""),
     ):
         admin = str(current_user.get("username") or "")
         require_admin_csrf(request, csrf_token)
+        if action in {"normalize_departed_flags"} and not is_system_admin_user(current_user):
+            raise HTTPException(
+                status_code=http_status.HTTP_403_FORBIDDEN,
+                detail="账号权限修复仅系统管理员可执行。",
+            )
         try:
             result = repair_historical_employee_anomaly(employee_id, action)
         except ValueError as exc:
@@ -16190,10 +18180,50 @@ def create_app() -> FastAPI:
         )
         return RedirectResponse(url="/admin/personnel-governance?tab=historical&success=repaired", status_code=303)
 
+    @app.post("/admin/personnel-governance/residue-cleanup", response_class=HTMLResponse)
+    def cleanup_personnel_residue_governance(
+        request: Request,
+        current_user: Dict[str, object] = Depends(require_system_admin_user()),
+        csrf_token: str = Form(""),
+        target: Optional[List[str]] = Form(None),
+        confirm_text: str = Form(""),
+        confirm_backup: str = Form(""),
+        confirm_residue: str = Form(""),
+        confirm_irreversible: str = Form(""),
+    ):
+        admin = str(current_user.get("username") or "")
+        require_admin_csrf(request, csrf_token)
+        selected_targets = [str(value or "").strip() for value in target or [] if str(value or "").strip()]
+        confirmations_ok = (
+            confirm_text.strip() == "DELETE_PERSONNEL_RESIDUE"
+            and confirm_backup == "1"
+            and confirm_residue == "1"
+            and confirm_irreversible == "1"
+            and bool(selected_targets)
+        )
+        if not confirmations_ok:
+            return RedirectResponse(
+                url="/admin/personnel-governance?tab=historical&" + urlencode({"error": "历史残留清理需要完整二次确认。"}),
+                status_code=303,
+            )
+        try:
+            result = cleanup_personnel_residue_targets(selected_targets, admin)
+        except sqlite3.Error:
+            return render_personnel_governance_page(request, admin, error="历史残留清理失败，请稍后重试。", status_code=500)
+        record_operation_log(
+            admin,
+            "personnel.residue_cleanup",
+            "personnel",
+            ",".join(selected_targets),
+            result,
+            request,
+        )
+        return RedirectResponse(url="/admin/personnel-governance?tab=historical&success=residue_cleaned", status_code=303)
+
     @app.post("/admin/account/users", response_class=HTMLResponse)
     def create_admin_account(
         request: Request,
-        current_user: Dict[str, object] = Depends(require_permission("account.create")),
+        current_user: Dict[str, object] = Depends(require_system_admin_user()),
         csrf_token: str = Form(""),
         username: str = Form(""),
         display_name: str = Form(""),
@@ -16343,7 +18373,7 @@ def create_app() -> FastAPI:
     def update_admin_account(
         request: Request,
         user_id: int,
-        current_user: Dict[str, object] = Depends(require_permission("account.update")),
+        current_user: Dict[str, object] = Depends(require_system_admin_user()),
         csrf_token: str = Form(""),
         display_name: str = Form(""),
         employee_name: str = Form(""),
@@ -16533,11 +18563,12 @@ def create_app() -> FastAPI:
             return render_account_page(request, admin, error="账号更新失败，请稍后重试。", status_code=500)
         return RedirectResponse(url="/admin/account?success=updated", status_code=303)
 
+    @app.post("/admin/accounts/{user_id}/disable-login", response_class=HTMLResponse)
     @app.post("/admin/account/users/{user_id}/disable", response_class=HTMLResponse)
     def disable_admin_account(
         request: Request,
         user_id: int,
-        current_user: Dict[str, object] = Depends(require_permission("account.disable")),
+        current_user: Dict[str, object] = Depends(require_system_admin_user()),
         csrf_token: str = Form(""),
     ):
         admin = str(current_user.get("username") or "")
@@ -16550,7 +18581,7 @@ def create_app() -> FastAPI:
             return render_account_page(request, admin, error="，".join(errors) + "。", status_code=400)
         with get_connection() as connection:
             connection.execute(
-                "UPDATE admin_users SET is_active = 0, updated_at = ?, updated_by = ? WHERE id = ?",
+                "UPDATE admin_users SET allow_login = 0, is_active = 0, is_assignable = 0, updated_at = ?, updated_by = ? WHERE id = ?",
                 (now_text(), admin, int(user_id)),
             )
             connection.execute(
@@ -16560,11 +18591,12 @@ def create_app() -> FastAPI:
         record_operation_log(admin, "account.disable", "admin_user", user_id, {"username": target_user["username"]}, request)
         return RedirectResponse(url="/admin/account?success=disabled", status_code=303)
 
+    @app.post("/admin/accounts/{user_id}/enable-login", response_class=HTMLResponse)
     @app.post("/admin/account/users/{user_id}/enable", response_class=HTMLResponse)
     def enable_admin_account(
         request: Request,
         user_id: int,
-        current_user: Dict[str, object] = Depends(require_permission("account.disable")),
+        current_user: Dict[str, object] = Depends(require_system_admin_user()),
         csrf_token: str = Form(""),
     ):
         admin = str(current_user.get("username") or "")
@@ -16584,11 +18616,12 @@ def create_app() -> FastAPI:
         record_operation_log(admin, "account.enable", "admin_user", user_id, {"username": target_user["username"]}, request)
         return RedirectResponse(url="/admin/account?success=enabled", status_code=303)
 
+    @app.post("/admin/accounts/{user_id}/reset-password", response_class=HTMLResponse)
     @app.post("/admin/account/users/{user_id}/reset-password", response_class=HTMLResponse)
     def reset_admin_account_password(
         request: Request,
         user_id: int,
-        current_user: Dict[str, object] = Depends(require_permission("account.reset_password")),
+        current_user: Dict[str, object] = Depends(require_system_admin_user()),
         csrf_token: str = Form(""),
         password: str = Form(""),
         password_confirm: str = Form(""),
@@ -16611,10 +18644,89 @@ def create_app() -> FastAPI:
         record_operation_log(admin, "account.reset_password", "admin_user", user_id, {"username": target_user["username"]}, request)
         return RedirectResponse(url="/admin/account?success=password_reset", status_code=303)
 
+    @app.post("/admin/accounts/{user_id}/safe-delete", response_class=HTMLResponse)
+    @app.post("/admin/account/users/{user_id}/delete", response_class=HTMLResponse)
+    def delete_admin_account(
+        request: Request,
+        user_id: int,
+        current_user: Dict[str, object] = Depends(require_system_admin_user()),
+        csrf_token: str = Form(""),
+        confirm_delete: str = Form(""),
+    ):
+        admin = str(current_user.get("username") or "")
+        require_admin_csrf(request, csrf_token)
+        if confirm_delete != "1":
+            return render_account_page(request, admin, error="请二次确认后再删除后台账号。", status_code=400)
+        try:
+            result = delete_admin_user_identity(user_id, admin)
+        except ValueError as exc:
+            return render_account_page(request, admin, error=form_error_message(exc), status_code=400)
+        except sqlite3.Error:
+            return render_account_page(request, admin, error="账号删除失败，请稍后重试。", status_code=500)
+        record_operation_log(admin, "account.hard_delete", "admin_user", user_id, result, request)
+        return RedirectResponse(url="/admin/account?success=deleted", status_code=303)
+
+    @app.post("/admin/accounts/{user_id}/hide", response_class=HTMLResponse)
+    @app.post("/admin/account/users/{user_id}/hide", response_class=HTMLResponse)
+    def hide_admin_account(
+        request: Request,
+        user_id: int,
+        current_user: Dict[str, object] = Depends(require_system_admin_user()),
+        csrf_token: str = Form(""),
+    ):
+        admin = str(current_user.get("username") or "")
+        require_admin_csrf(request, csrf_token)
+        try:
+            result = hide_admin_user_identity(user_id, admin)
+        except ValueError as exc:
+            return render_account_page(request, admin, error=form_error_message(exc), status_code=400)
+        except sqlite3.Error:
+            return render_account_page(request, admin, error="账号隐藏失败，请稍后重试。", status_code=500)
+        record_operation_log(admin, "account.hide", "admin_user", user_id, result, request)
+        return RedirectResponse(url="/admin/account?success=hidden", status_code=303)
+
+    @app.post("/admin/accounts/{user_id}/show", response_class=HTMLResponse)
+    @app.post("/admin/account/users/{user_id}/show", response_class=HTMLResponse)
+    def show_admin_account(
+        request: Request,
+        user_id: int,
+        current_user: Dict[str, object] = Depends(require_system_admin_user()),
+        csrf_token: str = Form(""),
+    ):
+        admin = str(current_user.get("username") or "")
+        require_admin_csrf(request, csrf_token)
+        try:
+            result = show_admin_user_identity(user_id, admin)
+        except ValueError as exc:
+            return render_account_page(request, admin, error=form_error_message(exc), status_code=400)
+        except sqlite3.Error:
+            return render_account_page(request, admin, error="账号恢复显示失败，请稍后重试。", status_code=500)
+        record_operation_log(admin, "account.show", "admin_user", user_id, result, request)
+        return RedirectResponse(url="/admin/account?filter=hidden&success=shown", status_code=303)
+
+    @app.post("/admin/accounts/{user_id}/unlink-employee", response_class=HTMLResponse)
+    @app.post("/admin/account/users/{user_id}/unlink-employee", response_class=HTMLResponse)
+    def unlink_admin_account_employee(
+        request: Request,
+        user_id: int,
+        current_user: Dict[str, object] = Depends(require_system_admin_user()),
+        csrf_token: str = Form(""),
+    ):
+        admin = str(current_user.get("username") or "")
+        require_admin_csrf(request, csrf_token)
+        try:
+            result = unlink_admin_user_employee_identity(user_id, admin)
+        except ValueError as exc:
+            return render_account_page(request, admin, error=form_error_message(exc), status_code=400)
+        except sqlite3.Error:
+            return render_account_page(request, admin, error="账号关联解除失败，请稍后重试。", status_code=500)
+        record_operation_log(admin, "account.unlink_employee", "admin_user", user_id, result, request)
+        return RedirectResponse(url="/admin/account?success=unlinked", status_code=303)
+
     @app.get("/admin/roles", response_class=HTMLResponse)
     def admin_roles_page(
         request: Request,
-        current_user: Dict[str, object] = Depends(require_permission("role.view")),
+        current_user: Dict[str, object] = Depends(require_system_admin_user()),
         success: str = Query(""),
     ) -> HTMLResponse:
         success_messages = {"updated": "角色权限已保存。"}
@@ -16628,7 +18740,7 @@ def create_app() -> FastAPI:
     def update_admin_role_permissions(
         request: Request,
         role_id: int,
-        current_user: Dict[str, object] = Depends(require_permission("role.update")),
+        current_user: Dict[str, object] = Depends(require_system_admin_user()),
         csrf_token: str = Form(""),
         permissions: Optional[List[str]] = Form(None),
         restore_defaults: str = Form(""),
@@ -16663,7 +18775,7 @@ def create_app() -> FastAPI:
     @app.get("/admin/permission-overview", response_class=HTMLResponse)
     def admin_permission_overview(
         request: Request,
-        current_user: Dict[str, object] = Depends(require_permission("role.view")),
+        current_user: Dict[str, object] = Depends(require_system_admin_user()),
     ) -> HTMLResponse:
         return templates.TemplateResponse(
             request,
@@ -16678,7 +18790,7 @@ def create_app() -> FastAPI:
 
     @app.get("/admin/permission-overview/role-checklist/export")
     def export_role_acceptance_checklist(
-        current_user: Dict[str, object] = Depends(require_permission("role.view")),
+        current_user: Dict[str, object] = Depends(require_system_admin_user()),
     ) -> StreamingResponse:
         output = build_role_acceptance_workbook(role_acceptance_checklist())
         filename = quote(f"角色权限验收清单-{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx")
@@ -17890,6 +20002,7 @@ def create_app() -> FastAPI:
         shift_type_id: str = Query(""),
         shift_type_ids: Optional[List[str]] = Query(None),
         employee_statuses: Optional[List[str]] = Query(None),
+        schedule_state: str = Query("active"),
     ) -> StreamingResponse:
         admin = str(current_user.get("username") or "")
         config = load_app_config()
@@ -17924,6 +20037,7 @@ def create_app() -> FastAPI:
             shift_type_ids=selected_shift_ids,
             include_custom_shift=include_custom_shift,
             is_all_stores=is_all_stores,
+            schedule_state=schedule_state,
         )
         rows = list(schedule_validation_service.build_schedule_quality(rows, selected_month)["rows"])
         output = build_schedule_excel(rows)

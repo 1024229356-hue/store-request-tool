@@ -60,6 +60,16 @@ function initializeStoreRequestApp() {
   const employeeStoreForms = Array.from(document.querySelectorAll("[data-employee-store-form]"));
   const shiftScopeForms = Array.from(document.querySelectorAll("[data-shift-scope-form]"));
   const feedbackForms = Array.from(document.querySelectorAll("[data-feedback-form]"));
+  const confirmForms = Array.from(
+    new Set(
+      Array.from(document.querySelectorAll("form[data-confirm-message]")).concat(
+        Array.from(document.querySelectorAll("[data-confirm-message]"))
+          .map((element) => element.closest("form"))
+          .filter(Boolean),
+      ),
+    ),
+  );
+  const residueCleanupForms = Array.from(document.querySelectorAll("[data-residue-cleanup-form]"));
   const preserveScrollForms = Array.from(document.querySelectorAll("form[data-preserve-scroll]"));
   const cleanEmptyQueryForms = Array.from(document.querySelectorAll("form[data-clean-empty-query]"));
   const filterToggleButtons = Array.from(document.querySelectorAll("[data-filter-toggle]"));
@@ -68,6 +78,7 @@ function initializeStoreRequestApp() {
   const adminTicketCreateForms = Array.from(document.querySelectorAll("[data-admin-ticket-create-form]"));
   const scheduleBulkForm = document.querySelector("[data-schedule-bulk-form]");
   const scheduleBulkSummary = document.querySelector("[data-schedule-bulk-summary]");
+  const bulkDateCards = Array.from(document.querySelectorAll("[data-bulk-date-card]"));
   const selectAllEmployeesButton = document.querySelector("[data-select-all-employees]");
   const selectPrimaryEmployeesButton = document.querySelector("[data-select-primary-employees]");
   const selectSupportEmployeesButton = document.querySelector("[data-select-support-employees]");
@@ -84,6 +95,16 @@ function initializeStoreRequestApp() {
   const rolePermissionSearch = document.querySelector("[data-role-permission-search]");
   const roleModuleFilterButtons = Array.from(document.querySelectorAll("[data-role-module-filter]"));
   const rolePermissionCards = Array.from(document.querySelectorAll("[data-role-permission-card]"));
+  const roleListSearch = document.querySelector("[data-role-list-search]");
+  const roleListFilterButtons = Array.from(document.querySelectorAll("[data-role-filter]"));
+  const roleListItems = Array.from(document.querySelectorAll("[data-role-list-item]"));
+  const roleEditorPanels = Array.from(document.querySelectorAll("[data-role-editor-panel]"));
+  const dashboardFilterForm = document.querySelector("[data-dashboard-filter-form]");
+  const advancedFilterPanel = document.querySelector("[data-advanced-filter-panel]");
+  const advancedFilterToggle = document.querySelector("[data-advanced-filter-toggle]");
+  const filterDropdowns = Array.from(document.querySelectorAll("[data-filter-dropdown]"));
+  const dateRangeSelects = Array.from(document.querySelectorAll("[data-date-range-select]"));
+  const customDateRanges = Array.from(document.querySelectorAll("[data-custom-date-range]"));
 
   let selectedImages = [];
   let selectedFiles = [];
@@ -93,6 +114,7 @@ function initializeStoreRequestApp() {
   let notificationInitialLoaded = false;
   let notificationDesktopEnabled = safeLocalStorageGet("storeRequestDesktopNotifications") === "1";
   let activeRolePermissionModule = "all";
+  let activeRoleListFilter = "all";
 
   function formatFileSize(bytes) {
     if (bytes >= 1024 * 1024) {
@@ -233,6 +255,136 @@ function initializeStoreRequestApp() {
     toast.textContent = message;
     toastArea.appendChild(toast);
     window.setTimeout(() => toast.remove(), 1800);
+  }
+
+  function filterDropdownCheckboxes(dropdown) {
+    return Array.from(dropdown.querySelectorAll('input[type="checkbox"]'));
+  }
+
+  function filterDropdownOptions(dropdown) {
+    return Array.from(dropdown.querySelectorAll("[data-filter-option]"));
+  }
+
+  function checkedFilterDropdownLabels(dropdown) {
+    return filterDropdownCheckboxes(dropdown)
+      .filter((input) => input.checked)
+      .map((input) => {
+        const option = input.closest("[data-filter-option]");
+        const label = option ? option.querySelector("span") : null;
+        return label ? label.textContent.trim() : input.value;
+      })
+      .filter(Boolean);
+  }
+
+  function updateFilterDropdownSummary(dropdown) {
+    if (!dropdown) {
+      return;
+    }
+    const labels = checkedFilterDropdownLabels(dropdown);
+    const labelTarget = dropdown.querySelector("[data-filter-dropdown-label]");
+    const countTarget = dropdown.querySelector("[data-filter-selected-count]");
+    const emptyLabel = dropdown.dataset.emptyLabel || "全部";
+    const countLabel = dropdown.dataset.countLabel || "";
+    if (labelTarget) {
+      if (labels.length === 0) {
+        labelTarget.textContent = emptyLabel;
+      } else if (labels.length === 1) {
+        labelTarget.textContent = labels[0];
+      } else {
+        labelTarget.textContent = `${labels[0]} +${labels.length - 1}`;
+      }
+      labelTarget.title = labels.length > 0 ? labels.join("、") : emptyLabel;
+    }
+    if (countTarget) {
+      countTarget.textContent = String(labels.length);
+    }
+    dropdown.classList.toggle("has-selection", labels.length > 0);
+    if (labels.length > 0 && countLabel) {
+      dropdown.dataset.summary = `已选 ${labels.length} 个${countLabel}`;
+    } else {
+      dropdown.dataset.summary = emptyLabel;
+    }
+  }
+
+  function snapshotFilterDropdown(dropdown) {
+    const values = filterDropdownCheckboxes(dropdown)
+      .filter((input) => input.checked)
+      .map((input) => input.value);
+    dropdown.dataset.filterSnapshot = JSON.stringify(values);
+  }
+
+  function restoreFilterDropdownSnapshot(dropdown) {
+    let values = [];
+    try {
+      values = JSON.parse(dropdown.dataset.filterSnapshot || "[]");
+    } catch (_error) {
+      values = [];
+    }
+    const selected = new Set(values.map(String));
+    filterDropdownCheckboxes(dropdown).forEach((input) => {
+      input.checked = selected.has(String(input.value));
+    });
+    updateFilterDropdownSummary(dropdown);
+  }
+
+  function closeFilterDropdown(dropdown, restore = false) {
+    if (!dropdown || !dropdown.open) {
+      return;
+    }
+    if (restore) {
+      restoreFilterDropdownSnapshot(dropdown);
+    }
+    const searchInput = dropdown.querySelector("[data-filter-dropdown-search]");
+    if (searchInput) {
+      searchInput.value = "";
+    }
+    filterDropdownOptions(dropdown).forEach((option) => option.classList.remove("is-hidden"));
+    dropdown.open = false;
+  }
+
+  function closeOtherFilterDropdowns(currentDropdown) {
+    filterDropdowns.forEach((dropdown) => {
+      if (dropdown !== currentDropdown) {
+        closeFilterDropdown(dropdown, false);
+      }
+    });
+  }
+
+  function setVisibleFilterDropdownOptionsChecked(dropdown, checked) {
+    filterDropdownOptions(dropdown).forEach((option) => {
+      if (option.classList.contains("is-hidden")) {
+        return;
+      }
+      const input = option.querySelector('input[type="checkbox"]');
+      if (input) {
+        input.checked = checked;
+      }
+    });
+    updateFilterDropdownSummary(dropdown);
+  }
+
+  function filterDropdownOptionList(dropdown, query) {
+    const cleanQuery = String(query || "").trim().toLowerCase();
+    filterDropdownOptions(dropdown).forEach((option) => {
+      option.classList.toggle("is-hidden", Boolean(cleanQuery) && !option.textContent.toLowerCase().includes(cleanQuery));
+    });
+  }
+
+  function updateAdvancedFilterToggle() {
+    if (!advancedFilterToggle || !advancedFilterPanel) {
+      return;
+    }
+    advancedFilterToggle.textContent = advancedFilterPanel.open ? "收起筛选" : "展开筛选";
+  }
+
+  function updateCustomDateRangeVisibility() {
+    const isCustom = dateRangeSelects.some((select) => select.value === "custom");
+    customDateRanges.forEach((range) => {
+      range.hidden = !isCustom;
+      Array.from(range.querySelectorAll("input")).forEach((input) => {
+        input.disabled = !isCustom;
+      });
+    });
   }
 
   function shouldPreserveAdminScroll() {
@@ -447,9 +599,9 @@ function initializeStoreRequestApp() {
   }
 
   function syncScheduleDateCard(input) {
-    const card = input ? input.closest(".schedule-date-card, .schedule-date-chip, [data-weekend]") : null;
+    const card = input ? input.closest("[data-bulk-date-card], .schedule-date-chip") : null;
     if (card) {
-      card.classList.toggle("selected", Boolean(input.checked));
+      card.classList.toggle("is-selected", Boolean(input.checked));
     }
   }
 
@@ -503,10 +655,167 @@ function initializeStoreRequestApp() {
         item.hidden = !(moduleMatches && rolePermissionMatchesSearch(item, query));
       });
       card.querySelectorAll("[data-permission-module-group]").forEach((group) => {
+        const moduleName = group.dataset.permissionModule || group.dataset.permissionModuleGroup || "";
         const visibleItems = Array.from(group.querySelectorAll("[data-permission-item]")).filter((item) => !item.hidden);
-        group.hidden = visibleItems.length === 0;
+        const moduleVisible = visibleItems.length > 0;
+        group.hidden = false;
+        group.dataset.filterHidden = moduleVisible ? "false" : "true";
+        group.classList.toggle("is-filtered-out", !moduleVisible);
+        group.classList.toggle("is-filter-hidden", !moduleVisible);
+        group.dataset.moduleFilterCurrent = activeRolePermissionModule;
+        if (group.tagName.toLowerCase() === "details" && moduleVisible && activeRolePermissionModule !== "all") {
+          group.open = true;
+        }
       });
+      const page = card.closest("[data-role-permission-page]");
+      if (page) {
+        page.dataset.moduleFilterCurrent = activeRolePermissionModule;
+      }
     });
+  }
+
+  function checkedRolePermissionValues(form) {
+    if (!form) {
+      return [];
+    }
+    return Array.from(form.querySelectorAll('input[name="permissions"]:checked'))
+      .map((input) => input.value)
+      .sort();
+  }
+
+  function serializedRolePermissions(form) {
+    return checkedRolePermissionValues(form).join("|");
+  }
+
+  function panelForRoleForm(form) {
+    return form ? form.closest("[data-role-editor-panel]") : null;
+  }
+
+  function listItemForRolePanel(panel) {
+    if (!panel) {
+      return null;
+    }
+    const panelId = panel.dataset.rolePanelId || panel.id || "";
+    return roleListItems.find((item) => item.dataset.roleTarget === panelId) || null;
+  }
+
+  function activeRoleEditorPanel() {
+    return roleEditorPanels.find((panel) => !panel.hidden) || roleEditorPanels[0] || null;
+  }
+
+  function updateRolePermissionCounts(form) {
+    const selectedCount = checkedRolePermissionValues(form).length;
+    const panel = panelForRoleForm(form);
+    if (panel) {
+      const selectedNode = panel.querySelector("[data-role-selected-count]");
+      if (selectedNode) {
+        selectedNode.textContent = String(selectedCount);
+      }
+      const listItem = listItemForRolePanel(panel);
+      const listCount = listItem ? listItem.querySelector("[data-role-list-count]") : null;
+      if (listCount) {
+        listCount.textContent = `${selectedCount} 项权限`;
+      }
+    }
+    form.querySelectorAll("[data-permission-module-group]").forEach((group) => {
+      const moduleSelected = group.querySelectorAll('input[name="permissions"]:checked').length;
+      const moduleCount = group.querySelector("[data-module-selected-count]");
+      if (moduleCount) {
+        moduleCount.textContent = String(moduleSelected);
+      }
+    });
+  }
+
+  function syncRoleFormDirtyState(form) {
+    if (!form) {
+      return false;
+    }
+    const dirty = serializedRolePermissions(form) !== (form.dataset.roleInitialPermissions || "");
+    form.dataset.roleDirty = dirty ? "1" : "0";
+    const panel = panelForRoleForm(form);
+    if (panel) {
+      panel.classList.toggle("is-dirty", dirty);
+      const listItem = listItemForRolePanel(panel);
+      if (listItem) {
+        listItem.classList.toggle("is-dirty", dirty);
+      }
+    }
+    return dirty;
+  }
+
+  function updateRoleFormState(form) {
+    if (!form) {
+      return;
+    }
+    updateRolePermissionCounts(form);
+    syncRoleFormDirtyState(form);
+  }
+
+  function initializeRoleForm(form) {
+    if (!form) {
+      return;
+    }
+    form.dataset.roleInitialPermissions = serializedRolePermissions(form);
+    form.dataset.roleDirty = "0";
+    updateRolePermissionCounts(form);
+  }
+
+  function roleListItemMatchesFilter(item, query) {
+    const roleName = String(item.dataset.roleName || item.textContent || "").toLowerCase();
+    const category = item.dataset.roleCategory || "";
+    const isSystem = item.dataset.roleSystem === "1";
+    const queryMatches = !query || roleName.includes(query);
+    let filterMatches = true;
+    if (activeRoleListFilter === "current") {
+      filterMatches = category === "current";
+    } else if (activeRoleListFilter === "legacy") {
+      filterMatches = category === "legacy";
+    } else if (activeRoleListFilter === "system") {
+      filterMatches = isSystem;
+    }
+    return queryMatches && filterMatches;
+  }
+
+  function updateRoleList() {
+    if (!roleListItems.length) {
+      return;
+    }
+    const query = roleListSearch ? roleListSearch.value.trim().toLowerCase() : "";
+    roleListItems.forEach((item) => {
+      item.hidden = !roleListItemMatchesFilter(item, query);
+    });
+  }
+
+  function hasDirtyRoleForm() {
+    return roleEditorPanels.some((panel) => {
+      const form = panel.querySelector("[data-role-form]");
+      return form && form.matches('[data-role-dirty="1"]');
+    });
+  }
+
+  function switchRolePanel(targetPanelId) {
+    const targetPanel = roleEditorPanels.find((panel) => (panel.dataset.rolePanelId || panel.id) === targetPanelId);
+    if (!targetPanel) {
+      return;
+    }
+    const currentPanel = activeRoleEditorPanel();
+    if (currentPanel && currentPanel !== targetPanel) {
+      const currentForm = currentPanel.querySelector("[data-role-form]");
+      if (
+        currentForm &&
+        currentForm.dataset.roleDirty === "1" &&
+        !window.confirm("当前角色有未保存修改，切换后本页会暂存勾选，但离开或刷新前仍需保存。是否继续切换？")
+      ) {
+        return;
+      }
+    }
+    roleEditorPanels.forEach((panel) => {
+      panel.hidden = panel !== targetPanel;
+    });
+    roleListItems.forEach((item) => {
+      item.classList.toggle("active", item.dataset.roleTarget === targetPanelId);
+    });
+    updateRolePermissionMatrix();
   }
 
   function escapeCssValue(value) {
@@ -524,6 +833,7 @@ function initializeStoreRequestApp() {
     sourceInput.form.querySelectorAll(selector).forEach((input) => {
       input.checked = sourceInput.checked;
     });
+    updateRoleFormState(sourceInput.form);
   }
 
   function currentRoleModuleItems(form) {
@@ -550,6 +860,7 @@ function initializeStoreRequestApp() {
         input.checked = checked;
       });
     });
+    updateRoleFormState(form);
   }
 
   function updateRequestTypeHint() {
@@ -1251,6 +1562,18 @@ function initializeStoreRequestApp() {
       });
       syncScheduleDateCard(input);
     });
+    bulkDateCards.forEach((card) => {
+      card.addEventListener("click", (event) => {
+        const input = card.querySelector('input[name="schedule_dates"]');
+        if (!input || input.disabled) {
+          return;
+        }
+        event.preventDefault();
+        input.checked = !input.checked;
+        syncScheduleDateCard(input);
+        updateScheduleBulkSummary();
+      });
+    });
   if (selectAllEmployeesButton) {
     selectAllEmployeesButton.addEventListener("click", () => setScheduleInputsChecked(scheduleEmployeeInputs(), true));
   }
@@ -1410,6 +1733,24 @@ function initializeStoreRequestApp() {
   });
 
   if (rolePermissionToolbar) {
+    roleEditorPanels.forEach((panel) => {
+      initializeRoleForm(panel.querySelector("[data-role-form]"));
+    });
+    roleListItems.forEach((item) => {
+      item.addEventListener("click", () => {
+        switchRolePanel(item.dataset.roleTarget || "");
+      });
+    });
+    roleListFilterButtons.forEach((button) => {
+      button.addEventListener("click", () => {
+        activeRoleListFilter = button.dataset.roleFilter || "all";
+        roleListFilterButtons.forEach((item) => item.classList.toggle("active", item === button));
+        updateRoleList();
+      });
+    });
+    if (roleListSearch) {
+      roleListSearch.addEventListener("input", updateRoleList);
+    }
     roleModuleFilterButtons.forEach((button) => {
       button.addEventListener("click", () => {
         activeRolePermissionModule = button.dataset.roleModuleFilter || "all";
@@ -1424,6 +1765,9 @@ function initializeStoreRequestApp() {
       card.querySelectorAll("[data-role-permission-checkbox]").forEach((input) => {
         input.addEventListener("change", () => syncRolePermissionCheckboxes(input));
       });
+      card.querySelectorAll("[data-permission-module-group]").forEach((group) => {
+        updateRolePermissionCounts(group.closest("form"));
+      });
       const form = card.querySelector("form");
       const selectModuleButton = card.querySelector("[data-role-select-module]");
       const clearModuleButton = card.querySelector("[data-role-clear-module]");
@@ -1433,12 +1777,162 @@ function initializeStoreRequestApp() {
       if (clearModuleButton) {
         clearModuleButton.addEventListener("click", () => setCurrentRoleModuleChecked(form, false));
       }
+      if (form) {
+        form.addEventListener("submit", (event) => {
+          const submitter = event.submitter;
+          if (submitter && submitter.matches("[data-restore-defaults]")) {
+            return;
+          }
+        });
+      }
     });
+    window.addEventListener("beforeunload", (event) => {
+      if (!hasDirtyRoleForm()) {
+        return;
+      }
+      event.preventDefault();
+      event.returnValue = "";
+    });
+    updateRoleList();
     updateRolePermissionMatrix();
   }
 
+  if (advancedFilterPanel && advancedFilterToggle) {
+    advancedFilterToggle.addEventListener("click", (event) => {
+      event.preventDefault();
+      advancedFilterPanel.open = !advancedFilterPanel.open;
+      updateAdvancedFilterToggle();
+    });
+    advancedFilterPanel.addEventListener("toggle", updateAdvancedFilterToggle);
+    updateAdvancedFilterToggle();
+  }
+
+  dateRangeSelects.forEach((select) => {
+    select.addEventListener("change", updateCustomDateRangeVisibility);
+  });
+  updateCustomDateRangeVisibility();
+
+  filterDropdowns.forEach((dropdown) => {
+    updateFilterDropdownSummary(dropdown);
+    snapshotFilterDropdown(dropdown);
+    dropdown.addEventListener("toggle", () => {
+      if (dropdown.open) {
+        snapshotFilterDropdown(dropdown);
+        closeOtherFilterDropdowns(dropdown);
+        const searchInput = dropdown.querySelector("[data-filter-dropdown-search]");
+        if (searchInput) {
+          window.setTimeout(() => searchInput.focus(), 0);
+        }
+      }
+    });
+    filterDropdownCheckboxes(dropdown).forEach((input) => {
+      input.addEventListener("change", () => updateFilterDropdownSummary(dropdown));
+    });
+    const searchInput = dropdown.querySelector("[data-filter-dropdown-search]");
+    if (searchInput) {
+      searchInput.addEventListener("input", () => filterDropdownOptionList(dropdown, searchInput.value));
+    }
+    const selectAllButton = dropdown.querySelector("[data-filter-select-all]");
+    if (selectAllButton) {
+      selectAllButton.addEventListener("click", (event) => {
+        event.preventDefault();
+        setVisibleFilterDropdownOptionsChecked(dropdown, true);
+      });
+    }
+    const clearButton = dropdown.querySelector("[data-filter-clear]");
+    if (clearButton) {
+      clearButton.addEventListener("click", (event) => {
+        event.preventDefault();
+        setVisibleFilterDropdownOptionsChecked(dropdown, false);
+      });
+    }
+    const confirmButton = dropdown.querySelector("[data-filter-confirm]");
+    if (confirmButton) {
+      confirmButton.addEventListener("click", (event) => {
+        event.preventDefault();
+        snapshotFilterDropdown(dropdown);
+        updateFilterDropdownSummary(dropdown);
+        closeFilterDropdown(dropdown, false);
+      });
+    }
+    const cancelButton = dropdown.querySelector("[data-filter-cancel]");
+    if (cancelButton) {
+      cancelButton.addEventListener("click", (event) => {
+        event.preventDefault();
+        closeFilterDropdown(dropdown, true);
+      });
+    }
+  });
+
+  if (filterDropdowns.length) {
+    document.addEventListener("click", (event) => {
+      if (event.target.closest("[data-filter-dropdown]")) {
+        return;
+      }
+      filterDropdowns.forEach((dropdown) => closeFilterDropdown(dropdown, false));
+    });
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        filterDropdowns.forEach((dropdown) => closeFilterDropdown(dropdown, false));
+      }
+    });
+  }
+
+  if (dashboardFilterForm) {
+    dashboardFilterForm.addEventListener("submit", () => {
+      filterDropdowns.forEach((dropdown) => {
+        snapshotFilterDropdown(dropdown);
+        updateFilterDropdownSummary(dropdown);
+      });
+    });
+  }
+
+  residueCleanupForms.forEach((form) => {
+    form.addEventListener("submit", (event) => {
+      const selectedTargets = Array.from(form.querySelectorAll('input[name="target"]:checked'));
+      const confirmInput = form.querySelector('input[name="confirm_text"]');
+      const confirmText = confirmInput ? confirmInput.value.trim() : "";
+      const requiredChecks = ["confirm_backup", "confirm_residue", "confirm_irreversible"];
+      const allChecksPassed = requiredChecks.every((name) => {
+        const field = form.querySelector(`input[name="${name}"]`);
+        return field && field.checked;
+      });
+      if (!selectedTargets.length) {
+        event.preventDefault();
+        showAppToast("请选择要清理的历史残留。", "error");
+        return;
+      }
+      if (confirmText !== "DELETE_PERSONNEL_RESIDUE" || !allChecksPassed) {
+        event.preventDefault();
+        showAppToast("请完成历史残留清理的二次确认。", "error");
+        return;
+      }
+      if (!window.confirm("确认执行历史残留清理吗？可硬删除项不可恢复，其余项只会归档/隐藏。")) {
+        event.preventDefault();
+      }
+    });
+  });
+
+  confirmForms.forEach((form) => {
+    form.addEventListener("submit", (event) => {
+      if (event.defaultPrevented || form.matches("[data-residue-cleanup-form]")) {
+        return;
+      }
+      const submitter = event.submitter || document.activeElement;
+      const message =
+        (submitter && submitter.dataset ? submitter.dataset.confirmMessage : "") || form.dataset.confirmMessage || "";
+      if (message && !window.confirm(message)) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+      }
+    });
+  });
+
   feedbackForms.forEach((form) => {
     form.addEventListener("submit", (event) => {
+      if (event.defaultPrevented) {
+        return;
+      }
       const submitter = event.submitter || form.querySelector('[type="submit"]');
       if (!submitter) {
         return;

@@ -1275,7 +1275,8 @@ def test_account_management_crud_safety_and_password_reset(tmp_path, monkeypatch
     account_page = client.get("/admin/account")
     assert account_page.status_code == 200
     assert "账号列表" in account_page.text
-    assert "新增账号" in account_page.text
+    assert 'data-drawer="account-create"' not in account_page.text
+    assert 'data-drawer-open="account-create"' not in account_page.text
     assert "password_hash" not in account_page.text
 
     create = client.post(
@@ -1389,7 +1390,7 @@ def test_person_account_schema_and_legacy_records_remain_usable(tmp_path, monkey
         employee_columns = {row[1] for row in connection.execute("PRAGMA table_info(employees)").fetchall()}
 
     assert {"employee_id", "allow_login", "participate_schedule"}.issubset(admin_columns)
-    assert {"user_id", "allow_login", "participate_schedule"}.issubset(employee_columns)
+    assert {"user_id", "allow_login", "participate_schedule", "show_in_employee_management"}.issubset(employee_columns)
 
     users = {row["username"]: row for row in rows_for(tmp_path, "admin_users")}
     assert users["admin"]["allow_login"] == 1
@@ -1405,6 +1406,923 @@ def test_person_account_schema_and_legacy_records_remain_usable(tmp_path, monkey
     assert schedule_page.status_code == 200
     assert "旧排班员工" in schedule_page.text
     assert rows_for(tmp_path, "employees")[0]["id"] == legacy_employee_id
+
+
+def test_employees_page_is_org_people_view_and_includes_account_only_people(tmp_path, monkeypatch):
+    client, main = build_client(tmp_path, monkeypatch, admin_users="admin:123456")
+    logged_in_client(client, "admin", "123456")
+    account_user_id = create_test_admin_user(
+        tmp_path,
+        "buyer_org",
+        "总部采购账号",
+        role_name="采购",
+        allow_login=1,
+        is_assignable=1,
+    )
+    employee_only_id = main.create_employee("档案店员", "南京门东店", "店员", "", "在职", main.load_app_config())
+    non_schedule_id = main.create_employee("不排班财务", "南京门东店", "财务", "", "在职", main.load_app_config())
+    linked_user_id = create_test_admin_user(tmp_path, "linked_manager", "已关联经理", allow_login=1)
+    linked_employee_id = main.create_employee("已关联经理", "南昌万寿宫店", "运营经理", "", "在职", main.load_app_config())
+    with sqlite3.connect(tmp_path / "tickets.db") as connection:
+        connection.execute("UPDATE employees SET participate_schedule = 0 WHERE id = ?", (non_schedule_id,))
+        connection.execute("UPDATE admin_users SET employee_id = ? WHERE id = ?", (linked_employee_id, linked_user_id))
+        connection.execute("UPDATE employees SET user_id = ?, participate_schedule = 0 WHERE id = ?", (linked_user_id, linked_employee_id))
+
+    page = client.get("/admin/employees")
+
+    assert page.status_code == 200
+    assert "人员/组织架构管理" in page.text
+    assert "人员资料统一在这里查看和维护" in page.text
+    assert "总部采购账号" in page.text
+    assert "buyer_org" in page.text
+    assert "未建员工档案" in page.text
+    assert "补建员工档案" in page.text
+    assert "档案店员" in page.text
+    assert "不排班财务" in page.text
+    assert "已关联经理" in page.text
+    assert sum(1 for row in rows_for(tmp_path, "employees") if row["employee_name"] == "已关联经理") == 1
+    assert "不排班" in page.text
+    assert f'value="{account_user_id}"' in page.text
+    assert f'value="{employee_only_id}"' in page.text
+
+
+def test_employees_page_show_filter_hide_restore_and_schedule_candidate(tmp_path, monkeypatch):
+    client, main = build_client(tmp_path, monkeypatch, admin_users="admin:123456")
+    logged_in_client(client, "admin", "123456")
+    hidden_id = main.create_employee("历史隐藏员工", "南京门东店", "店员", "", "在职", main.load_app_config())
+    visible_id = main.create_employee("普通人员", "南京门东店", "店员", "", "在职", main.load_app_config())
+    with sqlite3.connect(tmp_path / "tickets.db") as connection:
+        connection.execute("UPDATE employees SET participate_schedule = 0, show_in_employee_management = 0 WHERE id = ?", (hidden_id,))
+        connection.execute("UPDATE employees SET participate_schedule = 0 WHERE id = ?", (visible_id,))
+
+    default_page = client.get("/admin/employees")
+    hidden_page = client.get("/admin/employees?visibility=hidden")
+
+    assert default_page.status_code == 200
+    assert "普通人员" in default_page.text
+    assert "历史隐藏员工" not in default_page.text
+    assert hidden_page.status_code == 200
+    assert "历史隐藏员工" in hidden_page.text
+    assert "恢复显示" in hidden_page.text
+    assert "普通人员" not in client.get("/admin/schedules?store_name=南京门东店&month=2026-07").text
+
+    enabled = client.post(
+        f"/admin/employees/{visible_id}/update",
+        data={
+            "csrf_token": csrf_token_for(client, "/admin/employees"),
+            "employee_name": "普通人员",
+            "role": "店员",
+            "phone": "",
+            "status": "在职",
+            "primary_store_name": "南京门东店",
+            "store_names": ["南京门东店"],
+            "show_in_employee_management": "1",
+            "participate_schedule": "1",
+        },
+        follow_redirects=False,
+    )
+
+    assert enabled.status_code == 303
+    updated = next(row for row in rows_for(tmp_path, "employees") if row["id"] == visible_id)
+    assert updated["show_in_employee_management"] == 1
+    assert updated["participate_schedule"] == 1
+    assert "普通人员" in client.get("/admin/schedules?store_name=南京门东店&month=2026-07").text
+
+
+def test_employees_page_builds_employee_file_and_unlinks_without_deleting(tmp_path, monkeypatch):
+    client, main = build_client(tmp_path, monkeypatch, admin_users="admin:123456")
+    logged_in_client(client, "admin", "123456")
+    user_id = create_test_admin_user(
+        tmp_path,
+        "finance_file",
+        "财务账号",
+        role_name="财务",
+        allow_login=1,
+        is_assignable=1,
+    )
+
+    built = client.post(
+        "/admin/employees/build-from-account",
+        data={
+            "csrf_token": csrf_token_for(client, "/admin/employees"),
+            "user_id": str(user_id),
+            "employee_name": "财务账号",
+            "role": "财务",
+            "primary_store_name": "南京门东店",
+            "store_names": ["南京门东店"],
+        },
+        follow_redirects=False,
+    )
+
+    assert built.status_code == 303
+    user = next(row for row in rows_for(tmp_path, "admin_users") if row["id"] == user_id)
+    employee = next(row for row in rows_for(tmp_path, "employees") if row["employee_name"] == "财务账号")
+    assert user["employee_id"] == employee["id"]
+    assert employee["user_id"] == user_id
+    assert employee["show_in_employee_management"] == 1
+    assert employee["participate_schedule"] == 0
+
+    unlinked = client.post(
+        f"/admin/employees/{employee['id']}/unlink-account",
+        data={"csrf_token": csrf_token_for(client, "/admin/employees")},
+        follow_redirects=False,
+    )
+
+    assert unlinked.status_code == 303
+    user_after = next(row for row in rows_for(tmp_path, "admin_users") if row["id"] == user_id)
+    employee_after = next(row for row in rows_for(tmp_path, "employees") if row["id"] == employee["id"])
+    assert user_after["employee_id"] is None
+    assert employee_after["user_id"] is None
+    assert user_after["username"] == "finance_file"
+    assert employee_after["employee_name"] == "财务账号"
+
+
+def test_account_page_is_permission_management_and_links_missing_employee_file(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch, admin_users="admin:123456")
+    logged_in_client(client, "admin", "123456")
+    user_id = create_test_admin_user(tmp_path, "design_no_file", "设计账号", role_name="设计", allow_login=1)
+
+    page = client.get("/admin/account")
+
+    assert page.status_code == 200
+    assert "账号权限管理" in page.text
+    assert "后台账号、角色权限、数据范围和处理人资格由系统管理员维护" in page.text
+    assert "设计账号" in page.text
+    assert "未建员工档案" in page.text
+    assert f"/admin/employees?source=account_only&user_id={user_id}" in page.text
+
+
+def test_personnel_governance_historical_residue_preview_confirm_and_audit(tmp_path, monkeypatch):
+    client, main = build_client(tmp_path, monkeypatch, admin_users="admin:123456")
+    logged_in_client(client, "admin", "123456")
+    orphan_id = main.create_employee("验收测试-孤儿员工", "南京门东店", "店员", "", "离职", main.load_app_config())
+    scheduled_id = main.create_employee("历史排班员工", "南京门东店", "店员", "", "在职", main.load_app_config())
+    with sqlite3.connect(tmp_path / "tickets.db") as connection:
+        connection.execute("UPDATE employees SET show_in_employee_management = 0, participate_schedule = 0 WHERE id IN (?, ?)", (orphan_id, scheduled_id))
+        shift_id = connection.execute("SELECT id FROM shift_types ORDER BY id LIMIT 1").fetchone()[0]
+        connection.execute(
+            """
+            INSERT INTO store_schedules (store_name, employee_id, schedule_date, shift_type_id, created_by, created_at, updated_at)
+            VALUES ('南京门东店', ?, '2026-07-06', ?, 'pytest', '2026-07-06 10:00:00', '2026-07-06 10:00:00')
+            """,
+            (scheduled_id, shift_id),
+        )
+
+    page = client.get("/admin/personnel-governance?tab=historical")
+
+    assert page.status_code == 200
+    assert "历史残留清理" in page.text
+    assert "DELETE_PERSONNEL_RESIDUE" in page.text
+    assert "验收测试-孤儿员工" in page.text
+    assert "历史排班员工" in page.text
+    assert "可安全删除" in page.text
+    assert "只归档/隐藏" in page.text
+
+    blocked = client.post(
+        "/admin/personnel-governance/residue-cleanup",
+        data={
+            "csrf_token": csrf_token_for(client, "/admin/personnel-governance?tab=historical"),
+            "target": f"employee:{orphan_id}",
+            "confirm_text": "WRONG",
+        },
+        follow_redirects=False,
+    )
+    assert blocked.status_code == 303
+    assert any("二次确认" in row["detail"] or "DELETE_PERSONNEL_RESIDUE" in row["detail"] for row in rows_for(tmp_path, "admin_operation_logs")) is False
+    assert any(row["id"] == orphan_id for row in rows_for(tmp_path, "employees"))
+
+    cleaned = client.post(
+        "/admin/personnel-governance/residue-cleanup",
+        data={
+            "csrf_token": csrf_token_for(client, "/admin/personnel-governance?tab=historical"),
+            "target": f"employee:{orphan_id}",
+            "confirm_text": "DELETE_PERSONNEL_RESIDUE",
+            "confirm_backup": "1",
+            "confirm_residue": "1",
+            "confirm_irreversible": "1",
+        },
+        follow_redirects=False,
+    )
+    assert cleaned.status_code == 303
+    assert not any(row["id"] == orphan_id for row in rows_for(tmp_path, "employees"))
+    assert any(row["id"] == scheduled_id for row in rows_for(tmp_path, "employees"))
+    assert any(row["action"] == "personnel.residue_cleanup" for row in rows_for(tmp_path, "admin_operation_logs"))
+
+
+def test_employee_safe_delete_requires_no_history_or_account_and_audits(tmp_path, monkeypatch):
+    client, main = build_client(tmp_path, monkeypatch, admin_users="admin:123456")
+    logged_in_client(client, "admin", "123456")
+    safe_id = main.create_employee("可安全删除人员", "南京门东店", "店员", "", "在职", main.load_app_config())
+    scheduled_id = main.create_employee("有历史排班人员", "南京门东店", "店员", "", "在职", main.load_app_config())
+    linked_id = main.create_employee("有关联账号人员", "南京门东店", "店员", "", "在职", main.load_app_config())
+    linked_user_id = create_test_admin_user(tmp_path, "linked_delete_user", "有关联账号人员", role_name="店长", allow_login=1)
+    with sqlite3.connect(tmp_path / "tickets.db") as connection:
+        shift_id = connection.execute("SELECT id FROM shift_types ORDER BY id LIMIT 1").fetchone()[0]
+        connection.execute(
+            """
+            INSERT INTO store_schedules (store_name, employee_id, schedule_date, shift_type_id, created_by, created_at, updated_at)
+            VALUES ('南京门东店', ?, '2026-07-06', ?, 'pytest', '2026-07-06 10:00:00', '2026-07-06 10:00:00')
+            """,
+            (scheduled_id, shift_id),
+        )
+        connection.execute("UPDATE admin_users SET employee_id = ? WHERE id = ?", (linked_id, linked_user_id))
+        connection.execute("UPDATE employees SET user_id = ?, allow_login = 1 WHERE id = ?", (linked_user_id, linked_id))
+
+    page = client.get("/admin/employees")
+    assert page.status_code == 200
+    assert "安全删除人员档案" in page.text
+    assert "该人员存在历史排班/工单/账号记录，不能永久删除，可归档或隐藏。" in page.text
+
+    deleted = client.post(
+        f"/admin/employees/{safe_id}/safe-delete",
+        data={
+            "csrf_token": csrf_token_for(client, "/admin/employees"),
+            "confirm_delete": "1",
+            "source_scope": "active",
+        },
+        follow_redirects=False,
+    )
+    assert deleted.status_code == 303
+    assert not any(row["id"] == safe_id for row in rows_for(tmp_path, "employees"))
+    assert any(row["action"] == "employee.hard_delete" for row in rows_for(tmp_path, "admin_operation_logs"))
+
+    scheduled_blocked = client.post(
+        f"/admin/employees/{scheduled_id}/safe-delete",
+        data={"csrf_token": csrf_token_for(client, "/admin/employees"), "confirm_delete": "1", "source_scope": "active"},
+        follow_redirects=True,
+    )
+    assert scheduled_blocked.status_code == 200
+    assert "存在历史排班" in scheduled_blocked.text
+    assert any(row["id"] == scheduled_id for row in rows_for(tmp_path, "employees"))
+
+    linked_blocked = client.post(
+        f"/admin/employees/{linked_id}/safe-delete",
+        data={"csrf_token": csrf_token_for(client, "/admin/employees"), "confirm_delete": "1", "source_scope": "active"},
+        follow_redirects=True,
+    )
+    assert linked_blocked.status_code == 200
+    assert "账号记录" in linked_blocked.text or "账号关联" in linked_blocked.text
+    assert any(row["id"] == linked_id for row in rows_for(tmp_path, "employees"))
+
+
+def test_employee_safe_delete_allows_creation_audit_and_store_map_only(tmp_path, monkeypatch):
+    client, main = build_client(tmp_path, monkeypatch, admin_users="admin:123456")
+    logged_in_client(client, "admin", "123456")
+
+    created = admin_post(
+        client,
+        "/admin/employees",
+        data={
+            "employee_name": "误建可删员工",
+            "primary_store_name": "南京门东店",
+            "store_names": ["南京门东店", "南昌万寿宫店"],
+            "role": "店员",
+            "phone": "13800005555",
+            "status": "在职",
+            "show_in_employee_management": "1",
+            "participate_schedule": "1",
+        },
+        follow_redirects=False,
+    )
+    assert created.status_code == 303
+    employee = next(row for row in rows_for(tmp_path, "employees") if row["employee_name"] == "误建可删员工")
+    employee_id = employee["id"]
+    assert any(
+        row["action"] == "employee.create" and str(row["target_id"]) == str(employee_id)
+        for row in rows_for(tmp_path, "admin_operation_logs")
+    )
+    assert any(row["employee_id"] == employee_id for row in rows_for(tmp_path, "employee_store_map"))
+
+    assessment = main.can_hard_delete_employee(employee_id)
+    assert assessment["can_hard_delete"] is True
+    assert "历史日志" not in str(assessment.get("reason_text") or "")
+
+    page = client.get("/admin/employees?filter=safe_delete")
+    assert page.status_code == 200
+    assert "误建可删员工" in page.text
+    assert f'action="/admin/employees/{employee_id}/safe-delete"' in page.text
+
+    deleted = client.post(
+        f"/admin/employees/{employee_id}/safe-delete",
+        data={"csrf_token": csrf_token_for(client, "/admin/employees"), "confirm_delete": "1", "source_scope": "active"},
+        follow_redirects=False,
+    )
+    assert deleted.status_code == 303
+    assert not any(row["id"] == employee_id for row in rows_for(tmp_path, "employees"))
+    assert not any(row["employee_id"] == employee_id for row in rows_for(tmp_path, "employee_store_map"))
+    assert any(row["action"] == "employee.hard_delete" for row in rows_for(tmp_path, "admin_operation_logs"))
+
+
+def test_employee_management_can_create_backend_account_from_employee(tmp_path, monkeypatch):
+    client, main = build_client(tmp_path, monkeypatch, admin_users="admin:123456,staff:123456")
+    logged_in_client(client, "admin", "123456")
+    employee_id = main.create_employee("待开通账号员工", "南京门东店", "店员", "13800006666", "在职", main.load_app_config())
+    role_id = role_id_by_name(tmp_path, "店长")
+
+    page = client.get("/admin/employees")
+    assert page.status_code == 200
+    assert "开通后台账号" in page.text
+    assert f'action="/admin/employees/{employee_id}/create-account"' in page.text
+    routes = {(method, route.path) for route in main.app.routes for method in getattr(route, "methods", set())}
+    assert ("POST", "/admin/employees/{employee_id}/create-account") in routes
+
+    created = client.post(
+        f"/admin/employees/{employee_id}/create-account",
+        data={
+            "csrf_token": csrf_token_for(client, "/admin/employees"),
+            "username": "employee_login_new",
+            "password": "newpass123",
+            "password_confirm": "newpass123",
+            "role_id": str(role_id),
+            "data_scope": "stores",
+            "store_names": "南京门东店",
+            "allow_login": "1",
+            "is_active": "1",
+            "is_assignable": "1",
+        },
+        follow_redirects=False,
+    )
+    assert created.status_code == 303
+    user = next(row for row in rows_for(tmp_path, "admin_users") if row["username"] == "employee_login_new")
+    employee = next(row for row in rows_for(tmp_path, "employees") if row["id"] == employee_id)
+    assert user["employee_id"] == employee_id
+    assert employee["user_id"] == user["id"]
+    assert employee["participate_schedule"] == 1
+    assert user["allow_login"] == 1
+    assert user["is_active"] == 1
+    assert user["is_assignable"] == 1
+    assert "employee_login_new" in client.get("/admin/account?filter=all").text
+    assert any(row["action"] == "employee.create_account" for row in rows_for(tmp_path, "admin_operation_logs"))
+
+    actor_role_id = create_role_with_permissions(tmp_path, "人员维护非系统账号", ["employee.view", "employee.update", "account.create"])
+    update_admin_user_access(tmp_path, "staff", actor_role_id)
+    other_employee_id = main.create_employee("非系统不能开通账号员工", "南京门东店", "店员", "", "在职", main.load_app_config())
+    logged_in_client(client, "staff", "123456")
+    forbidden = client.post(
+        f"/admin/employees/{other_employee_id}/create-account",
+        data={
+            "csrf_token": csrf_token_for(client, "/admin/employees"),
+            "username": "blocked_create_account",
+            "password": "newpass123",
+            "password_confirm": "newpass123",
+            "role_id": str(role_id),
+        },
+        follow_redirects=False,
+    )
+    assert forbidden.status_code == 403
+
+
+def test_employee_actions_are_visible_and_routes_match_real_forms(tmp_path, monkeypatch):
+    client, main = build_client(tmp_path, monkeypatch, admin_users="admin:123456")
+    logged_in_client(client, "admin", "123456")
+    config = main.load_app_config()
+    safe_id = main.create_employee("页面安全删除人员", "南京门东店", "店员", "", "在职", config)
+    no_schedule_id = main.create_employee("页面不排班人员", "南京门东店", "店员", "", "在职", config)
+    archive_id = main.create_employee("页面归档人员", "南京门东店", "店员", "", "在职", config)
+    hidden_id = main.create_employee("页面隐藏人员", "南京门东店", "店员", "", "在职", config)
+    unsafe_id = main.create_employee("页面不可删除人员", "南京门东店", "店员", "", "在职", config)
+    with sqlite3.connect(tmp_path / "tickets.db") as connection:
+        shift_id = connection.execute("SELECT id FROM shift_types ORDER BY id LIMIT 1").fetchone()[0]
+        connection.execute("UPDATE employees SET participate_schedule = 0 WHERE id = ?", (no_schedule_id,))
+        connection.execute(
+            """
+            UPDATE employees
+            SET archived_at = '2026-07-08 10:00:00', archived_by = 'pytest', archive_reason = 'pytest', participate_schedule = 0
+            WHERE id = ?
+            """,
+            (archive_id,),
+        )
+        connection.execute("UPDATE employees SET show_in_employee_management = 0, participate_schedule = 0 WHERE id = ?", (hidden_id,))
+        connection.execute(
+            """
+            INSERT INTO store_schedules (store_name, employee_id, schedule_date, shift_type_id, created_by, created_at, updated_at)
+            VALUES ('南京门东店', ?, '2026-07-08', ?, 'pytest', '2026-07-08 10:00:00', '2026-07-08 10:00:00')
+            """,
+            (unsafe_id, shift_id),
+        )
+
+    active_page = client.get("/admin/employees")
+    archive_page = client.get("/admin/employees?filter=archived")
+    hidden_page = client.get("/admin/employees?filter=hidden")
+    safe_delete_page = client.get("/admin/employees?filter=safe_delete")
+    unsafe_delete_page = client.get("/admin/employees?filter=unsafe_delete")
+
+    assert active_page.status_code == 200
+    assert 'data-employee-row-actions="' in active_page.text
+    for label in ("编辑人员", "归档人员", "隐藏人员", "安全删除", "停止排班", "重新参与排班"):
+        assert label in active_page.text
+    assert archive_page.status_code == 200
+    assert "恢复人员" in archive_page.text
+    assert hidden_page.status_code == 200
+    assert "显示人员" in hidden_page.text
+    assert safe_delete_page.status_code == 200
+    assert "安全删除人员档案" in safe_delete_page.text
+    assert unsafe_delete_page.status_code == 200
+    assert "不能永久删除，可归档或隐藏" in unsafe_delete_page.text
+
+    for action in (
+        f'action="/admin/employees/{safe_id}/safe-delete"',
+        f'action="/admin/employees/{safe_id}/disable-schedule"',
+        f'action="/admin/employees/{no_schedule_id}/enable-schedule"',
+        f'action="/admin/employees/{safe_id}/archive"',
+        f'action="/admin/employees/{safe_id}/hide"',
+        f'action="/admin/employees/{archive_id}/unarchive"',
+        f'action="/admin/employees/{hidden_id}/show"',
+    ):
+        assert action in active_page.text or action in archive_page.text or action in hidden_page.text or action in safe_delete_page.text
+
+    routes = {(method, route.path) for route in main.app.routes for method in getattr(route, "methods", set())}
+    for route_path in (
+        "/admin/employees/{employee_id}/archive",
+        "/admin/employees/{employee_id}/unarchive",
+        "/admin/employees/{employee_id}/hide",
+        "/admin/employees/{employee_id}/show",
+        "/admin/employees/{employee_id}/disable-schedule",
+        "/admin/employees/{employee_id}/enable-schedule",
+        "/admin/employees/{employee_id}/safe-delete",
+    ):
+        assert ("POST", route_path) in routes
+
+    deleted = client.post(
+        f"/admin/employees/{safe_id}/safe-delete",
+        data={"csrf_token": csrf_token_for(client, "/admin/employees"), "confirm_delete": "1", "source_scope": "active"},
+        follow_redirects=False,
+    )
+    assert deleted.status_code == 303
+    assert not any(row["id"] == safe_id for row in rows_for(tmp_path, "employees"))
+
+    archived = client.post(
+        f"/admin/employees/{no_schedule_id}/archive",
+        data={"csrf_token": csrf_token_for(client, "/admin/employees"), "archive_reason": "pytest"},
+        follow_redirects=False,
+    )
+    assert archived.status_code == 303
+    assert "页面不排班人员" not in client.get("/admin/employees").text
+    assert "页面不排班人员" in client.get("/admin/employees?filter=archived").text
+
+    unarchived = client.post(
+        f"/admin/employees/{no_schedule_id}/unarchive",
+        data={"csrf_token": csrf_token_for(client, "/admin/employees?filter=archived")},
+        follow_redirects=False,
+    )
+    assert unarchived.status_code == 303
+    assert "页面不排班人员" in client.get("/admin/employees").text
+
+    hidden = client.post(
+        f"/admin/employees/{no_schedule_id}/hide",
+        data={"csrf_token": csrf_token_for(client, "/admin/employees")},
+        follow_redirects=False,
+    )
+    assert hidden.status_code == 303
+    assert "页面不排班人员" not in client.get("/admin/employees").text
+    assert "页面不排班人员" in client.get("/admin/employees?filter=hidden").text
+
+    shown = client.post(
+        f"/admin/employees/{no_schedule_id}/show",
+        data={"csrf_token": csrf_token_for(client, "/admin/employees?filter=hidden")},
+        follow_redirects=False,
+    )
+    assert shown.status_code == 303
+    assert "页面不排班人员" in client.get("/admin/employees").text
+
+
+def test_account_safe_delete_unlinks_employee_and_blocks_history(tmp_path, monkeypatch):
+    client, main = build_client(tmp_path, monkeypatch, admin_users="admin:123456")
+    logged_in_client(client, "admin", "123456")
+    user_id = create_test_admin_user(tmp_path, "deletable_account", "可删除账号", role_name="店长", allow_login=1)
+    employee_id = main.create_employee("可删除账号", "南京门东店", "店长", "", "在职", main.load_app_config())
+    history_user_id = create_test_admin_user(tmp_path, "history_account", "历史账号", role_name="店长", allow_login=1)
+    with sqlite3.connect(tmp_path / "tickets.db") as connection:
+        connection.execute("UPDATE admin_users SET employee_id = ? WHERE id = ?", (employee_id, user_id))
+        connection.execute("UPDATE employees SET user_id = ?, allow_login = 1, participate_schedule = 1 WHERE id = ?", (user_id, employee_id))
+        connection.execute(
+            """
+            INSERT INTO admin_operation_logs (username, action, target_type, target_id, detail, ip_address, created_at)
+            VALUES ('history_account', 'ticket.update', 'ticket', '1', '{}', '127.0.0.1', '2026-07-06 10:00:00')
+            """
+        )
+
+    page = client.get("/admin/account")
+    assert page.status_code == 200
+    assert "安全删除账号" in page.text
+    assert "解除账号关联" in page.text
+    assert "该账号存在历史登录/操作/工单记录，不能永久删除，可关闭并隐藏。" in page.text
+
+    deleted = client.post(
+        f"/admin/account/users/{user_id}/delete",
+        data={"csrf_token": csrf_token_for(client, "/admin/account"), "confirm_delete": "1"},
+        follow_redirects=False,
+    )
+    assert deleted.status_code == 303
+    assert not any(row["id"] == user_id for row in rows_for(tmp_path, "admin_users"))
+    employee = next(row for row in rows_for(tmp_path, "employees") if row["id"] == employee_id)
+    assert employee["user_id"] is None
+    assert employee["participate_schedule"] == 1
+    assert any(row["action"] == "account.hard_delete" for row in rows_for(tmp_path, "admin_operation_logs"))
+
+    blocked = client.post(
+        f"/admin/account/users/{history_user_id}/delete",
+        data={"csrf_token": csrf_token_for(client, "/admin/account"), "confirm_delete": "1"},
+        follow_redirects=True,
+    )
+    assert blocked.status_code == 400
+    assert "该账号存在历史登录/操作/工单记录，不能永久删除，可关闭并隐藏。" in blocked.text
+    assert any(row["id"] == history_user_id for row in rows_for(tmp_path, "admin_users"))
+
+    hidden = client.post(
+        f"/admin/account/users/{history_user_id}/hide",
+        data={"csrf_token": csrf_token_for(client, "/admin/account")},
+        follow_redirects=False,
+    )
+    assert hidden.status_code == 303
+    hidden_user = next(row for row in rows_for(tmp_path, "admin_users") if row["id"] == history_user_id)
+    assert hidden_user["allow_login"] == 0
+    assert hidden_user["is_active"] == 0
+    assert hidden_user["show_in_account_management"] == 0
+    assert login_admin(client, "history_account", "123456").status_code == 400
+
+
+def test_account_actions_are_visible_and_routes_match_real_forms(tmp_path, monkeypatch):
+    client, main = build_client(tmp_path, monkeypatch, admin_users="admin:123456")
+    logged_in_client(client, "admin", "123456")
+    linked_user_id = create_test_admin_user(tmp_path, "visible_account", "可操作账号", role_name="店长", allow_login=1)
+    disabled_user_id = create_test_admin_user(tmp_path, "disabled_visible_account", "停用可见账号", role_name="店长", allow_login=0, is_active=0)
+    linked_employee_id = main.create_employee("可操作账号", "南京门东店", "店长", "", "在职", main.load_app_config())
+    with sqlite3.connect(tmp_path / "tickets.db") as connection:
+        connection.execute("UPDATE admin_users SET employee_id = ? WHERE id = ?", (linked_employee_id, linked_user_id))
+        connection.execute("UPDATE employees SET user_id = ?, allow_login = 1 WHERE id = ?", (linked_user_id, linked_employee_id))
+
+    account_page = client.get("/admin/account?filter=all")
+
+    assert account_page.status_code == 200
+    assert 'data-account-row-actions="' in account_page.text
+    for label in ("关闭后台账号", "启用后台账号", "隐藏账号", "安全删除账号", "解除账号关联", "重置密码", "进入人员管理"):
+        assert label in account_page.text
+    for action in (
+        f'action="/admin/accounts/{linked_user_id}/disable-login"',
+        f'action="/admin/accounts/{disabled_user_id}/enable-login"',
+        f'action="/admin/accounts/{linked_user_id}/hide"',
+        f'action="/admin/accounts/{linked_user_id}/safe-delete"',
+        f'action="/admin/accounts/{linked_user_id}/unlink-employee"',
+        f'action="/admin/accounts/{linked_user_id}/reset-password"',
+    ):
+        assert action in account_page.text
+
+    routes = {(method, route.path) for route in main.app.routes for method in getattr(route, "methods", set())}
+    for route_path in (
+        "/admin/accounts/{user_id}/disable-login",
+        "/admin/accounts/{user_id}/enable-login",
+        "/admin/accounts/{user_id}/hide",
+        "/admin/accounts/{user_id}/show",
+        "/admin/accounts/{user_id}/unlink-employee",
+        "/admin/accounts/{user_id}/safe-delete",
+        "/admin/accounts/{user_id}/reset-password",
+    ):
+        assert ("POST", route_path) in routes
+
+    unlinked = client.post(
+        f"/admin/accounts/{linked_user_id}/unlink-employee",
+        data={"csrf_token": csrf_token_for(client, "/admin/account")},
+        follow_redirects=False,
+    )
+    assert unlinked.status_code == 303
+    user = next(row for row in rows_for(tmp_path, "admin_users") if row["id"] == linked_user_id)
+    employee = next(row for row in rows_for(tmp_path, "employees") if row["id"] == linked_employee_id)
+    assert user["employee_id"] is None
+    assert employee["user_id"] is None
+
+    disabled = client.post(
+        f"/admin/accounts/{linked_user_id}/disable-login",
+        data={"csrf_token": csrf_token_for(client, "/admin/account")},
+        follow_redirects=False,
+    )
+    assert disabled.status_code == 303
+    user = next(row for row in rows_for(tmp_path, "admin_users") if row["id"] == linked_user_id)
+    assert user["allow_login"] == 0
+    assert user["is_active"] == 0
+    assert user["is_assignable"] == 0
+
+    enabled = client.post(
+        f"/admin/accounts/{linked_user_id}/enable-login",
+        data={"csrf_token": csrf_token_for(client, "/admin/account")},
+        follow_redirects=False,
+    )
+    assert enabled.status_code == 303
+    user = next(row for row in rows_for(tmp_path, "admin_users") if row["id"] == linked_user_id)
+    assert user["allow_login"] == 1
+    assert user["is_active"] == 1
+
+    hidden = client.post(
+        f"/admin/accounts/{linked_user_id}/hide",
+        data={"csrf_token": csrf_token_for(client, "/admin/account")},
+        follow_redirects=False,
+    )
+    assert hidden.status_code == 303
+    user = next(row for row in rows_for(tmp_path, "admin_users") if row["id"] == linked_user_id)
+    assert user["show_in_account_management"] == 0
+    assert "可操作账号" not in client.get("/admin/account").text
+    assert "可操作账号" in client.get("/admin/account?filter=hidden").text
+
+    shown = client.post(
+        f"/admin/accounts/{linked_user_id}/show",
+        data={"csrf_token": csrf_token_for(client, "/admin/account?filter=hidden")},
+        follow_redirects=False,
+    )
+    assert shown.status_code == 303
+    user = next(row for row in rows_for(tmp_path, "admin_users") if row["id"] == linked_user_id)
+    assert user["show_in_account_management"] == 1
+    assert "可操作账号" in client.get("/admin/account").text
+
+
+def test_delete_protection_requires_system_admin_and_preserves_last_admin(tmp_path, monkeypatch):
+    client, main = build_client(tmp_path, monkeypatch, admin_users="admin:123456,actor:123456")
+    system_role_id = role_id_by_name(tmp_path, "系统管理员")
+    actor_role_id = create_role_with_permissions(
+        tmp_path,
+        "删除误授权角色",
+        ["employee.view", "employee.update", "employee.hard_delete", "account.view", "account.update"],
+    )
+    update_admin_user_access(tmp_path, "admin", system_role_id)
+    update_admin_user_access(tmp_path, "actor", actor_role_id)
+    target_account_id = create_test_admin_user(tmp_path, "delete_target", "删除目标", role_name="店长", allow_login=1)
+    employee_id = main.create_employee("非系统删除人员", "南京门东店", "店员", "", "在职", main.load_app_config())
+
+    logged_in_client(client, "actor", "123456")
+    employee_delete = client.post(
+        f"/admin/employees/{employee_id}/hard-delete",
+        data={"csrf_token": csrf_token_for(client, "/admin/employees"), "confirm_delete": "1", "source_scope": "active"},
+        follow_redirects=False,
+    )
+    assert employee_delete.status_code == 403
+    account_delete = client.post(
+        f"/admin/account/users/{target_account_id}/delete",
+        data={"csrf_token": csrf_token_for(client, "/admin/employees"), "confirm_delete": "1"},
+        follow_redirects=False,
+    )
+    assert account_delete.status_code == 403
+
+    logged_in_client(client, "admin", "123456")
+    actor_id = user_id_by_username(tmp_path, "actor")
+    client.post(
+        f"/admin/account/users/{actor_id}/delete",
+        data={"csrf_token": csrf_token_for(client, "/admin/account"), "confirm_delete": "1"},
+        follow_redirects=False,
+    )
+    admin_id = user_id_by_username(tmp_path, "admin")
+    last_admin_delete = client.post(
+        f"/admin/account/users/{admin_id}/delete",
+        data={"csrf_token": csrf_token_for(client, "/admin/account"), "confirm_delete": "1"},
+        follow_redirects=True,
+    )
+    assert last_admin_delete.status_code == 400
+    assert "不能删除最后一个可登录系统管理员" in last_admin_delete.text
+    assert any(row["id"] == admin_id for row in rows_for(tmp_path, "admin_users"))
+
+
+def test_account_roles_and_permission_overview_are_system_admin_only(tmp_path, monkeypatch):
+    client, _ = build_client(
+        tmp_path,
+        monkeypatch,
+        admin_users="admin:123456,accountviewer:123456,roleviewer:123456",
+    )
+    system_role_id = role_id_by_name(tmp_path, "系统管理员")
+    account_viewer_role_id = create_role_with_permissions(
+        tmp_path,
+        "仅账号权限测试角色",
+        ["employee.view", "account.view", "account.update", "account.create", "account.reset_password"],
+    )
+    role_viewer_role_id = create_role_with_permissions(
+        tmp_path,
+        "仅角色权限测试角色",
+        ["employee.view", "role.view", "role.update"],
+    )
+    update_admin_user_access(tmp_path, "admin", system_role_id)
+    update_admin_user_access(tmp_path, "accountviewer", account_viewer_role_id)
+    update_admin_user_access(tmp_path, "roleviewer", role_viewer_role_id)
+
+    logged_in_client(client, "admin", "123456")
+    assert client.get("/admin/account").status_code == 200
+    assert client.get("/admin/roles").status_code == 200
+    assert client.get("/admin/permission-overview").status_code == 200
+
+    logged_in_client(client, "accountviewer", "123456")
+    account_page = client.get("/admin/account")
+    assert account_page.status_code == 403
+    assert "<html" in account_page.text.lower()
+
+    logged_in_client(client, "roleviewer", "123456")
+    roles_page = client.get("/admin/roles")
+    overview_page = client.get("/admin/permission-overview")
+    assert roles_page.status_code == 403
+    assert overview_page.status_code == 403
+    assert "<html" in roles_page.text.lower()
+    assert "<html" in overview_page.text.lower()
+
+
+def test_employees_hides_account_sensitive_zone_for_non_system_admin(tmp_path, monkeypatch):
+    client, main = build_client(tmp_path, monkeypatch, admin_users="admin:123456,ops:123456")
+    system_role_id = role_id_by_name(tmp_path, "系统管理员")
+    ops_role_id = create_role_with_permissions(
+        tmp_path,
+        "人员基础信息测试角色",
+        ["employee.view", "employee.update", "schedule.view", "schedule.create"],
+    )
+    update_admin_user_access(tmp_path, "admin", system_role_id)
+    update_admin_user_access(tmp_path, "ops", ops_role_id)
+    user_id = create_test_admin_user(
+        tmp_path,
+        "sensitive_login",
+        "敏感账号人员",
+        role_name="运营经理",
+        allow_login=1,
+        is_assignable=1,
+    )
+    employee_id = main.create_employee("敏感账号人员", "南京门东店", "店长", "13800003001", "在职", main.load_app_config())
+    with sqlite3.connect(tmp_path / "tickets.db") as connection:
+        connection.execute(
+            "UPDATE employees SET user_id = ?, allow_login = 1, participate_schedule = 1 WHERE id = ?",
+            (user_id, employee_id),
+        )
+        connection.execute("UPDATE admin_users SET employee_id = ? WHERE id = ?", (employee_id, user_id))
+
+    logged_in_client(client, "ops", "123456")
+    page = client.get("/admin/employees")
+
+    assert page.status_code == 200
+    assert "敏感账号人员" in page.text
+    assert "账号权限信息仅系统管理员可见" in page.text
+    assert "sensitive_login" not in page.text
+    assert "系统角色" not in page.text
+    assert "数据范围" not in page.text
+    assert "重置密码" not in page.text
+    assert "账号权限管理" not in page.text
+    assert "可指派" not in page.text
+
+    logged_in_client(client, "admin", "123456")
+    admin_page = client.get("/admin/employees")
+
+    assert admin_page.status_code == 200
+    assert "账号权限敏感区" in admin_page.text
+    assert "sensitive_login" in admin_page.text
+    assert "系统角色" in admin_page.text
+    assert "数据范围" in admin_page.text
+    assert "可指派" in admin_page.text
+
+
+def test_non_system_admin_cannot_post_account_sensitive_changes(tmp_path, monkeypatch):
+    client, main = build_client(tmp_path, monkeypatch, admin_users="actor:123456")
+    actor_role_id = create_role_with_permissions(
+        tmp_path,
+        "账号误授权测试角色",
+        [
+            "employee.view",
+            "employee.update",
+            "employee.create",
+            "account.view",
+            "account.update",
+            "account.create",
+            "account.disable",
+            "account.enable",
+            "account.reset_password",
+        ],
+    )
+    update_admin_user_access(tmp_path, "actor", actor_role_id)
+    target_user_id = create_test_admin_user(
+        tmp_path,
+        "target_account",
+        "目标账号",
+        role_name="运营经理",
+        allow_login=1,
+        is_assignable=1,
+    )
+    role_id = role_id_by_name(tmp_path, "店长")
+    orphan_user_id = create_test_admin_user(tmp_path, "orphan_account", "孤立账号", role_name="店长", allow_login=1)
+    linked_user_id = create_test_admin_user(tmp_path, "linked_account", "已关联账号", role_name="店长", allow_login=1)
+    linked_employee_id = main.create_employee("已关联账号", "南京门东店", "店长", "", "在职", main.load_app_config())
+    with sqlite3.connect(tmp_path / "tickets.db") as connection:
+        connection.execute("UPDATE admin_users SET employee_id = ? WHERE id = ?", (linked_employee_id, linked_user_id))
+        connection.execute("UPDATE employees SET user_id = ?, participate_schedule = 1 WHERE id = ?", (linked_user_id, linked_employee_id))
+    logged_in_client(client, "actor", "123456")
+    csrf_token = csrf_token_for(client, "/admin/employees")
+
+    before_target = next(row for row in rows_for(tmp_path, "admin_users") if row["id"] == target_user_id)
+    update = client.post(
+        f"/admin/account/users/{target_user_id}/update",
+        data={
+            "csrf_token": csrf_token,
+            "employee_name": "目标账号",
+            "employee_role": "店长",
+            "allow_login": "0",
+            "username": "target_account",
+            "role_id": str(role_id),
+            "data_scope": "stores",
+            "store_names": "南京门东店",
+            "is_assignable": "0",
+            "is_active": "1",
+        },
+        follow_redirects=False,
+    )
+    assert update.status_code == 403
+    assert "<html" in update.text.lower()
+    after_target = next(row for row in rows_for(tmp_path, "admin_users") if row["id"] == target_user_id)
+    assert after_target["allow_login"] == before_target["allow_login"]
+    assert after_target["role_id"] == before_target["role_id"]
+    assert after_target["data_scope"] == before_target["data_scope"]
+    assert after_target["is_assignable"] == before_target["is_assignable"]
+
+    reset = client.post(
+        f"/admin/account/users/{target_user_id}/reset-password",
+        data={"csrf_token": csrf_token, "password": "newpass123", "password_confirm": "newpass123"},
+        follow_redirects=False,
+    )
+    assert reset.status_code == 403
+
+    create = client.post(
+        "/admin/account/users",
+        data={
+            "csrf_token": csrf_token,
+            "employee_name": "新后台账号",
+            "allow_login": "1",
+            "username": "new_sensitive_account",
+            "password": "newpass123",
+            "password_confirm": "newpass123",
+            "role_id": str(role_id),
+            "data_scope": "all",
+            "is_active": "1",
+        },
+        follow_redirects=False,
+    )
+    assert create.status_code == 403
+    assert not any(row["username"] == "new_sensitive_account" for row in rows_for(tmp_path, "admin_users"))
+
+    build = client.post(
+        "/admin/employees/build-from-account",
+        data={
+            "csrf_token": csrf_token,
+            "user_id": str(orphan_user_id),
+            "employee_name": "孤立账号",
+            "role": "店长",
+            "primary_store_name": "南京门东店",
+            "store_names": ["南京门东店"],
+        },
+        follow_redirects=False,
+    )
+    assert build.status_code == 403
+    assert not any(row["user_id"] == orphan_user_id for row in rows_for(tmp_path, "employees"))
+
+    unlink = client.post(
+        f"/admin/employees/{linked_employee_id}/unlink-account",
+        data={"csrf_token": csrf_token},
+        follow_redirects=False,
+    )
+    assert unlink.status_code == 403
+    linked_user = next(row for row in rows_for(tmp_path, "admin_users") if row["id"] == linked_user_id)
+    linked_employee = next(row for row in rows_for(tmp_path, "employees") if row["id"] == linked_employee_id)
+    assert linked_user["employee_id"] == linked_employee_id
+    assert linked_employee["user_id"] == linked_user_id
+
+
+def test_schedule_admin_can_update_schedule_identity_without_account_access(tmp_path, monkeypatch):
+    client, main = build_client(tmp_path, monkeypatch, admin_users="scheduler:123456")
+    schedule_role_id = create_role_with_permissions(
+        tmp_path,
+        "排班身份维护测试角色",
+        ["employee.view", "employee.update", "schedule.view", "schedule.create"],
+    )
+    update_admin_user_access(tmp_path, "scheduler", schedule_role_id)
+    employee_id = main.create_employee("排班测试员工", "南京门东店", "店员", "", "在职", main.load_app_config())
+    with sqlite3.connect(tmp_path / "tickets.db") as connection:
+        connection.execute("UPDATE employees SET participate_schedule = 0 WHERE id = ?", (employee_id,))
+
+    logged_in_client(client, "scheduler", "123456")
+    response = client.post(
+        f"/admin/employees/{employee_id}/schedule",
+        data={"csrf_token": csrf_token_for(client, "/admin/employees"), "participate_schedule": "1"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    updated = next(row for row in rows_for(tmp_path, "employees") if row["id"] == employee_id)
+    assert updated["participate_schedule"] == 1
+
+
+def test_employees_page_applies_store_data_scope_for_regional_manager(tmp_path, monkeypatch):
+    client, main = build_client(tmp_path, monkeypatch, admin_users="regional:123456")
+    regional_role_id = create_role_with_permissions(
+        tmp_path,
+        "区域人员查看测试角色",
+        ["employee.view", "schedule.view"],
+    )
+    update_admin_user_access(tmp_path, "regional", regional_role_id, data_scope="stores", store_names="南京门东店")
+    main.create_employee("南京范围员工", "南京门东店", "店员", "", "在职", main.load_app_config())
+    main.create_employee("南昌范围员工", "南昌万寿宫店", "店员", "", "在职", main.load_app_config())
+
+    logged_in_client(client, "regional", "123456")
+    page = client.get("/admin/employees")
+
+    assert page.status_code == 200
+    assert "南京范围员工" in page.text
+    assert "南昌范围员工" not in page.text
 
 
 def test_person_account_management_creates_login_schedule_and_combined_people(tmp_path, monkeypatch):
@@ -1619,27 +2537,26 @@ def test_person_status_flags_control_login_schedule_handlers_and_password_reset(
     assert "mutablemanager" not in client.get("/api/handlers").json()["handlers"]
 
 
-def test_employees_page_is_schedule_people_view_with_unified_management_hint(tmp_path, monkeypatch):
+def test_employees_page_is_not_limited_to_schedule_people(tmp_path, monkeypatch):
     client, main = build_client(tmp_path, monkeypatch)
     logged_in_client(client)
-    main.create_employee("排班视图员工", "南京门东店", "店员", "", "在职", main.load_app_config())
+    main.create_employee("组织架构员工", "南京门东店", "店员", "", "在职", main.load_app_config())
     with sqlite3.connect(tmp_path / "tickets.db") as connection:
         connection.execute(
             """
             UPDATE employees
             SET participate_schedule = 0
-            WHERE employee_name = '排班视图员工'
+            WHERE employee_name = '组织架构员工'
             """
         )
 
     page = client.get("/admin/employees")
 
     assert page.status_code == 200
-    assert "排班人员视图" in page.text
-    assert "人员资料请统一到“人员与账号管理”维护" in page.text
-    assert 'href="/admin/account?filter=participate_schedule"' in page.text
-    assert "排班视图员工" not in page.text
-    assert 'data-drawer-open="employee-create-drawer"' not in page.text
+    assert "人员/组织架构管理" in page.text
+    assert "人员资料统一在这里查看和维护" in page.text
+    assert "组织架构员工" in page.text
+    assert "不参与排班" in page.text
 
 
 def test_personnel_governance_detects_candidates_and_ignore_roundtrip(tmp_path, monkeypatch):
@@ -1932,12 +2849,8 @@ def test_personnel_governance_permissions_detail_and_permission_overview(tmp_pat
     )
     assert rows_for(tmp_path, "personnel_match_ignores") == []
 
-    detail = client.get(f"/admin/account/detail?user_id={user_id}&employee_id={employee_id}")
-    assert detail.status_code == 200
-    assert "人员详情" in detail.text
-    assert "登录账号信息" in detail.text
-    assert "业务身份" in detail.text
-    assert "治理记录" in detail.text
+    assert_html_forbidden(client.get(f"/admin/account/detail?user_id={user_id}&employee_id={employee_id}"))
+    assert_html_forbidden(client.get("/admin/permission-overview"))
 
     context = main.permission_overview_context(main.app)
     assert context["high_risk_uncontrolled_count"] == 0
@@ -2126,6 +3039,173 @@ def test_phase2_schedule_employee_and_roles_permissions_are_enforced(tmp_path, m
     assert any(row["action"] == "role.permissions.update" for row in operation_logs)
 
 
+def test_roles_page_uses_compact_single_role_permission_workspace(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch)
+    for legacy_role in ("运营管理", "商品采购", "排班管理员", "只读账号"):
+        create_role_with_permissions(tmp_path, legacy_role, ["ticket.view"])
+    logged_in_client(client)
+
+    response = client.get("/admin/roles")
+
+    assert response.status_code == 200
+    text = response.text
+    assert 'class="role-permission-workspace"' in text
+    assert "data-role-picker-panel" in text
+    assert "data-role-list-search" in text
+    assert 'data-role-filter="current"' in text
+    assert 'data-role-filter="legacy"' in text
+    assert 'data-role-filter="system"' in text
+    assert 'data-role-category="legacy"' in text
+    assert "data-role-editor-panel" in text
+    assert "data-role-active-name" in text
+    assert "data-role-selected-count" in text
+    assert "data-role-select-module" in text
+    assert "data-role-clear-module" in text
+    assert "data-restore-defaults" in text
+    assert re.search(r"<details[^>]+class=\"[^\"]*permission-module", text)
+    assert "permission-module-summary" in text
+    assert "data-permission-module-body" in text
+    assert "permission-module" in text
+    assert "data-module-selected-count" in text
+    assert "permission-check-grid compact-permission-grid" in text
+    assert "data-role-permission-search" in text
+    assert "data-role-module-filter" in text
+    assert text.count("data-role-editor-panel") == len(rows_for(tmp_path, "admin_roles"))
+    for role_name in (
+        "系统管理员",
+        "总部管理层",
+        "采购",
+        "财务",
+        "设计",
+        "运营经理",
+        "区域经理",
+        "店长",
+        "店员",
+        "兼职",
+        "运营管理",
+        "商品采购",
+        "排班管理员",
+        "只读账号",
+    ):
+        assert role_name in text
+
+
+def test_roles_page_javascript_guards_dirty_switch_and_restore_defaults():
+    script = (PROJECT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+
+    assert "data-role-list-search" in script
+    assert "data-role-filter" in script
+    assert "data-role-dirty" in script
+    assert "beforeunload" in script
+    assert "data-restore-defaults" in script
+    assert "confirm(" in script
+
+
+def test_roles_page_permission_modules_keep_expandable_state_contract(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch, admin_users="admin:123456")
+    logged_in_client(client, "admin", "123456")
+
+    page = client.get("/admin/roles")
+    script = (PROJECT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+    style = (PROJECT_DIR / "static" / "style.css").read_text(encoding="utf-8")
+
+    assert page.status_code == 200
+    assert 'data-role-permission-page="true"' in page.text
+    assert 'data-role-module-filter="all"' in page.text
+    assert 'data-permission-module="' in page.text
+    assert re.search(r"<details[^>]+class=\"[^\"]*permission-module[^\"]*\"[^>]+open", page.text)
+    assert 'data-filter-hidden="false"' in page.text
+    assert "data-permission-module-toggle" not in page.text
+    assert "data-permission-module-body" in page.text
+    assert "permission-module-summary" in page.text
+    assert "data-role-module-toggle" not in page.text
+    assert "<details" in page.text
+    assert 'href="#"' not in page.text
+    assert "event.target.closest(\"[data-permission-module-toggle]\")" not in script
+    assert "syncRoleModuleExpandedState" not in script
+    assert "setRoleModuleExpanded" not in script
+    assert 'activeRolePermissionModule === "all"' in script
+    assert "dataset.filterHidden" in script
+    assert "body.hidden" not in script
+    assert ".permission-module-body[hidden]" not in style
+    assert '.permission-module[data-expanded="false"] [data-permission-module-body]' not in style
+    assert "rolePermissionMatchesSearch" in script
+    assert "setCurrentRoleModuleChecked(form, true)" in script
+    assert "setCurrentRoleModuleChecked(form, false)" in script
+    for module_name in ("工单", "排班", "员工", "配置", "账号", "角色", "系统"):
+        assert module_name in page.text
+
+
+def test_management_delete_reasons_use_compact_disclosure_instead_of_action_column_long_notes(tmp_path, monkeypatch):
+    client, main = build_client(tmp_path, monkeypatch, admin_users="admin:123456")
+    logged_in_client(client, "admin", "123456")
+    employee_id = main.create_employee("有排班原因员工", "南京门东店", "店员", "", "在职", main.load_app_config())
+    residue_employee_id = main.create_employee("治理残留原因员工", "南京门东店", "店员", "", "在职", main.load_app_config())
+    history_user_id = create_test_admin_user(tmp_path, "reason_history_account", "原因账号", role_name="店长", allow_login=1)
+    with sqlite3.connect(tmp_path / "tickets.db") as connection:
+        shift_id = connection.execute("SELECT id FROM shift_types ORDER BY id LIMIT 1").fetchone()[0]
+        connection.execute(
+            """
+            INSERT INTO store_schedules (store_name, employee_id, schedule_date, shift_type_id, created_by, created_at, updated_at)
+            VALUES ('南京门东店', ?, '2026-07-08', ?, 'pytest', '2026-07-08 10:00:00', '2026-07-08 10:00:00')
+            """,
+            (employee_id, shift_id),
+        )
+        connection.execute(
+            "UPDATE employees SET show_in_employee_management = 0, participate_schedule = 0 WHERE id = ?",
+            (residue_employee_id,),
+        )
+        connection.execute(
+            """
+            INSERT INTO admin_operation_logs (username, action, target_type, target_id, detail, ip_address, created_at)
+            VALUES ('reason_history_account', 'ticket.update', 'ticket', '1', '{}', '127.0.0.1', '2026-07-08 10:00:00')
+            """
+        )
+
+    employees_page = client.get("/admin/employees?filter=unsafe_delete")
+    account_page = client.get("/admin/account?filter=unsafe_delete")
+    governance_page = client.get("/admin/personnel-governance?tab=historical")
+    style = (PROJECT_DIR / "static" / "style.css").read_text(encoding="utf-8")
+
+    for response in (employees_page, account_page, governance_page):
+        assert response.status_code == 200
+        assert "delete-reason-box" in response.text
+        assert "reason-popover" not in response.text
+        assert "delete-reason-compact" not in response.text
+        assert "查看原因" not in response.text
+    assert '<p class="delete-block-note">该人员存在历史排班/工单/账号记录' not in employees_page.text
+    assert '<p class="delete-block-note">该账号存在历史登录/操作/工单记录' not in account_page.text
+    assert "delete-status-cell" in employees_page.text
+    assert "delete-status-cell" in account_page.text
+    assert ".delete-reason-box" in style
+    assert "writing-mode: horizontal-tb" in style
+    assert "white-space: normal" in style
+    assert "background: #fff7ed" in style
+    assert "border: 1px solid #fdba74" in style
+
+
+def test_sidebar_account_actions_use_dark_sidebar_footer_skin():
+    template = (PROJECT_DIR / "templates" / "base_admin.html").read_text(encoding="utf-8")
+    style = (PROJECT_DIR / "static" / "style.css").read_text(encoding="utf-8")
+
+    assert "sidebar-user-card" in template
+    assert "sidebar-account-button switch-account" in template
+    assert "sidebar-account-button logout-account" in template
+    assert ".sidebar-nav" in style and "overflow-y: auto" in style
+    assert ".sidebar-user-card" in style
+    assert "border: 1px solid rgba(255, 255, 255, 0.12)" in style
+    assert ".sidebar-account-button.switch-account" in style
+    assert "background: rgba(255, 255, 255, 0.08)" in style
+    assert "background: rgba(255, 255, 255, 0.14)" in style
+    assert ".sidebar-account-button.logout-account" in style
+    assert "background: rgba(239, 68, 68, 0.12)" in style
+    assert "background: rgba(239, 68, 68, 0.22)" in style
+    assert "height: 100vh" in style
+    assert ".main-layout" in style and "overflow-y: auto" in style
+    assert ".roles-shell" in style and "height: calc(100vh" in style
+    assert ".role-permission-scroll" in style and "overscroll-behavior: contain" in style
+
+
 def test_phase3_permission_service_scope_audit_and_overview(tmp_path, monkeypatch):
     client, main = build_client(
         tmp_path,
@@ -2248,10 +3328,10 @@ def test_phase3_p0_routes_use_html_permission_denials(tmp_path, monkeypatch):
         "/admin/settings",
         "/admin/system",
         "/admin/route-health",
-        "/admin/permission-overview",
     ):
         allowed = client.get(path)
         assert allowed.status_code == 200, path
+    assert_html_forbidden(client.get("/admin/permission-overview"))
 
 
 def test_phase3_permission_and_audit_legacy_paths_are_consolidated():
@@ -2444,7 +3524,7 @@ def test_phase4_audit_service_records_key_write_operations(tmp_path, monkeypatch
     assert "employee.create" in actions
     assert "employee.update" in actions
     assert "schedule.create" in actions
-    assert "schedule.delete" in actions
+    assert "schedule.cancel" in actions
     assert "ticket.comment.create" in actions
     assert "ticket.participant.create" in actions
 
@@ -2883,7 +3963,7 @@ def test_p1b_template_validation_keeps_auto_assignment_and_sla(tmp_path, monkeyp
 
 def test_phase4_templates_use_has_perm_for_privileged_controls():
     expectations = {
-        "templates/base_admin.html": ["account.view", "system.view", "role.view", "system.route_health", "ticket.view_trash", "ticket.delete"],
+        "templates/base_admin.html": ["account.view", "system.view", "system.route_health", "ticket.view_trash", "ticket.delete"],
         "templates/admin.html": ["ticket.export", "ticket.archive", "ticket.delete"],
         "templates/ticket_detail.html": ["ticket.comment", "ticket.assign", "ticket.update", "ticket.delete", "ticket.archive", "ticket.hard_delete"],
         "templates/employees.html": ["employee.create", "employee.update", "employee.archive", "employee.delete", "employee.hard_delete"],
@@ -2895,6 +3975,7 @@ def test_phase4_templates_use_has_perm_for_privileged_controls():
         text = (PROJECT_DIR / relative_path).read_text(encoding="utf-8")
         for permission in permissions:
             assert f"has_perm('{permission}')" in text, f"{relative_path} missing {permission}"
+    assert "is_system_admin()" in (PROJECT_DIR / "templates" / "base_admin.html").read_text(encoding="utf-8")
 
 
 def test_ticket_detail_workbench_comment_modes_and_close_prompt(tmp_path, monkeypatch):
@@ -3964,6 +5045,7 @@ def test_base_admin_navigation_uses_only_canonical_admin_paths():
         "/admin/personnel-governance",
         "/admin/audit-logs",
         "/admin/roles",
+        "/admin/permission-overview",
         "/admin/route-health",
         "/admin/system",
         "/admin/embedded-pages",
@@ -4979,7 +6061,7 @@ def test_employee_primary_store_bindings_and_archive_trash_workflow(tmp_path, mo
         follow_redirects=False,
     )
     assert hard_delete_blocked.status_code == 303
-    assert "该员工已有排班记录，建议归档而不是永久删除" in client.get(hard_delete_blocked.headers["location"]).text
+    assert "存在历史排班" in client.get(hard_delete_blocked.headers["location"]).text
     assert rows_for(tmp_path, "employees")
 
 
@@ -5006,6 +6088,47 @@ def test_schedule_page_exposes_bulk_employee_and_date_controls(tmp_path, monkeyp
     assert "schedule-bulk-summary" in page.text
     assert "王早班" in page.text
     assert "值班员" in page.text
+
+
+def test_schedule_bulk_date_picker_is_stable_checkbox_grid(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch)
+    logged_in_client(client)
+    create_schedule_employee(client, "批量日期员工", role="店员")
+
+    page = client.get("/admin/schedules?store_name=南京门东店&month=2026-07")
+
+    assert page.status_code == 200
+    assert "批量排班" in page.text
+    assert "data-bulk-date-calendar" in page.text
+    assert "data-bulk-date-card" in page.text
+    assert 'name="schedule_dates"' in page.text
+
+    bulk_match = re.search(
+        r'<div class="[^"]*bulk-date-calendar[^"]*"[^>]*data-bulk-date-calendar[^>]*>(?P<html>[\s\S]*?)</div>\s*</div>\s*<div class="schedule-mode-segment">',
+        page.text,
+    )
+    assert bulk_match, page.text
+    bulk_calendar_html = bulk_match.group("html")
+    for forbidden in ("<details", "<summary", 'href="#"', "selected_date", "schedule-day-detail", "data-day-detail"):
+        assert forbidden not in bulk_calendar_html
+    assert re.search(r'<input\b[^>]*name="schedule_dates"[^>]*type="checkbox"', bulk_calendar_html)
+    assert re.search(r'<label\b[^>]*class="[^"]*bulk-date-card', bulk_calendar_html)
+
+    for label in ("全选本月", "只选工作日", "只选周末", "只选节假日", "清空日期"):
+        assert re.search(rf'<button\b[^>]*type="button"[^>]*>[^<]*{label}', page.text), label
+
+    style_css = (PROJECT_DIR / "static" / "style.css").read_text(encoding="utf-8")
+    assert re.search(r"\.bulk-date-calendar\s*\{[^}]*display:\s*grid", style_css, re.S)
+    assert re.search(r"\.bulk-date-calendar\s*\{[^}]*align-items:\s*start", style_css, re.S)
+    assert re.search(r"\.bulk-date-card\s*\{[^}]*max-height:\s*88px", style_css, re.S)
+    assert re.search(r"\.bulk-date-card\s*\{[^}]*overflow:\s*hidden", style_css, re.S)
+    assert "height: 100vh" not in re.search(r"\.bulk-date-card\s*\{(?P<css>[^}]*)\}", style_css, re.S).group("css")
+    assert "min-height: 100vh" not in re.search(r"\.bulk-date-card\s*\{(?P<css>[^}]*)\}", style_css, re.S).group("css")
+
+    app_js = (PROJECT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+    assert "data-bulk-date-card" in app_js
+    assert "schedule-day-detail" not in app_js
+    assert "selected_date" not in app_js
 
 
 def test_schedule_page_has_saas_layers_and_three_views(tmp_path, monkeypatch):
@@ -5048,7 +6171,7 @@ def test_schedule_page_has_saas_layers_and_three_views(tmp_path, monkeypatch):
     assert "schedule-calendar-day" in calendar_page.text
     assert "schedule-calendar-shift" in calendar_page.text
     assert "data-schedule-edit" in calendar_page.text
-    assert re.search(r"<button\b[^>]*\btype=(['\"])button\1[^>]*\bdata-schedule-edit\b", calendar_page.text)
+    assert re.search(r"<(?:button|article)\b[^>]*\bdata-schedule-edit\b", calendar_page.text)
 
     employee_page = client.get(
         "/admin/schedules",
@@ -5284,6 +6407,69 @@ def test_schedule_layout_hash_and_preserve_scroll_contract(tmp_path, monkeypatch
     assert "window.location.hash" in app_js
 
 
+def test_schedule_calendar_uses_single_selected_date_detail_panel(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch)
+    logged_in_client(client)
+    create_schedule_employee(client, "CalendarPanelEmp")
+
+    page = client.get("/admin/schedules?store_name=南京门东店&month=2026-07&view_mode=calendar&selected_date=2026-07-06")
+
+    assert page.status_code == 200
+    assert page.text.count('id="schedule-day-detail"') == 1
+    assert "当日排班详情" in page.text
+    assert "2026-07-06" in page.text
+    assert "当日暂无排班" in page.text
+    assert 'class="calendar-day-detail' not in page.text
+    assert "data-day-detail-panel" not in page.text
+    assert re.search(r"<article\b[^>]*schedule-calendar-day[\s\S]*?</details>", page.text) is None
+    assert 'href="#"' not in page.text
+    assert "selected_date=2026-07-06#schedule-day-detail" in page.text
+
+    style_css = (PROJECT_DIR / "static" / "style.css").read_text(encoding="utf-8")
+    assert re.search(r"\.schedule-calendar-summary\s*\{[^}]*align-items:\s*start", style_css, re.S)
+    assert ".schedule-day-detail-panel" in style_css
+    assert re.search(r"\.schedule-day-detail-panel\s*\{[^}]*max-height:\s*420px", style_css, re.S)
+    assert re.search(r"\.schedule-day-detail-panel\s*\{[^}]*overflow:\s*auto", style_css, re.S)
+    assert "calendar-day-detail[open]" not in style_css
+
+
+def test_schedule_selected_date_detail_panel_shows_rows(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch)
+    logged_in_client(client)
+    create_schedule_employee(client, "CalendarPanelEmp")
+
+    create_response = admin_post(
+        client,
+        "/admin/schedules",
+        data={
+            "store_name": "南京门东店",
+            "employee_ids": ["1"],
+            "schedule_dates": ["2026-07-08"],
+            "shift_type_id": "1",
+            "overwrite_existing": "1",
+        },
+        follow_redirects=False,
+    )
+    assert create_response.status_code == 303
+
+    page = client.get("/admin/schedules?store_name=南京门东店&month=2026-07&view_mode=calendar&selected_date=2026-07-08")
+
+    assert page.status_code == 200
+    assert page.text.count('id="schedule-day-detail"') == 1
+    assert "当日排班详情" in page.text
+    assert "CalendarPanelEmp" in page.text
+    assert "南京门东店" in page.text
+    assert "早班" in page.text
+    assert "当日暂无排班" not in page.text
+    assert 'class="calendar-day-detail' not in page.text
+    assert "data-day-detail-panel" not in page.text
+    assert 'href="#"' not in page.text
+
+    app_js = (PROJECT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+    assert "calendar-day-detail" not in app_js
+    assert "data-day-detail-panel" not in app_js
+
+
 def test_bulk_schedule_creates_updates_and_skips_existing_rows(tmp_path, monkeypatch):
     client, _ = build_client(tmp_path, monkeypatch)
     logged_in_client(client)
@@ -5358,6 +6544,153 @@ def test_bulk_schedule_creates_updates_and_skips_existing_rows(tmp_path, monkeyp
     assert "跳过 6 条" in client.get(skip_bulk.headers["location"]).text
 
 
+def test_schedule_cancel_keeps_auditable_row_and_excludes_default_views(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch)
+    logged_in_client(client)
+    create_schedule_employee(client, "可取消员工")
+
+    create_response = admin_post(
+        client,
+        "/admin/schedules",
+        data={
+            "store_name": "南京门东店",
+            "employee_ids": ["1"],
+            "schedule_dates": ["2026-07-08"],
+            "shift_type_id": "1",
+            "note": "上线前演练",
+            "overwrite_existing": "1",
+        },
+        follow_redirects=False,
+    )
+    assert create_response.status_code == 303
+
+    cancel_response = admin_post(
+        client,
+        "/admin/schedules/1/cancel",
+        data={"cancel_reason": "员工请假", "return_url": "/admin/schedules?store_name=南京门东店&month=2026-07"},
+        follow_redirects=False,
+    )
+
+    assert cancel_response.status_code == 303
+    assert cancel_response.headers["location"].startswith("/admin/schedules?store_name=")
+    schedule = rows_for(tmp_path, "store_schedules")[0]
+    assert schedule["is_cancelled"] == 1
+    assert schedule["cancelled_at"]
+    assert schedule["cancelled_by"] == ADMIN_AUTH[0]
+    assert schedule["cancel_reason"] == "员工请假"
+    assert rows_for(tmp_path, "schedule_logs")[-1]["action"] == "取消排班"
+    assert rows_for(tmp_path, "admin_operation_logs")[-1]["action"] == "schedule.cancel"
+
+    default_page = client.get("/admin/schedules?store_name=南京门东店&month=2026-07")
+    assert default_page.status_code == 200
+    assert "上线前演练" not in default_page.text
+    assert "员工请假" not in default_page.text
+    assert "当前月份总工时" in default_page.text
+    assert "0 小时" in default_page.text
+
+    cancelled_page = client.get("/admin/schedules?store_name=南京门东店&month=2026-07&schedule_state=cancelled")
+    assert cancelled_page.status_code == 200
+    assert "可取消员工" in cancelled_page.text
+    assert "已取消" in cancelled_page.text
+    assert "员工请假" in cancelled_page.text
+
+    export_response = client.get("/admin/schedules/export?store_name=南京门东店&month=2026-07")
+    assert export_response.status_code == 200
+    workbook = load_workbook(BytesIO(export_response.content))
+    values = list(workbook.active.iter_rows(values_only=True))
+    assert all("可取消员工" not in row for row in values)
+
+
+def test_cancelled_schedule_does_not_block_future_conflict_or_copy(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch)
+    logged_in_client(client)
+    create_schedule_employee(client, "冲突员工")
+
+    create_source = admin_post(
+        client,
+        "/admin/schedules",
+        data={
+            "store_name": "南京门东店",
+            "employee_ids": ["1"],
+            "schedule_dates": ["2026-07-08"],
+            "shift_type_id": "1",
+            "overwrite_existing": "1",
+        },
+        follow_redirects=False,
+    )
+    assert create_source.status_code == 303
+    assert admin_post(client, "/admin/schedules/1/cancel", data={"cancel_reason": "取消后重排"}, follow_redirects=False).status_code == 303
+
+    recreate_same_slot = admin_post(
+        client,
+        "/admin/schedules",
+        data={
+            "store_name": "南京门东店",
+            "employee_ids": ["1"],
+            "schedule_dates": ["2026-07-08"],
+            "shift_type_id": "1",
+        },
+        follow_redirects=False,
+    )
+
+    assert recreate_same_slot.status_code == 303
+    assert "error=" not in unquote(recreate_same_slot.headers["location"])
+    assert len(rows_for(tmp_path, "store_schedules")) == 2
+    assert [row["is_cancelled"] for row in rows_for(tmp_path, "store_schedules")] == [1, 0]
+
+    copy_preview = admin_post(
+        client,
+        "/admin/schedules/copy-preview",
+        data={
+            "source_start_date": "2026-07-08",
+            "source_end_date": "2026-07-08",
+            "target_start_date": "2026-07-09",
+            "store_names": ["南京门东店"],
+        },
+        follow_redirects=False,
+    )
+    assert copy_preview.status_code == 200
+    assert "可复制" in copy_preview.text
+    assert "取消后重排" not in copy_preview.text
+
+
+def test_schedule_cancel_rejects_repeat_and_requires_permission(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch)
+    logged_in_client(client)
+    create_schedule_employee(client, "权限员工")
+    assert admin_post(
+        client,
+        "/admin/schedules",
+        data={
+            "store_name": "南京门东店",
+            "employee_ids": ["1"],
+            "schedule_dates": ["2026-07-08"],
+            "shift_type_id": "1",
+            "overwrite_existing": "1",
+        },
+        follow_redirects=False,
+    ).status_code == 303
+
+    first_cancel = admin_post(client, "/admin/schedules/1/cancel", data={"cancel_reason": "首次取消"}, follow_redirects=False)
+    assert first_cancel.status_code == 303
+    second_cancel = admin_post(client, "/admin/schedules/1/cancel", data={"cancel_reason": "重复取消"}, follow_redirects=False)
+    assert second_cancel.status_code == 303
+    assert "该排班已取消" in client.get(second_cancel.headers["location"]).text
+
+    limited_role_id = create_role_with_permissions(tmp_path, "schedule-cancel-denied", ["schedule.view"])
+    create_test_admin_user(tmp_path, "schedule_viewer", "仅查看排班", password="viewer-secret", role_name="schedule-cancel-denied")
+    update_admin_user_access(tmp_path, "schedule_viewer", limited_role_id)
+    viewer = TestClient(__import__("main").app)
+    logged_in_client(viewer, "schedule_viewer", "viewer-secret")
+
+    denied = viewer.post(
+        "/admin/schedules/1/cancel",
+        data={"cancel_reason": "无权限", "csrf_token": csrf_token_for(viewer, "/admin/schedules")},
+        follow_redirects=False,
+    )
+    assert_html_forbidden(denied)
+
+
 def test_schedule_quick_copy_previous_day_and_clear_employee_month(tmp_path, monkeypatch):
     client, _ = build_client(tmp_path, monkeypatch)
     logged_in_client(client)
@@ -5405,8 +6738,11 @@ def test_schedule_quick_copy_previous_day_and_clear_employee_month(tmp_path, mon
 
     assert clear_response.status_code == 303
     remaining_rows = rows_for(tmp_path, "store_schedules")
-    assert {(row["employee_id"], row["schedule_date"]) for row in remaining_rows} == {(2, "2026-07-06"), (2, "2026-07-07")}
-    assert any(row["action"] == "删除排班" for row in rows_for(tmp_path, "schedule_logs"))
+    active_rows = [row for row in remaining_rows if row["is_cancelled"] == 0]
+    cancelled_rows = [row for row in remaining_rows if row["is_cancelled"] == 1]
+    assert {(row["employee_id"], row["schedule_date"]) for row in active_rows} == {(2, "2026-07-06"), (2, "2026-07-07")}
+    assert {(row["employee_id"], row["schedule_date"]) for row in cancelled_rows} == {(1, "2026-07-06"), (1, "2026-07-07")}
+    assert any(row["action"] == "取消排班" for row in rows_for(tmp_path, "schedule_logs"))
 
 
 def test_bulk_schedule_validation_errors_return_schedule_page(tmp_path, monkeypatch):
@@ -5638,6 +6974,183 @@ def test_employee_and_shift_type_management_lifecycle(tmp_path, monkeypatch):
     disable_shift = admin_post(client, "/admin/shift-types/5/disable", follow_redirects=False)
     assert disable_shift.status_code == 303
     assert rows_for(tmp_path, "shift_types")[4]["is_active"] == 0
+
+
+def test_employee_no_schema_create_update_duplicate_and_search(tmp_path, monkeypatch):
+    client, main = build_client(tmp_path, monkeypatch)
+    logged_in_client(client)
+
+    with sqlite3.connect(tmp_path / "tickets.db") as connection:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(employees)").fetchall()}
+    assert "employee_no" in columns
+
+    legacy_employee_id = main.create_employee("老员工无工号", "南京门东店", "店员", "", "在职", main.load_app_config())
+    legacy_page = client.get("/admin/employees")
+    assert legacy_page.status_code == 200
+    assert "老员工无工号" in legacy_page.text
+
+    create_employee = admin_post(
+        client,
+        "/admin/employees",
+        data={
+            "employee_no": "EMP-001",
+            "employee_name": "工号员工",
+            "primary_store_name": "南京门东店",
+            "store_names": ["南京门东店"],
+            "role": "店员",
+            "phone": "13800004001",
+            "status": "在职",
+        },
+        follow_redirects=False,
+    )
+    assert create_employee.status_code == 303
+    created = next(row for row in rows_for(tmp_path, "employees") if row["employee_name"] == "工号员工")
+    assert created["employee_no"] == "EMP-001"
+
+    update_employee = admin_post(
+        client,
+        f"/admin/employees/{created['id']}/update",
+        data={
+            "employee_no": "EMP-002",
+            "employee_name": "工号员工",
+            "primary_store_name": "南京门东店",
+            "store_names": ["南京门东店"],
+            "role": "店员",
+            "phone": "13800004001",
+            "status": "在职",
+        },
+        follow_redirects=False,
+    )
+    assert update_employee.status_code == 303
+    updated = next(row for row in rows_for(tmp_path, "employees") if row["id"] == created["id"])
+    assert updated["employee_no"] == "EMP-002"
+
+    duplicate = admin_post(
+        client,
+        "/admin/employees",
+        data={
+            "employee_no": "EMP-002",
+            "employee_name": "重复工号员工",
+            "primary_store_name": "南昌万寿宫店",
+            "store_names": ["南昌万寿宫店"],
+            "role": "店员",
+            "phone": "13800004002",
+            "status": "在职",
+        },
+        follow_redirects=True,
+    )
+    assert duplicate.status_code == 200
+    assert "工号已存在" in duplicate.text
+    assert not any(row["employee_name"] == "重复工号员工" for row in rows_for(tmp_path, "employees"))
+
+    page = client.get("/admin/employees")
+    assert page.status_code == 200
+    assert "工号" in page.text
+    assert "EMP-002" in page.text
+    assert "搜索工号 / 姓名 / 手机号 / 登录账号" in page.text
+    assert "table-scroll" in page.text
+    assert "sticky-col-1" in page.text
+    assert "sticky-col-2" in page.text
+    assert "sticky-actions" in page.text
+
+    filtered = client.get("/admin/employees?keyword=EMP-002")
+    assert filtered.status_code == 200
+    assert "工号员工" in filtered.text
+    assert "老员工无工号" not in filtered.text
+
+    missing = client.get("/admin/employees?keyword=EMP-404")
+    assert missing.status_code == 200
+    assert "工号员工" not in missing.text
+    assert "老员工无工号" not in missing.text
+    assert rows_for(tmp_path, "employees")[0]["id"] == legacy_employee_id
+
+
+def test_employee_no_account_governance_search_and_sticky_tables(tmp_path, monkeypatch):
+    client, main = build_client(tmp_path, monkeypatch)
+    logged_in_client(client)
+
+    linked_user_id = create_test_admin_user(
+        tmp_path,
+        "account_emp_no",
+        "账号工号员工",
+        role_name="店长",
+        allow_login=1,
+        is_assignable=1,
+    )
+    linked_employee_id = main.create_employee("账号工号员工", "南京门东店", "店长", "13800004003", "在职", main.load_app_config())
+    governance_employee_id = main.create_employee("治理工号员工", "南京门东店", "店员", "13800004004", "在职", main.load_app_config())
+    with sqlite3.connect(tmp_path / "tickets.db") as connection:
+        connection.execute(
+            "UPDATE employees SET employee_no = ?, user_id = ?, allow_login = 1 WHERE id = ?",
+            ("ACCT-001", linked_user_id, linked_employee_id),
+        )
+        connection.execute("UPDATE admin_users SET employee_id = ? WHERE id = ?", (linked_employee_id, linked_user_id))
+        connection.execute(
+            "UPDATE employees SET employee_no = ?, participate_schedule = 0 WHERE id = ?",
+            ("GOV-001", governance_employee_id),
+        )
+
+    account_page = client.get("/admin/account?keyword=ACCT-001")
+    assert account_page.status_code == 200
+    assert "ACCT-001" in account_page.text
+    assert "account_emp_no" in account_page.text
+    assert "搜索工号 / 姓名 / 登录账号 / 手机号" in account_page.text
+    assert "table-scroll" in account_page.text
+    assert "sticky-col-1" in account_page.text
+    assert "sticky-actions" in account_page.text
+    assert "data-drawer=\"account-create\"" not in account_page.text
+    assert "本页仅展示已开通后台账号的人员。新增人员、离职、排班身份请到人员管理维护。" in account_page.text
+
+    account_missing = client.get("/admin/account?keyword=NO-SUCH-NO")
+    assert account_missing.status_code == 200
+    assert "account_emp_no" not in account_missing.text
+
+    governance_page = client.get("/admin/personnel-governance?tab=historical&keyword=GOV-001")
+    assert governance_page.status_code == 200
+    assert "GOV-001" in governance_page.text
+    assert "治理工号员工" in governance_page.text
+    assert "搜索工号 / 姓名 / 登录账号 / 手机号" in governance_page.text
+    assert "table-scroll" in governance_page.text
+    assert "sticky-col-1" in governance_page.text
+    assert "sticky-col-2" in governance_page.text
+
+    governance_missing = client.get("/admin/personnel-governance?tab=historical&keyword=NO-SUCH-NO")
+    assert governance_missing.status_code == 200
+    assert "治理工号员工" not in governance_missing.text
+
+
+def test_management_pages_expose_confirm_messages_for_high_risk_actions(tmp_path, monkeypatch):
+    client, main = build_client(tmp_path, monkeypatch)
+    logged_in_client(client)
+    user_id = create_test_admin_user(tmp_path, "confirm_target", "确认目标", role_name="店长", allow_login=1)
+    employee_id = main.create_employee("确认目标", "南京门东店", "店员", "", "在职", main.load_app_config())
+    with sqlite3.connect(tmp_path / "tickets.db") as connection:
+        connection.execute("UPDATE admin_users SET employee_id = ? WHERE id = ?", (employee_id, user_id))
+        connection.execute("UPDATE employees SET user_id = ?, allow_login = 1 WHERE id = ?", (user_id + 999, employee_id))
+
+    employees_page = client.get("/admin/employees")
+    assert employees_page.status_code == 200
+    assert "确认将该人员标记为离职" in employees_page.text
+    assert "确认停止该人员参与排班" in employees_page.text
+    assert "确认解除该员工与后台账号的关联" in employees_page.text
+
+    account_page = client.get("/admin/account")
+    assert account_page.status_code == 200
+    assert "确认关闭该人员的后台账号" in account_page.text
+    assert "确认重置该人员的后台登录密码" in account_page.text
+    assert "确认保存该人员的账号权限设置" in account_page.text
+
+    governance_page = client.get("/admin/personnel-governance?tab=historical")
+    assert governance_page.status_code == 200
+    assert "确认解除该账号与员工档案的关联" in governance_page.text
+    assert "确认执行历史残留清理" in governance_page.text
+
+    roles_page = client.get("/admin/roles")
+    assert roles_page.status_code == 200
+    assert "table-scroll" in roles_page.text
+    assert "sticky-col" in roles_page.text
+    assert "确认保存系统管理员角色权限" in roles_page.text
+    assert "确认恢复该角色的默认权限" in roles_page.text
 
 
 def test_employee_management_uses_cards_drawer_and_store_tags(tmp_path, monkeypatch):
@@ -6008,7 +7521,7 @@ def test_custom_schedule_time_duration_cross_midnight_and_bad_input_html(tmp_pat
     ]
 
     table_page = client.get("/admin/schedules?store_names=南京门东店&month=2026-07&view_mode=table")
-    calendar_page = client.get("/admin/schedules?store_names=南京门东店&month=2026-07&view_mode=calendar")
+    calendar_page = client.get("/admin/schedules?store_names=南京门东店&month=2026-07&view_mode=calendar&selected_date=2026-07-03")
     assert "shift-badge custom-shift-badge" in table_page.text
     assert "加班" in table_page.text
     assert "custom-shift-badge" in calendar_page.text
@@ -6060,11 +7573,11 @@ def test_schedule_calendar_uses_real_weekday_and_holiday_config(tmp_path, monkey
     page = client.get("/admin/schedules?store_names=南京门东店&month=2026-07&view_mode=calendar")
     assert page.status_code == 200
     assert 'id="schedule-calendar-view"' in page.text
-    assert 'class="schedule-date-calendar"' in page.text
+    assert 'class="bulk-date-calendar"' in page.text
     assert 'data-date="2026-07-01"' in page.text
     assert 'data-weekday-label="周三"' in page.text
     assert "香港特别行政区成立纪念日" in page.text
-    assert "schedule-date-card" in page.text
+    assert "bulk-date-card" in page.text
     assert "holiday" in page.text
     assert "data-select-holidays" in page.text
 
@@ -6114,7 +7627,7 @@ def test_custom_schedule_break_manual_duration_and_display_time(tmp_path, monkey
     assert [(row["custom_label"], row["custom_duration_hours"]) for row in schedules] == [("盘点", 8.0), ("夜间盘点", 3.5)]
 
     table_page = client.get("/admin/schedules?store_names=南京门东店&month=2026-07&view_mode=table")
-    calendar_page = client.get("/admin/schedules?store_names=南京门东店&month=2026-07&view_mode=calendar")
+    calendar_page = client.get("/admin/schedules?store_names=南京门东店&month=2026-07&view_mode=calendar&selected_date=2026-07-06")
     employee_page = client.get("/admin/schedules?store_names=南京门东店&month=2026-07&view_mode=employee&employee_ids=1")
     assert "09:00-18:00" in table_page.text
     assert "22:00-02:00（跨天）" in table_page.text
@@ -7003,8 +8516,9 @@ def test_schedule_create_update_validation_public_view_export_and_logs(tmp_path,
 
     delete_schedule = admin_post(client, "/admin/schedules/1/delete", follow_redirects=False)
     assert delete_schedule.status_code == 303
-    assert rows_for(tmp_path, "store_schedules") == []
-    assert rows_for(tmp_path, "schedule_logs")[-1]["action"] == "删除排班"
+    cancelled_schedule = rows_for(tmp_path, "store_schedules")[0]
+    assert cancelled_schedule["is_cancelled"] == 1
+    assert rows_for(tmp_path, "schedule_logs")[-1]["action"] == "取消排班"
 
 
 def test_admin_can_soft_delete_collaboration_items_and_supplements(tmp_path, monkeypatch):
@@ -8158,6 +9672,68 @@ def test_p4a_dashboard_filters_rankings_and_data_scope(tmp_path, monkeypatch):
     assert "P4A 南昌隐藏" not in assigned_dashboard.text
 
 
+def test_dashboard_manager_workbench_dropdown_filter_structure(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch)
+    logged_in_client(client)
+
+    dashboard = client.get("/admin/dashboard")
+
+    assert dashboard.status_code == 200
+    for fragment in (
+        "dashboard-hero",
+        "dashboard-hero-title",
+        "dashboard-hero-actions",
+        "manager-alert-panel",
+        "filter-summary-bar",
+        "advanced-filter-panel",
+        "filter-dropdown",
+        "filter-dropdown-trigger",
+        "filter-dropdown-menu",
+        "filter-dropdown-search",
+        "filter-dropdown-option",
+        "filter-dropdown-actions",
+        "filter-apply-row",
+        "dashboard-section",
+        "dashboard-section-header",
+        "metric-card",
+        "ranking-card",
+        "compact-table-scroll",
+    ):
+        assert fragment in dashboard.text
+    for label in (
+        "止痒运营协同总览",
+        "运营协同工作台",
+        "集中查看工单流转、SLA、门店问题、排班工时与异常提醒。",
+        "待处理与风险提醒",
+        "展示当前需要职能部门关注的待处理、超时、未分派、排班异常和配置缺口。",
+        "职能协同总览",
+        "筛选条件",
+        "工单运营看板",
+        "排班运营看板",
+        "展开筛选",
+        "应用筛选",
+        "重置",
+        "全选",
+        "清空",
+        "确定",
+        "取消",
+        "搜索门店",
+        "搜索需求类型",
+        "搜索处理人",
+        "搜索工单状态",
+        "搜索员工",
+        "搜索班次",
+    ):
+        assert label in dashboard.text
+    assert 'data-custom-date-range' in dashboard.text
+    assert 'name="start_date"' in dashboard.text
+    assert 'name="end_date"' in dashboard.text
+    assert "dashboard-range-tabs" not in dashboard.text
+    assert "range-choice" not in dashboard.text
+    for forbidden in ("老板视角", "老板工作台", "老板看板", "管理层工作台", "管理层驾驶舱", "老板打开首页"):
+        assert forbidden not in dashboard.text
+
+
 def test_p4b_schedule_dashboard_permission_and_scope(tmp_path, monkeypatch):
     client, _main = build_client(tmp_path, monkeypatch, admin_users="regional-admin:very-secret-value,ticketonly:123456")
     ticket_only_role = create_role_with_permissions(tmp_path, "p4b-ticket-only-dashboard", ["ticket.view"])
@@ -8376,13 +9952,13 @@ def test_lightweight_erp_admin_layout_navigation_and_placeholder_pages(tmp_path,
     assert "dashboard-hero" in dashboard.text
     assert "最近工单动态" in dashboard.text
 
-    for label in ("业务总览", "工单管理", "门店查询", "配置管理", "账号设置", "系统设置"):
+    for label in ("业务总览", "工单管理", "门店查询", "配置管理", "账号权限", "系统设置"):
         assert label in dashboard.text
     assert "数据导出" not in dashboard.text
 
     for path, title in (
         ("/admin/settings", "配置管理"),
-        ("/admin/account", "账号设置"),
+        ("/admin/account", "账号权限管理"),
         ("/admin/system", "系统设置"),
     ):
         unauthenticated = TestClient(__import__("main").app).get(path, follow_redirects=False)

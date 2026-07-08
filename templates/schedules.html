@@ -22,6 +22,7 @@
 <div class="alert alert-success">已保存 {{ saved_count }} 条排班，其中新增 {{ created_count }} 条，更新 {{ updated_count }} 条，跳过 {{ skipped_count }} 条。</div>
 {% elif saved %}<div class="alert alert-success">排班已保存。</div>{% endif %}
 {% if deleted %}<div class="alert alert-success">排班已删除。</div>{% endif %}
+{% if cancelled %}<div class="alert alert-success">已取消 {{ cancelled }} 条排班。</div>{% endif %}
 {% if error %}<div class="alert alert-error">{{ error }}</div>{% endif %}
 
 <section class="schedule-workbench" data-schedule-view="{{ context.view }}">
@@ -114,6 +115,23 @@
       </div>
       <label><span>月份</span><input name="month" type="month" value="{{ context.filters.month }}"></label>
       <div class="schedule-filter-employees">
+        <span>排班状态</span>
+        <div class="schedule-filter-chip-grid compact-chip-grid">
+          <label class="choice-chip compact-chip">
+            <input type="radio" name="schedule_state" value="active" {% if context.filters.schedule_state == 'active' %}checked{% endif %}>
+            <span>正常排班</span>
+          </label>
+          <label class="choice-chip compact-chip">
+            <input type="radio" name="schedule_state" value="cancelled" {% if context.filters.schedule_state == 'cancelled' %}checked{% endif %}>
+            <span>已取消</span>
+          </label>
+          <label class="choice-chip compact-chip">
+            <input type="radio" name="schedule_state" value="all" {% if context.filters.schedule_state == 'all' %}checked{% endif %}>
+            <span>全部</span>
+          </label>
+        </div>
+      </div>
+      <div class="schedule-filter-employees">
         <span>员工状态</span>
         <div class="schedule-filter-chip-grid compact-chip-grid">
           {% for item in employee_statuses %}
@@ -163,7 +181,7 @@
           {% for employee in context.employee_options %}
           <label class="choice-chip compact-chip">
             <input type="checkbox" name="employee_ids" value="{{ employee.id }}" {% if employee.id|string in context.selected_employee_ids %}checked{% endif %}>
-            <span>{{ employee.employee_name }}<small>{{ employee.primary_store or '-' }}</small></span>
+            <span>{{ employee.employee_name }}<small>工号 {{ employee.employee_no or '-' }} · {{ employee.primary_store or '-' }}</small></span>
           </label>
           {% else %}
           <small class="empty-note">当前范围暂无可筛选员工。</small>
@@ -213,6 +231,7 @@
             <input type="checkbox" name="employee_ids" value="{{ employee.id }}">
             <span>
               {{ employee.employee_name }}
+              <small>工号：{{ employee.employee_no or '-' }}</small>
               {% if employee.role %}<small>{{ employee.role }}</small>{% endif %}
               <small class="store-tag-primary">主门店：{{ employee.primary_store or '-' }}</small>
               <small class="store-tag-available">可排门店：{{ employee.store_names_text or '-' }}</small>
@@ -236,7 +255,7 @@
             <button class="ghost-button compact" type="button" data-clear-schedule-dates>清空日期</button>
           </div>
         </div>
-        <div class="schedule-date-calendar">
+        <div class="bulk-date-calendar" data-bulk-date-calendar>
           <div class="schedule-calendar-week-head">周一</div>
           <div class="schedule-calendar-week-head">周二</div>
           <div class="schedule-calendar-week-head">周三</div>
@@ -245,10 +264,10 @@
           <div class="schedule-calendar-week-head weekend">周六</div>
           <div class="schedule-calendar-week-head weekend">周日</div>
           {% for day in context.calendar_days %}
-          <label class="schedule-date-card {% if not day.is_current_month %}muted outside-month{% endif %} {% if day.is_weekend %}weekend{% endif %} {% if day.is_holiday %}holiday {{ day.holiday_type_class }}{% endif %} {% if day.is_today %}today{% endif %}" data-date="{{ day.date }}" data-weekday-label="{{ day.weekday_label }}" data-weekend="{{ '1' if day.is_weekend else '0' }}" data-holiday="{{ '1' if day.is_holiday else '0' }}" data-current-month="{{ '1' if day.is_current_month else '0' }}">
-            {% if day.is_current_month %}<input type="checkbox" name="schedule_dates" value="{{ day.date }}">{% endif %}
-            <span>{{ day.day }}</span>
-            <small>{{ day.weekday_label }}</small>
+          <label class="bulk-date-card {% if not day.is_current_month %}muted outside-month{% endif %} {% if day.is_weekend %}weekend{% endif %} {% if day.is_holiday %}holiday {{ day.holiday_type_class }}{% endif %} {% if day.is_today %}today{% endif %}" data-bulk-date-card data-date="{{ day.date }}" data-weekday-label="{{ day.weekday_label }}" data-weekend="{{ '1' if day.is_weekend else '0' }}" data-holiday="{{ '1' if day.is_holiday else '0' }}" data-current-month="{{ '1' if day.is_current_month else '0' }}">
+            {% if day.is_current_month %}<input name="schedule_dates" type="checkbox" value="{{ day.date }}" hidden>{% endif %}
+            <span class="bulk-date-day">{{ day.day }}</span>
+            <span class="bulk-date-weekday">{{ day.weekday_label }}</span>
             {% if day.holiday_name %}<em>{{ day.holiday_name }}</em>{% endif %}
           </label>
           {% endfor %}
@@ -328,7 +347,7 @@
           {% for employee in context.employee_options %}
           <label class="choice-chip compact-chip">
             <input type="checkbox" name="employee_ids" value="{{ employee.id }}" {% if copy_preview and employee.id in copy_preview.employee_ids %}checked{% endif %}>
-            <span>{{ employee.employee_name }}<small>{{ employee.primary_store or '-' }}</small></span>
+            <span>{{ employee.employee_name }}<small>工号 {{ employee.employee_no or '-' }} · {{ employee.primary_store or '-' }}</small></span>
           </label>
           {% else %}
           <small class="empty-note">当前范围暂无员工。</small>
@@ -459,7 +478,7 @@
       <div class="schedule-calendar-week-head weekend">周日</div>
       {% for item in context.calendar_summary %}
       {% set day = item.day %}
-      <article class="schedule-day-card schedule-calendar-day {% if item.schedule_count %}has-schedule{% endif %} {% if not day.is_current_month %}is-empty outside-month{% endif %} {% if day.is_weekend %}weekend schedule-weekend{% endif %} {% if day.is_holiday %}holiday schedule-holiday {{ day.holiday_type_class }}{% endif %} {% if day.is_today %}today schedule-today{% endif %}" data-date="{{ day.date }}" data-weekday-label="{{ day.weekday_label }}">
+      <article class="schedule-day-card schedule-calendar-day {% if item.schedule_count %}has-schedule{% endif %} {% if item.is_selected %}selected-date{% endif %} {% if not day.is_current_month %}is-empty outside-month{% endif %} {% if day.is_weekend %}weekend schedule-weekend{% endif %} {% if day.is_holiday %}holiday schedule-holiday {{ day.holiday_type_class }}{% endif %} {% if day.is_today %}today schedule-today{% endif %}" data-date="{{ day.date }}" data-weekday-label="{{ day.weekday_label }}">
         <header>
           <strong>{{ day.day }}</strong>
           <span>{{ day.weekday_label }}</span>
@@ -478,27 +497,58 @@
           <span class="empty-note">暂无排班</span>
           {% endfor %}
         </div>
-        <details class="calendar-day-detail">
-          <summary>当天详情</summary>
-          {% for schedule in item.rows %}
-          <button class="schedule-calendar-shift {% if schedule.is_custom_time %}custom-shift-badge{% endif %}" type="button" data-schedule-edit style="--shift-color: {{ schedule.color or '#64748b' }}">
-            <span>{{ schedule.employee_name }}</span>
-            <strong>{{ schedule.shift_name }}</strong>
-            <small>{{ schedule.store_name }}</small>
-            <small class="schedule-time-line">{{ schedule.display_time }} · {{ schedule.display_hours }}</small>
-            {% if schedule.has_conflict %}<small class="schedule-quality-badge danger">冲突</small>{% endif %}
-            {% for warning in schedule.warnings %}
-            <small class="schedule-quality-badge {{ warning.level }}">{{ warning.message }}</small>
-            {% endfor %}
-            {% if schedule.note %}<small>{{ schedule.note }}</small>{% endif %}
-          </button>
-          {% else %}
-          <small class="empty-note">当前日期暂无排班。</small>
-          {% endfor %}
-        </details>
+        <a class="ghost-button compact schedule-day-detail-link" href="{{ item.detail_url }}">查看当天详情</a>
       </article>
       {% endfor %}
     </div>
+    <section class="schedule-day-detail-panel" id="schedule-day-detail">
+      <header>
+        <div>
+          <h3>当日排班详情</h3>
+          <p>{{ context.selected_date_label }}</p>
+        </div>
+        {% if context.selected_day_summary %}
+        <div class="schedule-day-detail-metrics">
+          <span>{{ context.selected_day_summary.scheduled_people_count }} 人</span>
+          <span>{{ context.selected_day_summary.display_hours }}</span>
+          {% if context.selected_day_summary.conflict_count %}<span class="schedule-quality-badge danger">冲突 {{ context.selected_day_summary.conflict_count }}</span>{% endif %}
+          {% if context.selected_day_summary.warning_count %}<span class="schedule-quality-badge warning">异常 {{ context.selected_day_summary.warning_count }}</span>{% endif %}
+        </div>
+        {% endif %}
+      </header>
+      {% if context.selected_date %}
+      <div class="schedule-day-detail-list">
+        {% for schedule in context.selected_day_schedules %}
+        <article class="schedule-calendar-shift {% if schedule.is_custom_time %}custom-shift-badge{% endif %} {% if schedule.is_cancelled %}is-cancelled{% endif %}" data-schedule-edit style="--shift-color: {{ schedule.color or '#64748b' }}">
+          <span>{{ schedule.employee_name }}{% if schedule.employee_no %}（{{ schedule.employee_no }}）{% endif %}</span>
+          <strong>{{ schedule.shift_name }}</strong>
+          {% if schedule.is_cancelled %}<small class="schedule-quality-badge muted">已取消</small>{% endif %}
+          <small>{{ schedule.store_name }}</small>
+          <small class="schedule-time-line">{{ schedule.display_time }} · {{ schedule.display_hours }}</small>
+          {% if schedule.has_conflict %}<small class="schedule-quality-badge danger">冲突</small>{% endif %}
+          {% for warning in schedule.warnings %}
+          <small class="schedule-quality-badge {{ warning.level }}">{{ warning.message }}</small>
+          {% endfor %}
+          {% if schedule.note %}<small>{{ schedule.note }}</small>{% endif %}
+          {% if schedule.cancel_reason %}<small>取消原因：{{ schedule.cancel_reason }}</small>{% endif %}
+          {% if schedule.cancelled_at %}<small>取消时间：{{ schedule.cancelled_at }}{% if schedule.cancelled_by %} · {{ schedule.cancelled_by }}{% endif %}</small>{% endif %}
+          {% if not schedule.is_cancelled and (has_perm('schedule.cancel') or has_perm('schedule.delete')) %}
+          <form method="post" action="/admin/schedules/{{ schedule.id }}/cancel" data-feedback-form data-preserve-scroll data-loading-label="取消中..." onsubmit="return confirm('确认取消该排班？取消后不计入工时和排班统计，但会保留历史记录。');">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" name="return_url" value="{{ request.url.path }}?{{ request.url.query }}">
+            <input class="compact-input" name="cancel_reason" placeholder="取消原因，可选">
+            <button class="danger-button compact" type="submit">取消排班</button>
+          </form>
+          {% endif %}
+        </article>
+        {% else %}
+        <p class="empty-note schedule-day-detail-empty">当日暂无排班</p>
+        {% endfor %}
+      </div>
+      {% else %}
+      <p class="empty-note schedule-day-detail-empty">请选择日期查看当日排班。</p>
+      {% endif %}
+    </section>
     {% elif context.view == 'employee' %}
     <div class="schedule-employee-card-grid schedule-employee-view" id="employee-schedule-view">
       {% if context.store_scope == 'employee-all-stores' %}
@@ -512,6 +562,7 @@
         <header>
           <div>
             <h3>{{ employee.employee_name }}</h3>
+            <p class="subtle">工号 {{ employee.employee_no or '-' }}</p>
             <p>{{ employee.role or '未设置角色' }} · {{ employee.status }}</p>
           </div>
           <span class="employee-status-pill">{{ employee.primary_store or '-' }}</span>
@@ -536,13 +587,22 @@
             {{ item.day.day }}
             {% for schedule in schedules %}
             <small class="employee-schedule-store">{{ schedule.store_name }} · {{ schedule.shift_name }} · {{ schedule.display_time }} · {{ schedule.display_hours }}</small>
+            {% if schedule.is_cancelled %}<small class="schedule-quality-badge muted">已取消</small>{% endif %}
             {% if schedule.has_conflict %}<small class="schedule-quality-badge danger">冲突</small>{% endif %}
             {% for warning in schedule.warnings %}<small class="schedule-quality-badge {{ warning.level }}">{{ warning.message }}</small>{% endfor %}
+            {% if not schedule.is_cancelled and (has_perm('schedule.cancel') or has_perm('schedule.delete')) %}
+            <form method="post" action="/admin/schedules/{{ schedule.id }}/cancel" data-feedback-form data-preserve-scroll data-loading-label="取消中..." onsubmit="return confirm('确认取消该排班？取消后不计入工时和排班统计，但会保留历史记录。');">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <input type="hidden" name="return_url" value="{{ request.url.path }}?{{ request.url.query }}">
+              <input type="hidden" name="cancel_reason" value="">
+              <button class="ghost-button compact" type="submit">取消排班</button>
+            </form>
+            {% endif %}
             {% endfor %}
           </span>
           {% endfor %}
         </div>
-        {% if has_perm('schedule.delete') %}
+        {% if has_perm('schedule.cancel') or has_perm('schedule.delete') %}
         <form method="post" action="/admin/schedules/clear-employee" data-feedback-form data-preserve-scroll data-loading-label="清空中..." onsubmit="return confirm('确认清空该员工本月排班吗？');">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <input type="hidden" name="store_name" value="{{ context.filters.store_name }}">
@@ -574,14 +634,7 @@
           <span>{{ shift_name }} {{ count }}</span>
           {% endfor %}
         </div>
-        <details class="calendar-day-detail">
-          <summary>明细</summary>
-          {% for schedule in item.rows %}
-          <div class="schedule-time-line">{{ schedule.employee_name }} · {{ schedule.store_name }} · {{ schedule.shift_name }} · {{ schedule.display_time }} · {{ schedule.display_hours }}</div>
-          {% else %}
-          <small class="empty-note">当前日期暂无排班。</small>
-          {% endfor %}
-        </details>
+        <a class="ghost-button compact schedule-day-detail-link" href="{{ item.detail_url }}">查看明细</a>
       </article>
       {% endfor %}
     </div>
@@ -607,7 +660,7 @@
           <tr>
             <th class="sticky-employee-col schedule-employee-col">
               <strong>{{ employee.employee_name }}</strong>
-              <span>{{ employee.role or '' }} · {{ employee.status }}</span>
+              <span>工号 {{ employee.employee_no or '-' }} · {{ employee.role or '' }} · {{ employee.status }}</span>
               <small class="store-tag-primary">主门店：{{ employee.primary_store or '-' }}</small>
               <small class="store-tag-available">可排门店：{{ employee.store_names_text or '-' }}</small>
             </th>
@@ -615,19 +668,23 @@
             {% set day_schedules = context.schedule_map.get(day.date, {}) %}
             {% set schedule = day_schedules.get(employee.id) %}
             {% if schedule %}
-            {% set employee_hours.total = employee_hours.total + (schedule.duration_hours or 0) %}
+            {% if not schedule.is_cancelled %}{% set employee_hours.total = employee_hours.total + (schedule.duration_hours or 0) %}{% endif %}
             {% endif %}
-            <td class="schedule-cell {% if day.is_weekend %}schedule-weekend{% endif %} {% if day.is_today %}schedule-today{% endif %}">
+            <td class="schedule-cell {% if schedule and schedule.is_cancelled %}is-cancelled{% endif %} {% if day.is_weekend %}schedule-weekend{% endif %} {% if day.is_today %}schedule-today{% endif %}">
           {% if schedule %}
           <span class="shift-badge {% if schedule.is_custom_time %}custom-shift-badge{% endif %}" style="--shift-color: {{ schedule.color or '#64748b' }}">{{ schedule.shift_name }}</span>
+          {% if schedule.is_cancelled %}<small class="schedule-quality-badge muted">已取消</small>{% endif %}
           <small class="schedule-time-line">{{ schedule.display_time }} · {{ schedule.display_hours }}</small>
           {% if schedule.has_conflict %}<small class="schedule-quality-badge danger">冲突</small>{% endif %}
           {% for warning in schedule.warnings %}<small class="schedule-quality-badge {{ warning.level }}">{{ warning.message }}</small>{% endfor %}
           {% if schedule.note %}<small>{{ schedule.note }}</small>{% endif %}
-              {% if has_perm('schedule.delete') %}
-              <form method="post" action="/admin/schedules/{{ schedule.id }}/delete" onsubmit="return confirm('确认删除这条排班吗？');" data-feedback-form data-preserve-scroll data-loading-label="删除中...">
+          {% if schedule.cancel_reason %}<small>取消原因：{{ schedule.cancel_reason }}</small>{% endif %}
+              {% if not schedule.is_cancelled and (has_perm('schedule.cancel') or has_perm('schedule.delete')) %}
+              <form method="post" action="/admin/schedules/{{ schedule.id }}/cancel" onsubmit="return confirm('确认取消该排班？取消后不计入工时和排班统计，但会保留历史记录。');" data-feedback-form data-preserve-scroll data-loading-label="取消中...">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                <button class="ghost-button compact" type="submit">删除</button>
+                <input type="hidden" name="return_url" value="{{ request.url.path }}?{{ request.url.query }}">
+                <input class="compact-input" name="cancel_reason" placeholder="取消原因，可选">
+                <button class="ghost-button compact" type="submit">取消排班</button>
               </form>
               {% endif %}
               {% else %}
