@@ -1,8 +1,10 @@
 {% set page_title = '角色权限' %}
-{% set page_subtitle = '用最小权限矩阵维护角色可访问的后台能力，保存后立即生效。' %}
+{% set page_subtitle = '左侧选择角色，右侧直接显示各模块权限。' %}
 {% set page_eyebrow = '账号与权限' %}
 {% set current_menu = 'roles' %}
 {% extends "base_admin.html" %}
+
+{% block main_class %}admin-shell roles-shell{% endblock %}
 
 {% block topbar_actions %}
 <a class="ghost-button compact" href="/admin/account">账号管理</a>
@@ -16,61 +18,167 @@
 <div class="alert alert-error">{{ error }}</div>
 {% endif %}
 
-<section class="section-heading admin-section-heading">
+{% set legacy_role_names = ['运营管理', '商品采购', '排班管理员', '只读账号'] %}
+{% set total_permissions = namespace(count=0) %}
+{% for group in permission_groups %}
+{% set total_permissions.count = total_permissions.count + (group.permissions | length) %}
+{% endfor %}
+
+<section class="section-heading admin-section-heading role-page-heading">
   <h2>角色权限矩阵</h2>
-  <p>默认权限只作为初始化模板，所有角色权限以数据库保存结果为准，保存后立即生效。</p>
+  <p>一次只编辑一个角色，所有权限模块默认展开，默认权限只作为初始化模板。</p>
 </section>
 
-<section class="work-card role-matrix-toolbar" data-role-permission-toolbar>
-  <div class="filter-form compact-filter">
-    <label>
-      <span>关键词搜索</span>
-      <input type="search" placeholder="搜索权限名称或 key" data-role-permission-search>
+<div class="role-permission-workspace" data-role-permission-toolbar data-role-permission-page="true" data-module-filter-current="all">
+  <aside class="work-card role-picker-panel sticky-col sticky-col-1" data-role-picker-panel>
+    <header class="role-picker-head">
+      <div>
+        <p class="eyebrow">Roles</p>
+        <h2>角色列表</h2>
+      </div>
+      <span class="status-badge muted">{{ roles|length }} 个角色</span>
+    </header>
+    <label class="role-search-field">
+      <span>搜索角色</span>
+      <input type="search" placeholder="输入角色名称" data-role-list-search>
     </label>
-    <div>
-      <span class="form-label">模块筛选</span>
-      <div class="badge-row" data-role-module-filters>
-        <button class="ghost-button compact active" type="button" data-role-module-filter="all">全部</button>
-        {% for group in permission_groups %}
-        <button class="ghost-button compact" type="button" data-role-module-filter="{{ group.module }}">{{ group.name }}</button>
-        {% endfor %}
+    <div class="role-filter-row" aria-label="角色筛选">
+      <button class="ghost-button compact active" type="button" data-role-filter="all">全部</button>
+      <button class="ghost-button compact" type="button" data-role-filter="current">当前组织</button>
+      <button class="ghost-button compact" type="button" data-role-filter="legacy">历史兼容</button>
+      <button class="ghost-button compact" type="button" data-role-filter="system">系统角色</button>
+    </div>
+    <div class="role-list" data-role-list>
+      {% for role in roles %}
+      {% set role_category = 'legacy' if role.role_name in legacy_role_names else ('current' if role.is_default_role else 'custom') %}
+      <button
+        class="role-list-item {% if loop.first %}active{% endif %}"
+        type="button"
+        data-role-list-item
+        data-role-target="role-panel-{{ role.id }}"
+        data-role-name="{{ role.role_name }}"
+        data-role-category="{{ role_category }}"
+        data-role-system="{{ 1 if role.is_system else 0 }}"
+      >
+        <span class="role-list-title">
+          <strong>{{ role.role_name }}</strong>
+          <small data-role-list-count>{{ role.permissions|length }} 项权限</small>
+        </span>
+        <span class="role-list-badges">
+          {% if role_category == 'current' %}
+          <span class="status-badge muted">当前组织</span>
+          {% elif role_category == 'legacy' %}
+          <span class="status-badge warning">历史兼容</span>
+          {% else %}
+          <span class="status-badge muted">自定义</span>
+          {% endif %}
+          {% if role.is_system %}
+          <span class="role-badge">系统角色</span>
+          {% endif %}
+        </span>
+      </button>
+      {% else %}
+      <p class="empty-note">暂无角色。</p>
+      {% endfor %}
+    </div>
+  </aside>
+
+  <section class="role-editor-column" aria-label="角色权限编辑区">
+    <div class="work-card role-editor-toolbar">
+      <label class="role-permission-search">
+        <span>关键词搜索</span>
+        <input type="search" placeholder="搜索权限名称或 key" data-role-permission-search>
+      </label>
+      <div class="role-module-filter-wrap">
+        <span class="form-label">模块筛选</span>
+        <div class="badge-row" data-role-module-filters>
+          <button class="ghost-button compact active" type="button" data-role-module-filter="all">全部</button>
+          {% for group in permission_groups %}
+          <button class="ghost-button compact" type="button" data-role-module-filter="{{ group.module }}">{{ group.name }}</button>
+          {% endfor %}
+        </div>
       </div>
     </div>
-  </div>
-</section>
 
-<div class="account-grid">
   {% for role in roles %}
-  <article class="work-card account-card" data-role-permission-card>
-    <header class="account-card-header">
+  {% set role_category = 'legacy' if role.role_name in legacy_role_names else ('current' if role.is_default_role else 'custom') %}
+  <article
+    id="role-panel-{{ role.id }}"
+    class="work-card role-editor-card"
+    data-role-permission-card
+    data-role-editor-panel
+    data-role-panel-id="role-panel-{{ role.id }}"
+    {% if not loop.first %}hidden{% endif %}
+  >
+    <header class="role-editor-header">
       <div>
         <p class="eyebrow">Role #{{ role.id }}</p>
-        <h2>{{ role.role_name }}</h2>
+        <h2 data-role-active-name>{{ role.role_name }}</h2>
         <p>{{ role.description or '暂无描述' }}</p>
+        <div class="role-editor-badges">
+          {% if role_category == 'current' %}
+          <span class="status-badge muted">当前组织角色</span>
+          {% elif role_category == 'legacy' %}
+          <span class="status-badge warning">历史兼容角色</span>
+          {% else %}
+          <span class="status-badge muted">自定义角色</span>
+          {% endif %}
+          {% if role.is_system %}
+          <span class="role-badge">系统角色</span>
+          {% endif %}
+        </div>
         {% if role.is_default_role %}
         <p class="subtle">默认数据范围：{{ role.default_data_scope }}</p>
         {% endif %}
       </div>
-      {% if role.is_system %}
-      <span class="status-badge role-badge">系统角色</span>
-      {% else %}
-      <span class="status-badge">自定义角色</span>
-      {% endif %}
+      <div class="role-permission-summary">
+        <strong data-role-selected-count>{{ role.permissions|length }}</strong>
+        <small>已勾选 / {{ total_permissions.count }}</small>
+      </div>
     </header>
 
-    <form class="form-stack" method="post" action="/admin/roles/{{ role.id }}/permissions">
+    <form class="form-stack role-editor-form" method="post" action="/admin/roles/{{ role.id }}/permissions" data-role-form data-role-dirty="0" {% if role.role_name == '系统管理员' %}data-confirm-message="确认保存系统管理员角色权限？错误配置可能影响账号和角色管理能力。"{% endif %}>
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <div class="form-actions role-matrix-actions">
+      <div class="role-editor-sticky-actions">
+        <div class="role-editor-save-actions">
+          <button class="primary-button compact" type="submit">保存权限</button>
+          {% if role.is_default_role %}
+          <button
+            class="secondary-button compact"
+            type="submit"
+            name="restore_defaults"
+            value="1"
+            data-restore-defaults
+            data-confirm-message="确认恢复该角色的默认权限？当前角色的自定义勾选会被默认权限覆盖。"
+          >恢复默认权限</button>
+          {% endif %}
+        </div>
+        <div class="role-editor-module-actions">
         <button class="ghost-button compact" type="button" data-role-select-module>全选当前模块</button>
         <button class="ghost-button compact" type="button" data-role-clear-module>清空当前模块</button>
-        {% if role.is_default_role %}
-        <button class="secondary-button compact" type="submit" name="restore_defaults" value="1">恢复默认权限</button>
-        {% endif %}
+        </div>
       </div>
+      <div class="role-permission-scroll table-scroll" data-role-permission-scroll>
       {% for group in permission_groups %}
-      <div class="permission-group" data-permission-module-group="{{ group.module }}">
-        <h3>{{ group.name }}</h3>
-        <div class="permission-check-grid">
+      {% set module_selected = namespace(count=0) %}
+      {% for permission in group.permissions %}
+      {% if permission.key in role.permissions %}
+      {% set module_selected.count = module_selected.count + 1 %}
+      {% endif %}
+      {% endfor %}
+      <div
+        class="permission-module permission-group role-module-card"
+        data-permission-module="{{ group.module }}"
+        data-permission-module-group="{{ group.module }}"
+        data-filter-hidden="false"
+      >
+        <div class="permission-module-header">
+          <span>
+            <strong>{{ group.name }}</strong>
+            <small><span data-module-selected-count>{{ module_selected.count }}</span> / <span data-module-total-count>{{ group.permissions|length }}</span></small>
+          </span>
+        </div>
+        <div class="permission-module-body permission-check-grid compact-permission-grid" data-permission-module-body>
           {% for permission in group.permissions %}
           <label
             class="inline-check permission-check"
@@ -94,9 +202,7 @@
         </div>
       </div>
       {% endfor %}
-      <footer class="form-actions">
-        <button class="primary-button compact" type="submit">保存权限</button>
-      </footer>
+      </div>
     </form>
   </article>
   {% else %}
@@ -105,5 +211,6 @@
     <p>请先完成 RBAC 初始化。</p>
   </article>
   {% endfor %}
+  </section>
 </div>
 {% endblock %}

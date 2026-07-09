@@ -466,10 +466,8 @@ function initializeStoreRequestApp() {
       const isPrimaryStore = Boolean(primaryStore && checkbox.value === primaryStore);
       if (isPrimaryStore) {
         checkbox.checked = true;
-        checkbox.disabled = true;
         checkbox.dataset.primaryAutoChecked = "1";
       } else {
-        checkbox.disabled = false;
         if (checkbox.dataset.primaryAutoChecked === "1") {
           checkbox.checked = false;
           delete checkbox.dataset.primaryAutoChecked;
@@ -663,9 +661,6 @@ function initializeStoreRequestApp() {
         group.classList.toggle("is-filtered-out", !moduleVisible);
         group.classList.toggle("is-filter-hidden", !moduleVisible);
         group.dataset.moduleFilterCurrent = activeRolePermissionModule;
-        if (group.tagName.toLowerCase() === "details" && moduleVisible && activeRolePermissionModule !== "all") {
-          group.open = true;
-        }
       });
       const page = card.closest("[data-role-permission-page]");
       if (page) {

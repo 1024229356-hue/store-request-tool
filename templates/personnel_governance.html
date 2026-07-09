@@ -1,12 +1,15 @@
 {% set page_title = '人员数据治理' %}
 {% set page_subtitle = '发现疑似重复人员，人工确认账号与员工关联，保留历史登录、工单和排班数据。' %}
-{% set page_eyebrow = '人员与账号管理' %}
+{% set page_eyebrow = '人员治理' %}
 {% set current_menu = 'personnel-governance' %}
 {% extends "base_admin.html" %}
 
 {% block topbar_actions %}
-<a class="ghost-button compact" href="/admin/account">人员与账号管理</a>
+<a class="ghost-button compact" href="/admin/employees">人员/组织架构管理</a>
+{% if can_update_account %}
+<a class="ghost-button compact" href="/admin/account">账号权限管理</a>
 <a class="ghost-button compact" href="/admin/permission-overview">权限总览</a>
+{% endif %}
 {% endblock %}
 
 {% block content %}
@@ -25,11 +28,13 @@
       <strong>{{ stats.high_count }}</strong>
       <small>建议优先确认</small>
     </article>
+    {% if can_update_account %}
     <article class="stat-card">
       <span>未关联账号</span>
       <strong>{{ stats.unlinked_account_count }}</strong>
       <small>admin_users.employee_id 为空</small>
     </article>
+    {% endif %}
     <article class="stat-card">
       <span>未关联员工</span>
       <strong>{{ stats.unlinked_employee_count }}</strong>
@@ -49,9 +54,21 @@
 </section>
 
 <section class="work-card governance-filter-card">
+  <form class="filter-bar governance-search-bar" method="get" action="/admin/personnel-governance" data-feedback-form data-loading-label="搜索中...">
+    <input type="hidden" name="tab" value="{{ active_tab }}">
+    <input type="hidden" name="filter" value="{{ selected_filter }}">
+    <label class="wide-filter">
+      <span>搜索</span>
+      <input name="keyword" type="search" value="{{ keyword }}" placeholder="搜索工号 / 姓名 / 登录账号 / 手机号">
+    </label>
+    <div class="filter-actions">
+      <button class="primary-button compact" type="submit">搜索</button>
+      <a class="ghost-button compact" href="/admin/personnel-governance?tab={{ active_tab }}">重置</a>
+    </div>
+  </form>
   <div class="badge-row">
     {% for tab in governance_tabs %}
-    <a class="ghost-button compact {% if active_tab == tab.value %}active{% endif %}" href="/admin/personnel-governance?tab={{ tab.value }}">{{ tab.label }}</a>
+    <a class="ghost-button compact {% if active_tab == tab.value %}active{% endif %}" href="/admin/personnel-governance?tab={{ tab.value }}{% if keyword %}&keyword={{ keyword | urlencode }}{% endif %}">{{ tab.label }}</a>
     {% endfor %}
   </div>
 </section>
@@ -62,47 +79,53 @@
     <h2>历史员工异常修复</h2>
     <p>支持重新关联账号、解除账号关联、重新启用排班、恢复和归档；所有动作只做软修复，不删除历史工单、历史排班、上传文件或数据库记录。</p>
   </div>
-  <div class="table-wrapper">
-    <table class="admin-table">
-      <thead>
+  <div class="table-scroll">
+    <table class="admin-table sticky-table governance-table">
+      <thead class="sticky-header">
         <tr>
-          <th>异常类型</th>
-          <th>人员/账号</th>
+          <th class="sticky-col sticky-col-1">异常类型</th>
+          <th class="sticky-col sticky-col-2">工号</th>
+          <th class="sticky-col sticky-col-3">姓名</th>
           <th>说明</th>
-          <th>建议动作</th>
+          <th class="sticky-actions">建议动作</th>
         </tr>
       </thead>
       <tbody>
         {% for anomaly in historical_anomalies %}
         <tr>
-          <td>
+          <td class="sticky-col sticky-col-1">
             <span class="status-badge {% if anomaly.level == 'danger' %}danger{% else %}warning{% endif %}">{{ anomaly.type_label }}</span>
           </td>
-          <td>
+          <td class="sticky-col sticky-col-2">{{ anomaly.employee.employee_no or '-' }}</td>
+          <td class="sticky-col sticky-col-3">
             <strong>{{ anomaly.employee.employee_name or anomaly.user.display_name or anomaly.user.username or '-' }}</strong>
             <br>
             <small>
+              {% if can_update_account %}
               {% if anomaly.user.username %}账号：{{ anomaly.user.username }}{% else %}账号：未关联{% endif %}
+              {% else %}
+              账号权限信息仅系统管理员可见
+              {% endif %}
               ·
               {% if anomaly.employee.id %}员工 #{{ anomaly.employee.id }}{% else %}员工：未关联{% endif %}
             </small>
           </td>
           <td>{{ anomaly.message }}</td>
-          <td>
+          <td class="sticky-actions">
             <div class="table-actions compact-actions">
-              {% if anomaly.employee.id %}
+              {% if anomaly.employee.id and can_update_account %}
               <a class="ghost-button compact" href="/admin/account/detail?employee_id={{ anomaly.employee.id }}{% if anomaly.user.id %}&user_id={{ anomaly.user.id }}{% endif %}">查看详情</a>
               {% endif %}
-              {% if 'link' in anomaly.actions and anomaly.user.id and anomaly.employee.id %}
-              <form method="post" action="/admin/personnel-governance/link">
+              {% if can_update_account and 'link' in anomaly.actions and anomaly.user.id and anomaly.employee.id %}
+              <form method="post" action="/admin/personnel-governance/link" data-confirm-message="确认重新关联该账号与员工档案？关联后账号权限和员工档案会建立双向关系。">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                 <input type="hidden" name="user_id" value="{{ anomaly.user.id }}">
                 <input type="hidden" name="employee_id" value="{{ anomaly.employee.id }}">
                 <button class="primary-button compact" type="submit">重新关联账号</button>
               </form>
               {% endif %}
-              {% if 'unlink' in anomaly.actions and anomaly.user.id and anomaly.employee.id %}
-              <form method="post" action="/admin/personnel-governance/unlink">
+              {% if can_update_account and 'unlink' in anomaly.actions and anomaly.user.id and anomaly.employee.id %}
+              <form method="post" action="/admin/personnel-governance/unlink" data-confirm-message="确认解除该账号与员工档案的关联？解除后双方记录保留，但不再互相关联。">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                 <input type="hidden" name="user_id" value="{{ anomaly.user.id }}">
                 <input type="hidden" name="employee_id" value="{{ anomaly.employee.id }}">
@@ -110,42 +133,128 @@
               </form>
               {% endif %}
               {% if 'enable_schedule' in anomaly.actions and anomaly.employee.id %}
-              <form method="post" action="/admin/personnel-governance/repair/employee/{{ anomaly.employee.id }}">
+              <form method="post" action="/admin/personnel-governance/repair/employee/{{ anomaly.employee.id }}" data-confirm-message="确认重新启用该人员排班？启用后会重新出现在排班候选中。">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                 <input type="hidden" name="action" value="enable_schedule">
                 <button class="ghost-button compact" type="submit">重新启用排班</button>
+                <small class="field-hint">让该人员重新出现在排班员工选择中。</small>
               </form>
               {% endif %}
-              {% if 'normalize_departed_flags' in anomaly.actions and anomaly.employee.id %}
-              <form method="post" action="/admin/personnel-governance/repair/employee/{{ anomaly.employee.id }}">
+              {% if can_update_account and 'normalize_departed_flags' in anomaly.actions and anomaly.employee.id %}
+              <form method="post" action="/admin/personnel-governance/repair/employee/{{ anomaly.employee.id }}" data-confirm-message="确认修复该人员账号状态？此操作会同步 allow_login、角色相关标记和处理人状态。">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                 <input type="hidden" name="action" value="normalize_departed_flags">
                 <button class="ghost-button compact" type="submit">规范离职/停用</button>
               </form>
               {% endif %}
               {% if 'restore_active' in anomaly.actions and anomaly.employee.id %}
-              <form method="post" action="/admin/personnel-governance/repair/employee/{{ anomaly.employee.id }}">
+              <form method="post" action="/admin/personnel-governance/repair/employee/{{ anomaly.employee.id }}" data-confirm-message="确认恢复该人员为在职可见？恢复后会重新进入人员管理。">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                 <input type="hidden" name="action" value="restore_active">
                 <button class="ghost-button compact" type="submit">恢复在职可见</button>
+                <small class="field-hint">恢复在职状态和人员列表可见性。</small>
               </form>
               {% endif %}
               {% if 'archive' in anomaly.actions and anomaly.employee.id %}
-              <form method="post" action="/admin/personnel-governance/repair/employee/{{ anomaly.employee.id }}">
+              <form method="post" action="/admin/personnel-governance/repair/employee/{{ anomaly.employee.id }}" data-confirm-message="确认归档该历史人员？归档后默认人员列表不再显示，历史记录会保留。">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                 <input type="hidden" name="action" value="archive">
-                <button class="ghost-button compact" type="submit">归档</button>
+                <button class="ghost-button compact" type="submit">归档为历史人员</button>
               </form>
               {% endif %}
             </div>
           </td>
         </tr>
         {% else %}
-        <tr><td class="empty-cell" colspan="4">暂未发现历史员工异常。</td></tr>
+        <tr><td class="empty-cell" colspan="5">暂未发现历史员工异常。</td></tr>
         {% endfor %}
       </tbody>
     </table>
   </div>
+</section>
+
+<section class="work-card residue-cleanup-card">
+  <div class="section-heading admin-section-heading">
+    <h2>历史残留清理</h2>
+    <p>这里只做预览和人工确认；默认不执行清理。系统会区分可安全删除、只能归档、只能隐藏、需要先解除账号关联、存在历史引用不可删除，默认推荐归档/隐藏，不推荐硬删除。</p>
+  </div>
+  <form method="post" action="/admin/personnel-governance/residue-cleanup" data-residue-cleanup-form data-feedback-form data-loading-label="清理中..." data-confirm-message="确认执行历史残留清理？可安全删除项不可恢复，其余项只会归档/隐藏。">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="table-scroll">
+      <table class="admin-table sticky-table governance-table">
+        <thead class="sticky-header">
+          <tr>
+            <th>选择</th>
+            <th class="sticky-col sticky-col-1">异常类型</th>
+            <th class="sticky-col sticky-col-2">工号</th>
+            <th class="sticky-col sticky-col-3">姓名</th>
+            <th>残留原因</th>
+            <th>历史工单数</th>
+            <th>历史排班数</th>
+            <th>账号关联</th>
+            <th>登录日志数</th>
+            <th>操作日志数</th>
+            <th>是否可安全删除</th>
+            <th>推荐动作</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for item in residue_items %}
+          <tr>
+            <td>
+              {% if can_cleanup_residue %}
+              <label class="inline-check residue-target-check">
+                <input type="checkbox" name="target" value="{{ item.key }}">
+                <span>选择</span>
+              </label>
+              {% else %}
+              <span class="status-badge muted">只读</span>
+              {% endif %}
+            </td>
+            <td class="sticky-col sticky-col-1"><span class="status-badge muted">历史残留</span></td>
+            <td class="sticky-col sticky-col-2">{{ item.employee_no or '-' }}</td>
+            <td class="sticky-col sticky-col-3">
+              <strong>{{ item.employee_name }}</strong>
+              <br>
+              <small>#{{ item.employee_id }} · {{ item.store_name or '-' }} · {{ item.role or '-' }}</small>
+            </td>
+            <td>
+              <span class="status-badge muted">残留原因</span>
+              <div class="delete-reason-box">{{ item.reason }}</div>
+            </td>
+            <td>{{ item.ticket_count }}</td>
+            <td>{{ item.schedule_count }}{% if item.recent_schedule_date %}<br><small>最近 {{ item.recent_schedule_date }}</small>{% endif %}</td>
+            <td>{% if item.linked_user_count %}{{ item.linked_user_count }}{% if item.linked_usernames %}<br><small>{{ item.linked_usernames }}</small>{% endif %}{% else %}0{% endif %}</td>
+            <td>{{ item.login_log_count }}</td>
+            <td>{{ item.operation_log_count }}</td>
+            <td><span class="status-badge {% if item.can_safe_delete %}warning{% else %}muted{% endif %}">{{ '是' if item.can_safe_delete else '否' }}</span></td>
+            <td>
+              <span class="status-badge {% if item.can_safe_delete %}warning{% else %}muted{% endif %}">{{ item.recommended_action }}</span>
+              {% if item.action_label and item.action_label != item.recommended_action %}
+              <br><small>{{ item.action_label }}</small>
+              {% endif %}
+            </td>
+          </tr>
+          {% else %}
+          <tr><td class="empty-cell" colspan="12">暂未发现需要清理的历史残留。</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% if can_cleanup_residue and residue_items %}
+    <div class="residue-confirm-grid">
+      <label>
+        <span>二次确认口令</span>
+        <input name="confirm_text" placeholder="DELETE_PERSONNEL_RESIDUE" autocomplete="off">
+        <small class="field-hint">请输入 DELETE_PERSONNEL_RESIDUE 后才允许执行。</small>
+      </label>
+      <label class="inline-check"><input name="confirm_backup" value="1" type="checkbox"><span>我已确认当前为人工预览结果</span></label>
+      <label class="inline-check"><input name="confirm_residue" value="1" type="checkbox"><span>我已确认仅处理历史残留</span></label>
+      <label class="inline-check"><input name="confirm_irreversible" value="1" type="checkbox"><span>我理解可安全删除项不可恢复</span></label>
+      <button class="danger-button compact" type="submit">清理残留</button>
+    </div>
+    {% endif %}
+  </form>
 </section>
 {% else %}
 
@@ -156,7 +265,7 @@
   </div>
   <div class="badge-row">
     {% for tab in filter_tabs %}
-    <a class="ghost-button compact {% if selected_filter == tab.value %}active{% endif %}" href="/admin/personnel-governance?filter={{ tab.value }}">{{ tab.label }}</a>
+    <a class="ghost-button compact {% if selected_filter == tab.value %}active{% endif %}" href="/admin/personnel-governance?filter={{ tab.value }}{% if keyword %}&keyword={{ keyword | urlencode }}{% endif %}">{{ tab.label }}</a>
     {% endfor %}
   </div>
 </section>
@@ -180,6 +289,7 @@
           {% endif %}
         </div>
         <div class="governance-pair-grid">
+          {% if can_update_account %}
           <dl>
             <dt>登录账号</dt>
             <dd>{{ candidate.user.username }}</dd>
@@ -188,18 +298,28 @@
             <dt>数据范围</dt>
             <dd>{{ candidate.user.data_scope }}</dd>
           </dl>
+          {% else %}
           <dl>
+            <dt>账号权限</dt>
+            <dd>账号权限信息仅系统管理员可见</dd>
+          </dl>
+          {% endif %}
+          <dl>
+            <dt>工号</dt>
+            <dd>{{ candidate.employee.employee_no or '-' }}</dd>
             <dt>员工姓名</dt>
             <dd>{{ candidate.employee.employee_name }}</dd>
             <dt>手机号</dt>
             <dd>{{ candidate.employee.phone or '-' }}</dd>
             <dt>主门店</dt>
-            <dd>{{ candidate.employee.primary_store_name or candidate.employee.store_name or '-' }}</dd>
+            <dd>{{ candidate.employee.primary_store_label or candidate.employee.primary_store_name or candidate.employee.store_name or '-' }}</dd>
           </dl>
         </div>
       </div>
       <div class="table-actions compact-actions">
+        {% if can_update_account %}
         <a class="ghost-button compact" href="/admin/account/detail?user_id={{ candidate.user_id }}&employee_id={{ candidate.employee_id }}">查看详情</a>
+        {% endif %}
         {% if can_update_account and not candidate.ignored %}
         <form method="post" action="/admin/personnel-governance/link">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -231,6 +351,7 @@
 </section>
 
 <section class="governance-two-column">
+  {% if can_update_account %}
   <article class="work-card">
     <div class="section-heading admin-section-heading">
       <h2>未关联账号</h2>
@@ -248,6 +369,7 @@
       {% endfor %}
     </div>
   </article>
+  {% endif %}
 
   <article class="work-card">
     <div class="section-heading admin-section-heading">
@@ -258,9 +380,11 @@
       {% for employee in unlinked_employees %}
       <div class="compact-list-row">
         <strong>{{ employee.employee_name }}</strong>
-        <span>{{ employee.primary_store_name or employee.store_name or '-' }} · {{ employee.role or '-' }}</span>
+        <span>工号 {{ employee.employee_no or '-' }} · {{ employee.primary_store_label or employee.primary_store_name or employee.store_name or '-' }} · {{ employee.role or '-' }}</span>
+        {% if can_update_account %}
         <a class="ghost-button compact" href="/admin/account/detail?employee_id={{ employee.id }}">详情</a>
         <a class="ghost-button compact" href="/admin/account?prefill_employee_id={{ employee.id }}">创建登录账号</a>
+        {% endif %}
       </div>
       {% else %}
       <p class="empty-note">暂无未关联员工。</p>

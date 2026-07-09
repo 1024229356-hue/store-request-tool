@@ -197,6 +197,16 @@ REGIONAL_MANAGER_ROLE_NAME = "区域经理"
 STORE_MANAGER_ROLE_NAME = "店长"
 STORE_STAFF_ROLE_NAME = "店员"
 PART_TIME_ROLE_NAME = "兼职"
+NO_PRIMARY_STORE_VALUE = "__NO_PRIMARY_STORE__"
+HEADQUARTERS_PRIMARY_STORE_OPTIONAL_ROLES = {
+    SYSTEM_ADMIN_ROLE_NAME,
+    HEADQUARTERS_MANAGEMENT_ROLE_NAME,
+    PURCHASING_ROLE_NAME,
+    FINANCE_ROLE_NAME,
+    DESIGN_ROLE_NAME,
+    OPERATIONS_ROLE_NAME,
+}
+PRIMARY_STORE_OPTIONAL_ROLES = {*HEADQUARTERS_PRIMARY_STORE_OPTIONAL_ROLES, REGIONAL_MANAGER_ROLE_NAME}
 ADMIN_CRITICAL_PERMISSION_KEYS = {"account.view", "account.update", "role.view", "role.update"}
 DEFAULT_ADMIN_ROLE_DEFINITIONS = [
     {
@@ -1906,6 +1916,8 @@ def fetch_admin_users_for_account_page(keyword: str = "", account_filter: str = 
             primary_store = str(row["linked_primary_store_name"] or row["linked_store_name"] or "").strip()
             bound_stores = employee_store_names.get(int(linked_employee_id), []) if linked_employee_id is not None else []
             schedule_store_names = unique_clean_values([primary_store, *bound_stores])
+            display_bound_stores = [store_name for store_name in schedule_store_names if store_name != primary_store]
+            display_role = str(row["linked_employee_role"] or user.get("role_name") or "")
             user.update(
                 {
                     "person_kind": "user",
@@ -1916,6 +1928,9 @@ def fetch_admin_users_for_account_page(keyword: str = "", account_filter: str = 
                     "phone": str(row["linked_phone"] or ""),
                     "employee_role": str(row["linked_employee_role"] or ""),
                     "primary_store_name": primary_store,
+                    "primary_store_label": employee_primary_store_label(primary_store, display_role),
+                    "bound_store_names": display_bound_stores,
+                    "bound_store_names_text": employee_bound_store_label(display_bound_stores, primary_store, display_role),
                     "schedule_store_names": schedule_store_names,
                     "schedule_store_names_text": join_display_values(schedule_store_names),
                     "employee_status": str(row["linked_employee_status"] or ""),
@@ -8505,9 +8520,10 @@ def calendar_week_rows(days: List[Dict[str, object]]) -> List[List[Optional[Dict
 
 def annotate_schedule_employee(employee: Dict[str, object], selected_store: str) -> Dict[str, object]:
     store_names = list(employee.get("store_names") or [])
-    primary_store = str(employee.get("primary_store_name") or employee.get("store_name") or (store_names[0] if store_names else "")).strip()
+    primary_store = str(employee.get("primary_store_name") or employee.get("store_name") or "").strip()
     annotated = dict(employee)
     annotated["primary_store"] = primary_store
+    annotated["primary_store_label"] = employee_primary_store_label(primary_store, annotated.get("role"))
     annotated["is_current_store_employee"] = bool(not selected_store or selected_store in store_names)
     annotated["is_support_store_employee"] = bool(selected_store and selected_store in store_names and primary_store != selected_store)
     annotated["is_primary_store_employee"] = bool(selected_store and primary_store == selected_store)
@@ -8520,10 +8536,11 @@ def annotate_schedule_employee_for_stores(employee: Dict[str, object], selected_
         return annotate_schedule_employee(employee, selected_stores[0])
     store_names = list(employee.get("store_names") or [])
     selected_store_set = set(selected_stores)
-    primary_store = str(employee.get("primary_store_name") or employee.get("store_name") or (store_names[0] if store_names else "")).strip()
+    primary_store = str(employee.get("primary_store_name") or employee.get("store_name") or "").strip()
     matching_stores = [store_name for store_name in store_names if not selected_store_set or store_name in selected_store_set]
     annotated = dict(employee)
     annotated["primary_store"] = primary_store
+    annotated["primary_store_label"] = employee_primary_store_label(primary_store, annotated.get("role"))
     annotated["is_current_store_employee"] = bool(matching_stores or not selected_store_set)
     annotated["is_primary_store_employee"] = bool(not selected_store_set or primary_store in selected_store_set)
     annotated["is_support_store_employee"] = bool(selected_store_set and matching_stores and primary_store not in selected_store_set)
@@ -8738,16 +8755,66 @@ def normalize_employee_store_data(
     raw_store_names: Optional[List[str]],
     legacy_store_name: str,
     config: AppConfig,
+    participate_schedule: bool = True,
 ) -> Tuple[str, List[str]]:
-    store_names = normalize_store_names(raw_store_names, "")
-    primary_store = primary_store_name.strip() or legacy_store_name.strip() or (store_names[0] if store_names else "")
-    if not primary_store:
-        raise ValueError("请选择主门店。")
+    primary_store = normalize_primary_store_name(primary_store_name) or normalize_primary_store_name(legacy_store_name)
     valid_stores = set(config.stores)
-    if primary_store not in valid_stores or any(store_name not in valid_stores for store_name in store_names):
+    if primary_store and primary_store not in valid_stores:
         raise ValueError("请选择有效门店。")
-    clean_store_names = unique_clean_values([primary_store, *store_names])
+    store_names = normalize_employee_bound_store_names(raw_store_names, valid_stores)
+    clean_store_names = unique_clean_values([primary_store, *store_names] if primary_store else store_names)
+    if participate_schedule and not clean_store_names:
+        raise ValueError("参与排班人员至少需要一个可排班门店。")
     return primary_store, clean_store_names
+
+
+def normalize_primary_store_name(value: object) -> str:
+    clean_value = str(value or "").strip()
+    if clean_value in {"", NO_PRIMARY_STORE_VALUE, "总部", "总部 / 无主门店"}:
+        return ""
+    return clean_value
+
+
+def normalize_employee_bound_store_names(raw_store_names: Optional[List[str]], valid_stores: set[str]) -> List[str]:
+    clean_store_names: List[str] = []
+    for store_name in normalize_store_names(raw_store_names, ""):
+        normalized_store = normalize_primary_store_name(store_name)
+        if normalized_store and normalized_store in valid_stores and normalized_store not in clean_store_names:
+            clean_store_names.append(normalized_store)
+    return clean_store_names
+
+
+def is_headquarters_employee_role(role: object) -> bool:
+    clean_role = str(role or "").strip()
+    if not clean_role:
+        return False
+    if clean_role in HEADQUARTERS_PRIMARY_STORE_OPTIONAL_ROLES:
+        return True
+    return any(keyword in clean_role for keyword in ("总部", "采购", "财务", "设计", "运营经理", "系统管理员"))
+
+
+def is_regional_manager_employee_role(role: object) -> bool:
+    clean_role = str(role or "").strip()
+    return clean_role == REGIONAL_MANAGER_ROLE_NAME or ("区域" in clean_role and "经理" in clean_role)
+
+
+def employee_primary_store_label(primary_store: object, role: object) -> str:
+    clean_primary = str(primary_store or "").strip()
+    if clean_primary:
+        return clean_primary
+    if is_headquarters_employee_role(role) or is_regional_manager_employee_role(role):
+        return "总部 / 无主门店"
+    return "未设置主门店"
+
+
+def employee_bound_store_label(bound_store_names: List[str], primary_store: object, role: object) -> str:
+    if bound_store_names:
+        return join_display_values(bound_store_names)
+    if not str(primary_store or "").strip() and is_headquarters_employee_role(role):
+        return "无门店绑定"
+    if str(primary_store or "").strip():
+        return "无额外绑定门店"
+    return "无门店绑定"
 
 
 def employee_store_map_for_ids(connection: sqlite3.Connection, employee_ids: Iterable[int]) -> Dict[int, List[str]]:
@@ -8849,14 +8916,19 @@ def attach_employee_store_bindings(
     for employee in employees:
         employee_id = int(employee["id"])
         store_names = store_map.get(employee_id, []) or split_multi_value_text(employee.get("store_name"))
-        primary_store = str(employee.get("primary_store_name") or employee.get("store_name") or (store_names[0] if store_names else "")).strip()
+        primary_store = str(employee.get("primary_store_name") or employee.get("store_name") or "").strip()
+        role = str(employee.get("role") or employee.get("role_name") or employee.get("linked_role_name") or "").strip()
         effective_store_names = unique_clean_values([primary_store, *store_names])
+        bound_store_names = [store_name for store_name in effective_store_names if store_name != primary_store]
         employee["primary_store_name"] = primary_store
         employee["store_name"] = primary_store
         employee["store_names"] = effective_store_names
         employee["store_names_text"] = join_display_values(effective_store_names)
-        employee["secondary_store_names"] = [store_name for store_name in effective_store_names if store_name != primary_store]
-        employee["secondary_store_names_text"] = join_display_values(employee["secondary_store_names"])
+        employee["bound_store_names"] = bound_store_names
+        employee["bound_store_names_text"] = employee_bound_store_label(bound_store_names, primary_store, role)
+        employee["primary_store_label"] = employee_primary_store_label(primary_store, role)
+        employee["secondary_store_names"] = bound_store_names
+        employee["secondary_store_names_text"] = join_display_values(bound_store_names)
         employee["show_in_employee_management"] = int(employee.get("show_in_employee_management") if employee.get("show_in_employee_management") is not None else 1)
         employee["schedule_url"] = build_employee_schedule_url(employee)
     return employees
@@ -9197,6 +9269,7 @@ def fetch_account_only_employee_people(user_id: int = 0) -> List[Dict[str, objec
     for row in rows:
         username = str(row["username"] or "")
         display_name = str(row["display_name"] or username)
+        role_name = str(row["role_name"] or "")
         people.append(
             {
                 "id": 0,
@@ -9211,13 +9284,16 @@ def fetch_account_only_employee_people(user_id: int = 0) -> List[Dict[str, objec
                 "person_name": display_name,
                 "username": username,
                 "display_name": display_name,
-                "role": str(row["role_name"] or ""),
-                "role_name": str(row["role_name"] or ""),
+                "role": role_name,
+                "role_name": role_name,
                 "phone": "",
                 "primary_store_name": "",
+                "primary_store_label": employee_primary_store_label("", role_name),
                 "store_name": "",
                 "store_names": [],
                 "store_names_text": "",
+                "bound_store_names": [],
+                "bound_store_names_text": employee_bound_store_label([], "", role_name),
                 "secondary_store_names": [],
                 "secondary_store_names_text": "",
                 "status": "在职",
@@ -9686,11 +9762,17 @@ def create_employee(
     clean_status = status.strip() or "在职"
     if not clean_name:
         raise ValueError("请填写员工姓名。")
-    primary_store, clean_stores = normalize_employee_store_data(primary_store_name, store_names, store_name, config)
     if clean_status not in EMPLOYEE_STATUSES:
         raise ValueError("员工状态不正确。")
     timestamp = now_text()
     schedule_flag = 0 if clean_status in {"离职", "停用"} else int(1 if participate_schedule is None else bool(participate_schedule))
+    primary_store, clean_stores = normalize_employee_store_data(
+        primary_store_name,
+        store_names,
+        store_name,
+        config,
+        participate_schedule=bool(schedule_flag),
+    )
     with get_connection() as connection:
         ensure_unique_employee_no(connection, clean_employee_no)
         cursor = connection.execute(
@@ -9744,8 +9826,6 @@ def update_employee(
     clean_status = status.strip() or "在职"
     if not clean_name:
         raise ValueError("请填写员工姓名。")
-    legacy_primary_store = store_name or str(existing_employee.get("primary_store_name") or existing_employee.get("store_name") or "")
-    primary_store, clean_stores = normalize_employee_store_data(primary_store_name, store_names, legacy_primary_store, config)
     if clean_status not in EMPLOYEE_STATUSES:
         raise ValueError("员工状态不正确。")
     timestamp = now_text()
@@ -9753,6 +9833,13 @@ def update_employee(
     schedule_flag = existing_schedule if participate_schedule is None else int(bool(participate_schedule))
     if clean_status in {"离职", "停用"}:
         schedule_flag = 0
+    primary_store, clean_stores = normalize_employee_store_data(
+        primary_store_name,
+        store_names,
+        store_name,
+        config,
+        participate_schedule=bool(schedule_flag),
+    )
     existing_show = int(existing_employee.get("show_in_employee_management") if existing_employee.get("show_in_employee_management") is not None else 1)
     show_flag = existing_show if show_in_employee_management is None else int(bool(show_in_employee_management))
     with get_connection() as connection:
@@ -13746,8 +13833,14 @@ def schedule_employee_meta_map(employee_ids: Iterable[int], visible_store_names:
         store_names = list(employee.get("store_names") or [])
         if visible_set:
             store_names = [store_name for store_name in store_names if store_name in visible_set]
+        primary_store = str(employee.get("primary_store_name") or employee.get("store_name") or "").strip()
+        bound_store_names = [store_name for store_name in store_names if store_name != primary_store]
         employee["store_names"] = store_names
         employee["store_names_text"] = join_display_values(store_names)
+        employee["bound_store_names"] = bound_store_names
+        employee["bound_store_names_text"] = employee_bound_store_label(bound_store_names, primary_store, employee.get("role"))
+        employee["secondary_store_names"] = bound_store_names
+        employee["secondary_store_names_text"] = join_display_values(bound_store_names)
         result[employee_id] = employee
     return result
 
@@ -16145,12 +16238,12 @@ def create_app() -> FastAPI:
                 clean_name = employee_name.strip() or str(user_row["display_name"] or user_row["username"] or "").strip()
                 if not clean_name:
                     raise ValueError("请填写人员姓名。")
-                fallback_store = primary_store_name or (config.stores[0] if config.stores else "")
                 primary_store, clean_stores = normalize_employee_store_data(
                     primary_store_name,
                     store_names,
-                    fallback_store,
+                    "",
                     config,
+                    participate_schedule=False,
                 )
                 cursor = connection.execute(
                     """
@@ -18275,6 +18368,7 @@ def create_app() -> FastAPI:
                     schedule_store_names,
                     "",
                     load_app_config(),
+                    participate_schedule=True,
                 )
             except ValueError as exc:
                 return render_account_page(request, admin, error=form_error_message(exc), status_code=400)
@@ -18426,13 +18520,14 @@ def create_app() -> FastAPI:
             or str(target_user["username"])
         )
         employee_store_data: Optional[Tuple[str, List[str]]] = None
-        if flags["participate_schedule"]:
+        if flags["participate_schedule"] or linked_employee is not None:
             try:
                 employee_store_data = normalize_employee_store_data(
                     primary_store_name,
                     schedule_store_names,
-                    str((linked_employee or {}).get("primary_store_name") or (linked_employee or {}).get("store_name") or ""),
+                    "",
                     load_app_config(),
+                    participate_schedule=bool(flags["participate_schedule"]),
                 )
             except ValueError as exc:
                 return render_account_page(request, admin, error=form_error_message(exc), status_code=400)
@@ -18505,15 +18600,19 @@ def create_app() -> FastAPI:
                         employee_id_value = int(employee_cursor.lastrowid)
                     replace_employee_store_bindings(connection, employee_id_value, clean_schedule_stores, now_text())
                 elif employee_id_value:
+                    primary_store, clean_schedule_stores = employee_store_data or ("", [])
                     connection.execute(
                         """
                         UPDATE employees
-                        SET employee_name = ?, allow_login = ?, participate_schedule = 0,
+                        SET employee_name = ?, store_name = ?, primary_store_name = ?,
+                            allow_login = ?, participate_schedule = 0,
                             role = ?, phone = ?, status = ?, updated_at = ?
                         WHERE id = ?
                         """,
                         (
                             clean_person_name,
+                            primary_store,
+                            primary_store,
                             flags["allow_login"],
                             employee_role.strip(),
                             phone.strip(),
@@ -18522,6 +18621,7 @@ def create_app() -> FastAPI:
                             employee_id_value,
                         ),
                     )
+                    replace_employee_store_bindings(connection, employee_id_value, clean_schedule_stores, now_text())
                 connection.execute(
                     """
                     UPDATE admin_users

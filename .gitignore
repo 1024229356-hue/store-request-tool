@@ -2,6 +2,7 @@
 *.env
 data/*.db
 data/*.sqlite
+data/
 data/embedded_pages/
 uploads/
 backups/
@@ -15,3 +16,7 @@ __pycache__/
 node_modules/
 dist/
 build/
+docs/acceptance_report_*.md
+docs/non_browser_acceptance_report_*.md
+docs/reset_to_admin_only_report_*.md
+docs/dirty_worktree_review_*.md

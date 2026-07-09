@@ -1,5 +1,5 @@
-{% set page_title = '人员与账号管理' %}
-{% set page_subtitle = '统一维护人员资料、后台登录、权限角色、排班归属和工单处理人资格。' %}
+{% set page_title = '账号权限管理' %}
+{% set page_subtitle = '账号权限涉及后台登录、角色、数据范围和密码重置，仅系统管理员可维护。' %}
 {% set page_eyebrow = '人员与权限' %}
 {% set current_menu = 'account' %}
 {% extends "base_admin.html" %}
@@ -17,12 +17,22 @@
   {%- endif -%}
 {%- endmacro %}
 
-{% block topbar_actions %}
-  <a class="ghost-button compact" href="/admin/personnel-governance">人员数据治理</a>
-  <a class="ghost-button compact" href="/admin/personnel-governance?tab=historical">历史员工异常修复</a>
-  {% if can_create_account and not permission_denied %}
-  <button class="primary-button compact" type="button" data-drawer-open="account-create">新增人员 / 新增账号</button>
+{% macro account_delete_status(user) -%}
+  {% if user.is_last_active_system_admin %}
+  <span class="status-badge danger">最后系统管理员</span>
+  <div class="delete-reason-box">不能删除、停用或关闭最后一个 active 系统管理员。</div>
+  {% elif user.can_hard_delete %}
+  <span class="status-badge active">可安全删除</span>
+  {% else %}
+  {% set reason = user.delete_block_reason or '' %}
+  <span class="status-badge warning">{% if '登录' in reason %}有登录记录{% elif '操作' in reason %}有操作日志{% elif '工单' in reason %}有工单记录{% else %}有历史记录{% endif %}</span>
+  <div class="delete-reason-box">该账号存在历史登录/操作/工单记录，不能永久删除，可关闭并隐藏。{% if reason %}原因：{{ reason }}。{% endif %}</div>
   {% endif %}
+{%- endmacro %}
+
+{% block topbar_actions %}
+  <a class="primary-button compact" href="/admin/employees">进入人员管理</a>
+  <a class="ghost-button compact" href="/admin/roles">查看角色权限</a>
 {% endblock %}
 
 {% block content %}
@@ -54,8 +64,8 @@
 
   <article class="work-card account-rbac-card">
     <div class="section-heading admin-section-heading">
-      <h2>人员统计</h2>
-      <p>一个人只维护一次，可以按需启用后台登录、排班和处理人资格。</p>
+      <h2>账号统计</h2>
+      <p>后台账号、角色权限、数据范围和处理人资格由系统管理员维护；人员与账号管理已拆分到人员/组织架构管理。</p>
     </div>
     <div class="badge-row">
       <span class="status-badge active">总人员数 {{ people_stats.total_people }}</span>
@@ -69,77 +79,149 @@
 
 <section class="work-card account-list-card">
   <div class="section-heading admin-section-heading">
-    <h2>人员列表</h2>
-    <p>账号列表已合并到人员资料；停用登录不会影响历史排班和历史工单。</p>
+    <h2>账号权限视图</h2>
+    <p>本页仅展示已开通后台账号的人员。新增人员、离职、排班身份请到人员管理维护。允许登录后台、系统角色、数据范围和密码重置仅系统管理员可维护。</p>
+    <span hidden>人员与账号管理 账号列表</span>
   </div>
-  <div class="table-wrap">
-    <table class="ticket-table erp-table account-table">
-      <thead>
+  <form class="filter-bar account-filter-bar" method="get" action="/admin/account" data-feedback-form data-loading-label="搜索中...">
+    <label class="wide-filter">
+      <span>搜索</span>
+      <input name="keyword" type="search" value="{{ keyword }}" placeholder="搜索工号 / 姓名 / 登录账号 / 手机号">
+    </label>
+    <label>
+      <span>显示范围</span>
+      <select name="filter">
+        <option value="visible" {% if account_filter == 'visible' %}selected{% endif %}>显示中账号</option>
+        <option value="enabled" {% if account_filter == 'enabled' %}selected{% endif %}>启用账号</option>
+        <option value="disabled" {% if account_filter == 'disabled' %}selected{% endif %}>停用账号</option>
+        <option value="hidden" {% if account_filter == 'hidden' %}selected{% endif %}>隐藏账号</option>
+        <option value="safe_delete" {% if account_filter == 'safe_delete' %}selected{% endif %}>可安全删除</option>
+        <option value="unsafe_delete" {% if account_filter == 'unsafe_delete' %}selected{% endif %}>不可安全删除</option>
+        <option value="missing_employee" {% if account_filter == 'missing_employee' %}selected{% endif %}>缺员工档案</option>
+        <option value="system_admin" {% if account_filter == 'system_admin' %}selected{% endif %}>系统管理员账号</option>
+        <option value="assignable" {% if account_filter == 'assignable' %}selected{% endif %}>可作为处理人</option>
+        <option value="all" {% if account_filter == 'all' %}selected{% endif %}>全部账号</option>
+      </select>
+    </label>
+    <div class="filter-actions">
+      <button class="primary-button compact" type="submit">搜索</button>
+      <a class="ghost-button compact" href="/admin/account">重置</a>
+    </div>
+  </form>
+  <div class="table-scroll">
+    <table class="ticket-table erp-table sticky-table account-table">
+      <thead class="sticky-header">
         <tr>
-          <th>姓名</th>
+          <th class="sticky-col sticky-col-1">工号</th>
+          <th class="sticky-col sticky-col-2">姓名</th>
           <th>登录账号</th>
-          <th>系统权限角色</th>
-          <th>组织/岗位</th>
-          <th>主门店</th>
-          <th>绑定门店</th>
-          <th>登录/排班/处理人</th>
-          <th>状态</th>
-          <th>操作</th>
+          <th>系统角色</th>
+          <th>数据范围</th>
+          <th>是否启用</th>
+          <th>显示状态</th>
+          <th>是否可作为处理人</th>
+          <th>最近登录</th>
+          <th>关联员工档案</th>
+          <th>删除状态</th>
+          <th class="sticky-actions">操作</th>
         </tr>
       </thead>
       <tbody>
         {% for user in users %}
         <tr>
-          <td><strong>{{ user.person_name or user.display_name or user.username }}</strong></td>
-          <td>{{ user.username or '不允许登录' }}</td>
-          <td><span class="role-badge">{{ user.role_name or '无后台角色' }}</span></td>
-          <td>{{ user.employee_role or '-' }}</td>
-          <td>{{ user.primary_store_name or '-' }}</td>
-          <td>{{ user.schedule_store_names_text or '-' }}</td>
-          <td>
-            {% if user.allow_login and user.is_active %}
-            <span class="status-badge active">允许登录</span>
-            {% else %}
-            <span class="status-badge muted">不可登录</span>
-            {% endif %}
-            {% if user.participate_schedule %}
-            <span class="status-badge active">参与排班</span>
-            {% else %}
-            <span class="status-badge muted">不排班</span>
-            {% endif %}
-            {% if user.is_assignable and user.allow_login and user.is_active %}
-            <span class="status-badge active">可指派</span>
-            {% else %}
-            <span class="status-badge muted">不可指派</span>
+          <td class="sticky-col sticky-col-1">{{ user.employee_no or '-' }}</td>
+          <td class="sticky-col sticky-col-2">
+            <strong>{{ user.person_name or user.display_name or user.username }}</strong>
+            {% if user.phone %}<br><small>{{ user.phone }}</small>{% endif %}
+            {% if user.employee_id %}
+            <br><small>主门店：{{ user.primary_store_label or user.primary_store_name or '-' }}</small>
+            <br><small>绑定门店：{{ user.bound_store_names_text or '无额外绑定门店' }}</small>
             {% endif %}
           </td>
+          <td>{{ user.username or '不允许登录' }}</td>
+          <td><span class="role-badge">{{ user.role_name or '无后台角色' }}</span></td>
+          <td>{{ data_scope_label(user.data_scope) }}{% if user.store_names %}<br><small>{{ user.store_names }}</small>{% endif %}</td>
           <td>
-            {% if user.employee_status == '离职' %}
-            <span class="status-badge danger">离职</span>
-            {% elif user.is_active or user.participate_schedule %}
+            {% if user.allow_login and user.is_active %}
             <span class="status-badge active">启用</span>
             {% else %}
             <span class="status-badge danger">停用</span>
             {% endif %}
           </td>
           <td>
-            <div class="table-actions compact-actions">
+            {% if user.show_in_account_management %}
+            <span class="status-badge active">显示中</span>
+            {% else %}
+            <span class="status-badge muted">已隐藏</span>
+            {% endif %}
+          </td>
+          <td>
+            {% if user.is_assignable and user.allow_login and user.is_active %}
+            <span class="status-badge active">可作为处理人</span>
+            {% else %}
+            <span class="status-badge muted">不可作为处理人</span>
+            {% endif %}
+          </td>
+          <td>{{ user.last_login_at or '暂无记录' }}</td>
+          <td>
+            {% if user.employee_id %}
+            <span class="status-badge active">已关联员工档案</span>
+            {% else %}
+            <span class="status-badge warning">缺员工档案，建议到人员管理补建</span>
+            <span hidden>未建员工档案</span>
+            <a class="ghost-button compact" href="/admin/employees?source=account_only&user_id={{ user.id }}">到人员管理补建</a>
+            {% endif %}
+          </td>
+          <td class="delete-status-cell">
+            {{ account_delete_status(user) }}
+          </td>
+          <td class="sticky-actions">
+            <div class="table-actions compact-actions" data-account-row-actions="{{ user.id }}">
               {% if can_update_account and user.username %}
               <button class="ghost-button compact" type="button" data-drawer-open="account-edit-{{ user.id }}">编辑</button>
               {% endif %}
               {% if can_reset_password and user.username and user.allow_login %}
               <button class="ghost-button compact" type="button" data-drawer-open="account-reset-{{ user.id }}">重置密码</button>
               {% endif %}
-              {% if can_disable_account and user.username and user.username != admin_user %}
+              <a class="ghost-button compact" href="/admin/employees?user_id={{ user.id }}">进入人员管理</a>
+              {% if user.employee_id %}
+              <form method="post" action="/admin/accounts/{{ user.id }}/unlink-employee" data-confirm-message="确认解除该账号与人员档案的关联？账号和人员档案都会保留，历史工单、排班和日志不受影响。">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <button class="ghost-button compact" type="submit">解除账号关联</button>
+              </form>
+              {% else %}
+              <a class="ghost-button compact" href="/admin/employees?source=account_only&user_id={{ user.id }}">补建员工档案</a>
+              {% endif %}
+              {% if can_disable_account and user.username and user.username != admin_user and not user.is_last_active_system_admin %}
                 {% if user.is_active %}
-                <form method="post" action="/admin/account/users/{{ user.id }}/disable">
+                <form method="post" action="/admin/accounts/{{ user.id }}/disable-login" data-confirm-message="确认关闭该人员的后台账号？关闭后将不能登录后台，但历史记录会保留。">
                   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                  <button class="ghost-button compact danger" type="submit">停用登录</button>
+                  <button class="ghost-button compact danger" type="submit">关闭后台账号</button>
                 </form>
                 {% else %}
-                <form method="post" action="/admin/account/users/{{ user.id }}/enable">
+                <form method="post" action="/admin/accounts/{{ user.id }}/enable-login" data-confirm-message="确认重新启用该人员的后台账号？启用后可按角色和数据范围登录后台。">
                   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                  <button class="ghost-button compact" type="submit">启用登录</button>
+                  <button class="ghost-button compact" type="submit">启用后台账号</button>
+                </form>
+                {% endif %}
+              {% endif %}
+              {% if can_update_account and user.username and not user.is_last_active_system_admin %}
+                {% if not user.show_in_account_management %}
+                <form method="post" action="/admin/accounts/{{ user.id }}/show" data-confirm-message="确认恢复显示该后台账号？此操作只影响账号列表显示，不会自动恢复登录。">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                  <button class="ghost-button compact" type="submit">显示账号</button>
+                </form>
+                {% else %}
+                  {% if user.can_hard_delete %}
+                <form method="post" action="/admin/accounts/{{ user.id }}/safe-delete" data-confirm-message="确认安全删除该后台账号？仅删除 admin_user 登录身份，不删除人员档案，历史记录不受影响。">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                  <input type="hidden" name="confirm_delete" value="1">
+                  <button class="danger-button compact" type="submit">安全删除账号</button>
+                </form>
+                  {% endif %}
+                <form method="post" action="/admin/accounts/{{ user.id }}/hide" data-confirm-message="确认关闭并隐藏该后台账号？账号不能登录，人员档案、历史工单、排班和日志仍保留。">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                  <button class="ghost-button compact warning" type="submit">隐藏账号</button>
                 </form>
                 {% endif %}
               {% endif %}
@@ -147,89 +229,12 @@
           </td>
         </tr>
         {% else %}
-        <tr><td class="empty-cell" colspan="9">暂无人员。</td></tr>
+        <tr><td class="empty-cell" colspan="12">暂无账号。</td></tr>
         {% endfor %}
       </tbody>
     </table>
   </div>
 </section>
-
-{% if can_create_account %}
-<div class="drawer-overlay" data-drawer="account-create" hidden>
-  <aside class="drawer-panel" role="dialog" aria-modal="true" aria-labelledby="account-create-title">
-    <header>
-      <div>
-        <p class="eyebrow">人员与账号管理</p>
-        <h2 id="account-create-title">新增人员</h2>
-      </div>
-      <button class="modal-close" type="button" data-drawer-close aria-label="关闭">×</button>
-    </header>
-    <form class="drawer-form" method="post" action="/admin/account/users">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-
-      <div class="form-section-title">基础信息</div>
-      <label><span>姓名</span><input name="employee_name" type="text" required></label>
-      <label><span>手机</span><input name="phone" type="text"></label>
-      <label><span>组织/岗位</span><input name="employee_role" type="text" placeholder="店长、店员、采购、财务、设计"></label>
-      <label>
-        <span>主门店</span>
-        <select name="primary_store_name">
-          <option value="">不参与排班可不选</option>
-          {% for store in stores %}<option value="{{ store }}">{{ store }}</option>{% endfor %}
-        </select>
-      </label>
-      <label class="full-span">
-        <span>绑定门店</span>
-        <div class="store-checkbox-grid">
-          {% for store in stores %}
-          <label class="choice-chip store-choice-chip"><input type="checkbox" name="schedule_store_names" value="{{ store }}"><span>{{ store }}</span></label>
-          {% endfor %}
-        </div>
-      </label>
-
-      <div class="form-section-title">登录权限</div>
-      <input type="hidden" name="allow_login" value="0">
-      <label class="inline-check"><input name="allow_login" value="1" type="checkbox"><span>允许登录后台</span></label>
-      <label><span>用户名</span><input name="username" type="text" pattern="[A-Za-z0-9_-]+"></label>
-      <label><span>初始密码</span><input name="password" type="password" minlength="6" autocomplete="new-password"></label>
-      <label><span>确认密码</span><input name="password_confirm" type="password" minlength="6" autocomplete="new-password"></label>
-      <label>
-        <span>系统权限角色</span>
-        <select name="role_id">
-          <option value="0">不允许登录可不选</option>
-          {% for role in roles %}<option value="{{ role.id }}">{{ role.role_name }}</option>{% endfor %}
-        </select>
-      </label>
-      <label>
-        <span>数据范围</span>
-        <select name="data_scope">
-          {% for option in data_scope_options %}<option value="{{ option.value }}">{{ option.label }}</option>{% endfor %}
-        </select>
-      </label>
-      <label><span>门店范围</span><input name="store_names" type="text" placeholder="权限数据范围，多个门店用逗号分隔"></label>
-      <input type="hidden" name="is_active" value="0">
-      <label class="inline-check"><input name="is_active" value="1" type="checkbox" checked><span>启用登录账号</span></label>
-
-      <div class="form-section-title">业务参与</div>
-      <input type="hidden" name="participate_schedule" value="0">
-      <label class="inline-check"><input name="participate_schedule" value="1" type="checkbox"><span>参与排班</span></label>
-      <input type="hidden" name="is_assignable" value="0">
-      <label class="inline-check"><input name="is_assignable" value="1" type="checkbox"><span>可作为工单处理人</span></label>
-      <label>
-        <span>员工状态</span>
-        <select name="employee_status">
-          {% for item in employee_statuses %}<option value="{{ item }}">{{ item }}</option>{% endfor %}
-        </select>
-      </label>
-
-      <div class="modal-footer">
-        <button class="ghost-button" type="button" data-drawer-close>取消</button>
-        <button class="primary-button" type="submit">保存人员</button>
-      </div>
-    </form>
-  </aside>
-</div>
-{% endif %}
 
 {% for user in users %}
 {% if can_update_account and user.username %}
@@ -238,24 +243,26 @@
     <header>
       <div>
         <p class="eyebrow">{{ user.username }}</p>
-        <h2 id="account-edit-title-{{ user.id }}">编辑人员</h2>
+        <h2 id="account-edit-title-{{ user.id }}">编辑账号</h2>
       </div>
       <button class="modal-close" type="button" data-drawer-close aria-label="关闭">×</button>
     </header>
-    <form class="drawer-form" method="post" action="/admin/account/users/{{ user.id }}/update">
+    <form class="drawer-form" method="post" action="/admin/account/users/{{ user.id }}/update" data-confirm-message="确认保存该人员的账号权限设置？修改系统角色或数据范围会立即影响后台访问权限。">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <div class="form-section-title">基础信息</div>
+      <label><span>工号</span><input type="text" value="{{ user.employee_no or '未填写' }}" disabled></label>
       <label><span>姓名</span><input name="employee_name" type="text" value="{{ user.person_name or user.display_name or user.username }}" required></label>
       <label><span>手机</span><input name="phone" type="text" value="{{ user.phone }}"></label>
       <label><span>组织/岗位</span><input name="employee_role" type="text" value="{{ user.employee_role }}"></label>
       <label>
         <span>主门店</span>
         <select name="primary_store_name">
-          <option value="">不参与排班可不选</option>
+          <option value="__NO_PRIMARY_STORE__">总部 / 无主门店</option>
           {% for store in stores %}
           <option value="{{ store }}" {% if user.primary_store_name == store %}selected{% endif %}>{{ store }}</option>
           {% endfor %}
         </select>
+        <small class="field-hint">总部人员可不选择；门店人员建议选择主门店。</small>
       </label>
       <label class="full-span">
         <span>绑定门店</span>
@@ -264,6 +271,7 @@
           <label class="choice-chip store-choice-chip"><input type="checkbox" name="schedule_store_names" value="{{ store }}" {% if store in user.schedule_store_names %}checked{% endif %}><span>{{ store }}</span></label>
           {% endfor %}
         </div>
+        <small class="field-hint">用于跨店排班、区域管理或多门店数据范围；无需重复选择主门店。</small>
       </label>
 
       <div class="form-section-title">登录权限</div>
@@ -294,6 +302,7 @@
       <div class="form-section-title">业务参与</div>
       <input type="hidden" name="participate_schedule" value="0">
       <label class="inline-check"><input name="participate_schedule" value="1" type="checkbox" {% if user.participate_schedule %}checked{% endif %}><span>参与排班</span></label>
+      <small class="field-hint full-span">参与排班时，必须至少有一个可排班门店。</small>
       <input type="hidden" name="is_assignable" value="0">
       <label class="inline-check"><input name="is_assignable" value="1" type="checkbox" {% if user.is_assignable %}checked{% endif %}><span>可作为工单处理人</span></label>
       <label>
@@ -324,7 +333,7 @@
       </div>
       <button class="modal-close" type="button" data-drawer-close aria-label="关闭">×</button>
     </header>
-    <form class="drawer-form" method="post" action="/admin/account/users/{{ user.id }}/reset-password">
+    <form class="drawer-form" method="post" action="/admin/accounts/{{ user.id }}/reset-password" data-confirm-message="确认重置该人员的后台登录密码？提交后新密码会立即生效。">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <label><span>新密码</span><input name="password" type="password" minlength="6" autocomplete="new-password" required></label>
       <label><span>确认密码</span><input name="password_confirm" type="password" minlength="6" autocomplete="new-password" required></label>

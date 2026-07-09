@@ -181,7 +181,7 @@
           {% for employee in context.employee_options %}
           <label class="choice-chip compact-chip">
             <input type="checkbox" name="employee_ids" value="{{ employee.id }}" {% if employee.id|string in context.selected_employee_ids %}checked{% endif %}>
-            <span>{{ employee.employee_name }}<small>工号 {{ employee.employee_no or '-' }} · {{ employee.primary_store or '-' }}</small></span>
+            <span>{{ employee.employee_name }}<small>工号 {{ employee.employee_no or '-' }} · {{ employee.primary_store_label or employee.primary_store or '未设置主门店' }}</small></span>
           </label>
           {% else %}
           <small class="empty-note">当前范围暂无可筛选员工。</small>
@@ -233,8 +233,8 @@
               {{ employee.employee_name }}
               <small>工号：{{ employee.employee_no or '-' }}</small>
               {% if employee.role %}<small>{{ employee.role }}</small>{% endif %}
-              <small class="store-tag-primary">主门店：{{ employee.primary_store or '-' }}</small>
-              <small class="store-tag-available">可排门店：{{ employee.store_names_text or '-' }}</small>
+              <small class="store-tag-primary">主门店：{{ employee.primary_store_label or employee.primary_store or '未设置主门店' }}</small>
+              <small class="store-tag-available">额外可排门店：{{ employee.bound_store_names_text or '无额外绑定门店' }}</small>
               {% if employee.is_support_store_employee %}<small>跨店支援</small>{% endif %}
             </span>
           </label>
@@ -565,7 +565,7 @@
             <p class="subtle">工号 {{ employee.employee_no or '-' }}</p>
             <p>{{ employee.role or '未设置角色' }} · {{ employee.status }}</p>
           </div>
-          <span class="employee-status-pill">{{ employee.primary_store or '-' }}</span>
+          <span class="employee-status-pill">{{ employee.primary_store_label or employee.primary_store or '未设置主门店' }}</span>
         </header>
         <div class="employee-card-metrics">
           <span class="metric-hours"><strong>{{ summary.total_hours }}</strong><small>本月工时</small></span>
@@ -661,8 +661,8 @@
             <th class="sticky-employee-col schedule-employee-col">
               <strong>{{ employee.employee_name }}</strong>
               <span>工号 {{ employee.employee_no or '-' }} · {{ employee.role or '' }} · {{ employee.status }}</span>
-              <small class="store-tag-primary">主门店：{{ employee.primary_store or '-' }}</small>
-              <small class="store-tag-available">可排门店：{{ employee.store_names_text or '-' }}</small>
+              <small class="store-tag-primary">主门店：{{ employee.primary_store_label or employee.primary_store or '未设置主门店' }}</small>
+              <small class="store-tag-available">额外可排门店：{{ employee.bound_store_names_text or '无额外绑定门店' }}</small>
             </th>
             {% for day in context.days %}
             {% set day_schedules = context.schedule_map.get(day.date, {}) %}

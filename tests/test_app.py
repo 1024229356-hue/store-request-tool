@@ -293,6 +293,67 @@ def admin_post(client, url, data=None, **kwargs):
     return client.post(url, data=payload, **kwargs)
 
 
+ATTR_RE = re.compile(r'([:\w-]+)\s*=\s*"([^"]*)"')
+INPUT_RE = re.compile(r"<input\b[^>]*>", re.IGNORECASE)
+SELECT_RE = re.compile(r"<select\b[^>]*>.*?</select>", re.IGNORECASE | re.DOTALL)
+OPTION_RE = re.compile(r"<option\b[^>]*>.*?</option>", re.IGNORECASE | re.DOTALL)
+
+
+def tag_attrs(tag):
+    return {match.group(1): html.unescape(match.group(2)) for match in ATTR_RE.finditer(tag)}
+
+
+def rendered_form_html(page_text, action):
+    matches = [
+        match.group(0)
+        for match in re.finditer(rf'<form\b[^>]*action="{re.escape(action)}"[^>]*>.*?</form>', page_text, re.IGNORECASE | re.DOTALL)
+    ]
+    assert matches, f"form action not found: {action}"
+    return next(
+        (
+            form_html
+            for form_html in matches
+            if re.search(r'\bmethod="post"', form_html, re.IGNORECASE) and 'name="primary_store_name"' in form_html
+        ),
+        matches[0],
+    )
+
+
+def rendered_form_payload(form_html):
+    payload = {}
+    for input_tag in INPUT_RE.findall(form_html):
+        attrs = tag_attrs(input_tag)
+        name = attrs.get("name")
+        if not name:
+            continue
+        input_type = attrs.get("type", "text")
+        if input_type in {"checkbox", "radio"} and "checked" not in input_tag:
+            continue
+        value = attrs.get("value", "on")
+        if name in payload:
+            if not isinstance(payload[name], list):
+                payload[name] = [payload[name]]
+            payload[name].append(value)
+        else:
+            payload[name] = value
+    for select_tag in SELECT_RE.findall(form_html):
+        select_attrs = tag_attrs(select_tag.split(">", 1)[0])
+        name = select_attrs.get("name")
+        if not name:
+            continue
+        options = OPTION_RE.findall(select_tag)
+        selected = next((option for option in options if "selected" in option), options[0] if options else "")
+        payload[name] = tag_attrs(selected).get("value", "")
+    return payload
+
+
+def no_primary_store_option_value(form_html):
+    for option in OPTION_RE.findall(form_html):
+        if "总部 / 无主门店" in option:
+            return tag_attrs(option).get("value", "")
+    raise AssertionError("总部 / 无主门店 option not found")
+
+
 def assert_html_forbidden(response):
     assert response.status_code == 403
     assert "text/html" in response.headers.get("content-type", "")
@@ -1487,6 +1548,477 @@ def test_employees_page_show_filter_hide_restore_and_schedule_candidate(tmp_path
     assert updated["show_in_employee_management"] == 1
     assert updated["participate_schedule"] == 1
     assert "普通人员" in client.get("/admin/schedules?store_name=南京门东店&month=2026-07").text
+
+
+def test_headquarters_roles_can_save_employee_without_primary_store(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch, admin_users="admin:123456")
+    logged_in_client(client, "admin", "123456")
+
+    for role in ["系统管理员", "总部管理层", "采购", "财务", "设计", "运营经理"]:
+        response = admin_post(
+            client,
+            "/admin/employees",
+            data={
+                "employee_name": f"{role}无主门店",
+                "role": role,
+                "phone": "",
+                "status": "在职",
+                "primary_store_name": "",
+                "show_in_employee_management": "1",
+                "participate_schedule": "0",
+            },
+            follow_redirects=False,
+        )
+        assert response.status_code == 303
+        assert "error=" not in response.headers["location"]
+
+    employees = rows_for(tmp_path, "employees")
+    assert [row["employee_name"] for row in employees] == [f"{role}无主门店" for role in ["系统管理员", "总部管理层", "采购", "财务", "设计", "运营经理"]]
+    assert all((row["primary_store_name"] or "") == "" for row in employees)
+    assert all((row["store_name"] or "") == "" for row in employees)
+    assert rows_for(tmp_path, "employee_store_map") == []
+
+    page = client.get("/admin/employees")
+    assert page.status_code == 200
+    assert "系统管理员无主门店" in page.text
+    assert "总部" in page.text
+    assert "无门店绑定" in page.text
+
+
+def test_employee_update_can_clear_existing_primary_store_with_no_primary_option(tmp_path, monkeypatch):
+    client, main = build_client(tmp_path, monkeypatch, admin_users="admin:123456")
+    logged_in_client(client, "admin", "123456")
+    employee_id = main.create_employee(
+        "总部管理员",
+        "南京门东店",
+        "系统管理员",
+        "",
+        "在职",
+        main.load_app_config(),
+        primary_store_name="南京门东店",
+        store_names=["南京门东店"],
+        participate_schedule=False,
+    )
+
+    response = admin_post(
+        client,
+        f"/admin/employees/{employee_id}/update",
+        data={
+            "employee_name": "总部管理员",
+            "role": "系统管理员",
+            "phone": "",
+            "status": "在职",
+            "primary_store_name": "__NO_PRIMARY_STORE__",
+            "show_in_employee_management": "1",
+            "participate_schedule": "0",
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    employee = next(row for row in rows_for(tmp_path, "employees") if row["id"] == employee_id)
+    assert (employee["primary_store_name"] or "") == ""
+    assert (employee["store_name"] or "") == ""
+    assert [row for row in rows_for(tmp_path, "employee_store_map") if row["employee_id"] == employee_id] == []
+    page = client.get("/admin/employees")
+    assert page.status_code == 200
+    assert "总部管理员" in page.text
+    assert "总部 / 无主门店" in page.text
+
+
+def test_employees_real_rendered_form_posts_no_primary_and_bound_stores(tmp_path, monkeypatch):
+    client, main = build_client(tmp_path, monkeypatch, admin_users="admin:123456")
+    logged_in_client(client, "admin", "123456")
+    employee_id = main.create_employee(
+        "真实表单总部管理员",
+        "南京门东店",
+        "系统管理员",
+        "",
+        "在职",
+        main.load_app_config(),
+        primary_store_name="南京门东店",
+        store_names=["南京门东店"],
+        participate_schedule=False,
+    )
+
+    page = client.get("/admin/employees")
+    edit_form = rendered_form_html(page.text, f"/admin/employees/{employee_id}/update")
+    edit_payload = rendered_form_payload(edit_form)
+    edit_payload["primary_store_name"] = no_primary_store_option_value(edit_form)
+    edit_payload.pop("store_names", None)
+    edit_payload["participate_schedule"] = "0"
+
+    update = client.post(f"/admin/employees/{employee_id}/update", data=edit_payload, follow_redirects=True)
+
+    assert update.status_code == 200
+    assert "请选择有效门店" not in update.text
+    employee = next(row for row in rows_for(tmp_path, "employees") if row["id"] == employee_id)
+    assert (employee["primary_store_name"] or "") == ""
+    assert (employee["store_name"] or "") == ""
+    assert "总部 / 无主门店" in update.text
+
+    create_page = client.get("/admin/employees")
+    create_form = rendered_form_html(create_page.text, "/admin/employees")
+    create_payload = rendered_form_payload(create_form)
+    create_payload.update(
+        {
+            "employee_name": "真实表单区域经理",
+            "role": "区域经理",
+            "primary_store_name": no_primary_store_option_value(create_form),
+            "store_names": ["南京门东店", "南昌万寿宫店"],
+            "participate_schedule": "0",
+        }
+    )
+    create = client.post("/admin/employees", data=create_payload, follow_redirects=True)
+
+    assert create.status_code == 200
+    assert "请选择有效门店" not in create.text
+    regional = next(row for row in rows_for(tmp_path, "employees") if row["employee_name"] == "真实表单区域经理")
+    assert (regional["primary_store_name"] or "") == ""
+    assert [(row["employee_id"], row["store_name"]) for row in rows_for(tmp_path, "employee_store_map") if row["employee_id"] == regional["id"]] == [
+        (regional["id"], "南京门东店"),
+        (regional["id"], "南昌万寿宫店"),
+    ]
+    regional_page = client.get("/admin/employees")
+    regional_form = rendered_form_html(regional_page.text, f"/admin/employees/{regional['id']}/update")
+    assert 'value="南京门东店" data-store-checkbox checked' in regional_form
+    assert 'value="南昌万寿宫店" data-store-checkbox checked' in regional_form
+
+    failing_payload = rendered_form_payload(create_form)
+    failing_payload.update(
+        {
+            "employee_name": "真实表单无门店排班店员",
+            "role": "店员",
+            "primary_store_name": no_primary_store_option_value(create_form),
+            "participate_schedule": ["0", "1"],
+        }
+    )
+    failing_payload.pop("store_names", None)
+    failed = client.post("/admin/employees", data=failing_payload, follow_redirects=True)
+
+    assert failed.status_code == 200
+    assert "参与排班人员至少需要一个可排班门店。" in failed.text
+    assert "请选择有效门店" not in failed.text
+    assert not any(row["employee_name"] == "真实表单无门店排班店员" for row in rows_for(tmp_path, "employees"))
+
+
+def test_account_update_can_clear_linked_employee_primary_store_when_not_scheduling(tmp_path, monkeypatch):
+    client, main = build_client(tmp_path, monkeypatch, admin_users="admin:123456")
+    logged_in_client(client, "admin", "123456")
+    ops_role_id = role_id_by_name(tmp_path, "运营经理")
+    user_id = create_test_admin_user(
+        tmp_path,
+        "hq_admin",
+        "总部管理员",
+        role_name="运营经理",
+        allow_login=1,
+        is_assignable=1,
+    )
+    employee_id = main.create_employee(
+        "总部管理员",
+        "南京门东店",
+        "系统管理员",
+        "",
+        "在职",
+        main.load_app_config(),
+        primary_store_name="南京门东店",
+        store_names=["南京门东店"],
+        participate_schedule=False,
+    )
+    with sqlite3.connect(tmp_path / "tickets.db") as connection:
+        connection.execute("UPDATE admin_users SET employee_id = ? WHERE id = ?", (employee_id, user_id))
+        connection.execute("UPDATE employees SET user_id = ?, allow_login = 1 WHERE id = ?", (user_id, employee_id))
+
+    response = client.post(
+        f"/admin/account/users/{user_id}/update",
+        data={
+            "csrf_token": csrf_token_for(client, "/admin/account"),
+            "employee_name": "总部管理员",
+            "employee_role": "系统管理员",
+            "phone": "",
+            "primary_store_name": "__NO_PRIMARY_STORE__",
+            "allow_login": "1",
+            "username": "hq_admin",
+            "role_id": str(ops_role_id),
+            "data_scope": "all",
+            "store_names": "",
+            "is_assignable": "1",
+            "is_active": "1",
+            "participate_schedule": "0",
+            "employee_status": "在职",
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    employee = next(row for row in rows_for(tmp_path, "employees") if row["id"] == employee_id)
+    assert (employee["primary_store_name"] or "") == ""
+    assert (employee["store_name"] or "") == ""
+    assert employee["participate_schedule"] == 0
+    assert [row for row in rows_for(tmp_path, "employee_store_map") if row["employee_id"] == employee_id] == []
+
+
+def test_no_primary_store_label_is_not_saved_as_store_name(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch, admin_users="admin:123456")
+    logged_in_client(client, "admin", "123456")
+
+    response = admin_post(
+        client,
+        "/admin/employees",
+        data={
+            "employee_name": "总部采购无主门店",
+            "role": "采购",
+            "phone": "",
+            "status": "在职",
+            "primary_store_name": "总部 / 无主门店",
+            "show_in_employee_management": "1",
+            "participate_schedule": "0",
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    employee = rows_for(tmp_path, "employees")[0]
+    assert (employee["primary_store_name"] or "") == ""
+    assert (employee["store_name"] or "") == ""
+    assert rows_for(tmp_path, "employee_store_map") == []
+
+
+def test_employee_schedule_participation_requires_at_least_one_schedulable_store(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch, admin_users="admin:123456")
+    logged_in_client(client, "admin", "123456")
+
+    for role in ["店员", "兼职"]:
+        response = admin_post(
+            client,
+            "/admin/employees",
+            data={
+                "employee_name": f"{role}无门店可排",
+                "role": role,
+                "phone": "",
+                "status": "在职",
+                "primary_store_name": "",
+                "show_in_employee_management": "1",
+                "participate_schedule": "1",
+            },
+            follow_redirects=True,
+        )
+        assert response.status_code == 200
+        assert "参与排班人员至少需要一个可排班门店。" in response.text
+
+    assert not rows_for(tmp_path, "employees")
+
+    non_schedule = admin_post(
+        client,
+        "/admin/employees",
+        data={
+            "employee_name": "不排班店员无门店",
+            "role": "店员",
+            "phone": "",
+            "status": "在职",
+            "primary_store_name": "",
+            "show_in_employee_management": "1",
+            "participate_schedule": "0",
+        },
+        follow_redirects=False,
+    )
+    assert non_schedule.status_code == 303
+    employee = rows_for(tmp_path, "employees")[0]
+    assert employee["employee_name"] == "不排班店员无门店"
+    assert employee["participate_schedule"] == 0
+    assert (employee["primary_store_name"] or "") == ""
+
+
+def test_regional_manager_can_use_bound_stores_without_primary_store(tmp_path, monkeypatch):
+    client, main = build_client(tmp_path, monkeypatch, admin_users="admin:123456")
+    logged_in_client(client, "admin", "123456")
+
+    response = admin_post(
+        client,
+        "/admin/employees",
+        data={
+            "employee_name": "区域经理无主门店",
+            "role": "区域经理",
+            "phone": "",
+            "status": "在职",
+            "primary_store_name": "",
+            "store_names": ["南京门东店", "南昌万寿宫店"],
+            "show_in_employee_management": "1",
+            "participate_schedule": "0",
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    employee = rows_for(tmp_path, "employees")[0]
+    assert employee["employee_name"] == "区域经理无主门店"
+    assert (employee["primary_store_name"] or "") == ""
+    assert [(row["employee_id"], row["store_name"]) for row in rows_for(tmp_path, "employee_store_map")] == [
+        (employee["id"], "南京门东店"),
+        (employee["id"], "南昌万寿宫店"),
+    ]
+    fetched = main.fetch_employee(employee["id"])
+    assert fetched["primary_store_label"] == "总部 / 无主门店"
+    assert fetched["bound_store_names"] == ["南京门东店", "南昌万寿宫店"]
+
+
+def test_employee_bound_store_values_filter_no_primary_options(tmp_path, monkeypatch):
+    client, _ = build_client(tmp_path, monkeypatch, admin_users="admin:123456")
+    logged_in_client(client, "admin", "123456")
+
+    response = admin_post(
+        client,
+        "/admin/employees",
+        data={
+            "employee_name": "区域经理绑定门店过滤",
+            "role": "区域经理",
+            "phone": "",
+            "status": "在职",
+            "primary_store_name": "__NO_PRIMARY_STORE__",
+            "store_names": ["__NO_PRIMARY_STORE__", "总部 / 无主门店", "南京门东店", "非法门店"],
+            "show_in_employee_management": "1",
+            "participate_schedule": "0",
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert "error=" not in response.headers["location"]
+    employee = rows_for(tmp_path, "employees")[0]
+    assert (employee["primary_store_name"] or "") == ""
+    assert (employee["store_name"] or "") == ""
+    assert [(row["employee_id"], row["store_name"]) for row in rows_for(tmp_path, "employee_store_map")] == [
+        (employee["id"], "南京门东店")
+    ]
+
+
+def test_employee_store_form_keeps_primary_store_checkbox_submittable():
+    app_js = (PROJECT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+
+    assert "checkbox.disabled = true" not in app_js
+
+
+def test_employee_store_binding_display_omits_primary_store(tmp_path, monkeypatch):
+    client, main = build_client(tmp_path, monkeypatch, admin_users="admin:123456")
+    logged_in_client(client, "admin", "123456")
+
+    employee_id = main.create_employee(
+        "跨店展示员工",
+        "",
+        "店员",
+        "",
+        "在职",
+        main.load_app_config(),
+        primary_store_name="南京门东店",
+        store_names=["南京门东店", "南昌万寿宫店"],
+    )
+    primary_only_id = main.create_employee(
+        "仅主门店员工",
+        "",
+        "店长",
+        "",
+        "在职",
+        main.load_app_config(),
+        primary_store_name="南京门东店",
+        store_names=["南京门东店"],
+    )
+
+    cross_store = main.fetch_employee(employee_id)
+    primary_only = main.fetch_employee(primary_only_id)
+    assert cross_store["store_names"] == ["南京门东店", "南昌万寿宫店"]
+    assert cross_store["bound_store_names"] == ["南昌万寿宫店"]
+    assert cross_store["bound_store_names_text"] == "南昌万寿宫店"
+    assert primary_only["bound_store_names"] == []
+    assert primary_only["bound_store_names_text"] == "无额外绑定门店"
+
+    employees_page = client.get("/admin/employees")
+    assert employees_page.status_code == 200
+    assert "跨店展示员工" in employees_page.text
+    assert "<td>南昌万寿宫店</td>" in employees_page.text
+    assert "绑定门店</dt><dd>南昌万寿宫店</dd>" in employees_page.text
+    assert "绑定门店</dt><dd>南京门东店、南昌万寿宫店</dd>" not in employees_page.text
+    assert f'action="/admin/employees/{employee_id}/update"' in employees_page.text
+    assert 'value="南京门东店" data-store-checkbox checked' in employees_page.text
+    assert 'value="南昌万寿宫店" data-store-checkbox checked' in employees_page.text
+    assert "仅主门店员工" in employees_page.text
+    assert "无额外绑定门店" in employees_page.text
+
+    schedules_page = client.get("/admin/schedules?store_name=南京门东店&month=2026-07")
+    assert schedules_page.status_code == 200
+    assert "跨店展示员工" in schedules_page.text
+    assert "额外可排门店：南昌万寿宫店" in schedules_page.text
+    assert "可排门店：南京门东店、南昌万寿宫店" not in schedules_page.text
+
+
+def test_account_page_displays_linked_employee_store_bindings(tmp_path, monkeypatch):
+    client, main = build_client(tmp_path, monkeypatch, admin_users="admin:123456")
+    logged_in_client(client, "admin", "123456")
+    user_id = create_test_admin_user(tmp_path, "linked_store_user", "跨店账号", role_name="运营经理", allow_login=1)
+    employee_id = main.create_employee(
+        "跨店账号",
+        "",
+        "运营经理",
+        "",
+        "在职",
+        main.load_app_config(),
+        primary_store_name="南京门东店",
+        store_names=["南京门东店", "南昌万寿宫店"],
+        participate_schedule=False,
+    )
+    with sqlite3.connect(tmp_path / "tickets.db") as connection:
+        connection.execute("UPDATE admin_users SET employee_id = ? WHERE id = ?", (employee_id, user_id))
+        connection.execute("UPDATE employees SET user_id = ?, allow_login = 1 WHERE id = ?", (user_id, employee_id))
+
+    account_page = client.get("/admin/account")
+
+    assert account_page.status_code == 200
+    assert "主门店：南京门东店" in account_page.text
+    assert "绑定门店：南昌万寿宫店" in account_page.text
+    assert 'name="schedule_store_names" value="南京门东店" checked' in account_page.text
+    assert 'name="schedule_store_names" value="南昌万寿宫店" checked' in account_page.text
+    assert "绑定门店：南京门东店、南昌万寿宫店" not in account_page.text
+
+
+def test_primary_store_is_still_schedulable_even_when_binding_display_hides_it(tmp_path, monkeypatch):
+    client, main = build_client(tmp_path, monkeypatch, admin_users="admin:123456")
+    logged_in_client(client, "admin", "123456")
+    employee_id = main.create_employee(
+        "主门店可排员工",
+        "",
+        "店员",
+        "",
+        "在职",
+        main.load_app_config(),
+        primary_store_name="南京门东店",
+        store_names=[],
+        participate_schedule=True,
+    )
+
+    candidates = main.fetch_schedulable_employees("南京门东店")
+    assert [employee["id"] for employee in candidates] == [employee_id]
+    assert candidates[0]["store_names"] == ["南京门东店"]
+    assert candidates[0]["bound_store_names_text"] == "无额外绑定门店"
+
+
+def test_personnel_governance_does_not_flag_headquarters_without_primary_store(tmp_path, monkeypatch):
+    client, main = build_client(tmp_path, monkeypatch, admin_users="admin:123456")
+    logged_in_client(client, "admin", "123456")
+    main.create_employee(
+        "总部财务无门店",
+        "",
+        "财务",
+        "",
+        "在职",
+        main.load_app_config(),
+        primary_store_name="",
+        store_names=[],
+        participate_schedule=False,
+    )
+
+    page = client.get("/admin/personnel-governance?tab=historical")
+    assert page.status_code == 200
+    assert "总部财务无门店" not in page.text
+    assert "总部人员没有主门店" not in page.text
 
 
 def test_employees_page_builds_employee_file_and_unlinks_without_deleting(tmp_path, monkeypatch):
@@ -3062,12 +3594,22 @@ def test_roles_page_uses_compact_single_role_permission_workspace(tmp_path, monk
     assert "data-role-select-module" in text
     assert "data-role-clear-module" in text
     assert "data-restore-defaults" in text
-    assert re.search(r"<details[^>]+class=\"[^\"]*permission-module", text)
-    assert "permission-module-summary" in text
+    assert "<details" not in text
+    assert "<summary" not in text
+    assert "permission-module-toggle" not in text
+    assert "data-expanded" not in text
+    assert "aria-expanded" not in text
+    assert re.search(r"<div[^>]+class=\"[^\"]*permission-module[^\"]*\"", text)
+    assert "permission-module-header" in text
     assert "data-permission-module-body" in text
     assert "permission-module" in text
     assert "data-module-selected-count" in text
     assert "permission-check-grid compact-permission-grid" in text
+    for permission_key in ("ticket.view", "schedule.view", "employee.view"):
+        assert re.search(
+            rf"permission-module-body[\s\S]*?<input[^>]+name=\"permissions\"[^>]+value=\"{permission_key}\"",
+            text,
+        )
     assert "data-role-permission-search" in text
     assert "data-role-module-filter" in text
     assert text.count("data-role-editor-panel") == len(rows_for(tmp_path, "admin_roles"))
@@ -3101,7 +3643,7 @@ def test_roles_page_javascript_guards_dirty_switch_and_restore_defaults():
     assert "confirm(" in script
 
 
-def test_roles_page_permission_modules_keep_expandable_state_contract(tmp_path, monkeypatch):
+def test_roles_page_permission_modules_are_always_expanded_without_toggle_state(tmp_path, monkeypatch):
     client, _ = build_client(tmp_path, monkeypatch, admin_users="admin:123456")
     logged_in_client(client, "admin", "123456")
 
@@ -3113,22 +3655,32 @@ def test_roles_page_permission_modules_keep_expandable_state_contract(tmp_path, 
     assert 'data-role-permission-page="true"' in page.text
     assert 'data-role-module-filter="all"' in page.text
     assert 'data-permission-module="' in page.text
-    assert re.search(r"<details[^>]+class=\"[^\"]*permission-module[^\"]*\"[^>]+open", page.text)
+    assert "<details" not in page.text
+    assert "<summary" not in page.text
+    assert "data-expanded" not in page.text
+    assert "aria-expanded" not in page.text
     assert 'data-filter-hidden="false"' in page.text
     assert "data-permission-module-toggle" not in page.text
     assert "data-permission-module-body" in page.text
-    assert "permission-module-summary" in page.text
+    assert "permission-module-header" in page.text
     assert "data-role-module-toggle" not in page.text
-    assert "<details" in page.text
     assert 'href="#"' not in page.text
     assert "event.target.closest(\"[data-permission-module-toggle]\")" not in script
     assert "syncRoleModuleExpandedState" not in script
     assert "setRoleModuleExpanded" not in script
+    assert ".role-module-summary::after" not in style
+    assert "details.role-module-card" not in style
     assert 'activeRolePermissionModule === "all"' in script
     assert "dataset.filterHidden" in script
     assert "body.hidden" not in script
     assert ".permission-module-body[hidden]" not in style
     assert '.permission-module[data-expanded="false"] [data-permission-module-body]' not in style
+    assert re.search(r"\.compact-permission-grid\s*\{[^}]*display:\s*grid", style, re.S)
+    for permission_key in ("ticket.view", "schedule.view", "employee.view"):
+        assert re.search(
+            rf"permission-module-body[\s\S]*?<input[^>]+name=\"permissions\"[^>]+value=\"{permission_key}\"",
+            page.text,
+        )
     assert "rolePermissionMatchesSearch" in script
     assert "setCurrentRoleModuleChecked(form, true)" in script
     assert "setCurrentRoleModuleChecked(form, false)" in script

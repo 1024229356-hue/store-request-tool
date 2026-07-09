@@ -1,210 +1,449 @@
-{% set page_title = '工单运营看板' %}
-{% set page_subtitle = '统计看板 · 查看门店问题、SLA 时效、处理人效率与自动分派效果。' %}
-{% set page_eyebrow = '运营工作台' %}
+{% set page_title = '运营协同工作台' %}
+{% set page_subtitle = '工单、排班、人员与配置协同看板。' %}
+{% set page_eyebrow = '职能协同总览' %}
 {% set current_menu = 'dashboard' %}
 {% extends "base_admin.html" %}
 
 {% block topbar_actions %}
-<a class="quick-action-button" href="/admin">查看工单</a>
-<a class="ghost-button compact" href="/submit">提交工单</a>
-<a class="ghost-button compact" href="/admin/ticket-rules">工单规则</a>
+<a class="quick-action-button" href="/submit">提交工单</a>
+<a class="ghost-button compact" href="/admin">工单管理</a>
+<a class="ghost-button compact" href="/admin/dashboard">职能协同总览</a>
 {% endblock %}
 
 {% block content %}
+{% set selected_stores = filters.get('store_names', []) %}
+{% set selected_request_types = filters.get('request_types', []) %}
+{% set selected_statuses = filters.get('statuses', []) %}
+{% set selected_handlers = filters.get('handlers', []) %}
+{% set selected_employee_ids = schedule_filters.get('employee_ids', []) %}
+{% set selected_shift_count = schedule_filters.get('shift_type_ids', [])|length %}
+{% if schedule_filters.get('include_custom_shift') %}
+  {% set selected_shift_count = selected_shift_count + 1 %}
+{% endif %}
+{% set schedule_abnormal_label = '全部' %}
+{% if schedule_filters.get('schedule_abnormal') == 'abnormal' %}
+  {% set schedule_abnormal_label = '仅异常' %}
+{% endif %}
+
 <section class="dashboard-hero dashboard-workbench-hero">
-  <div>
-    <p class="eyebrow">SaaS Dashboard</p>
-    <h2>止痒运营协同总览</h2>
-    <p>工单运营看板聚合门店问题、需求类型、SLA 风险和处理人效率。当前筛选周期新增 {{ stats.new_ticket_count }} 条工单，待处理 {{ stats.pending_count }} 条，超时工单 {{ stats.overdue_count }} 条。</p>
-    <div class="hero-actions">
-      <a class="primary-button" href="/admin">查看工单</a>
-      <a class="ghost-button" href="/submit">新建工单</a>
-      <a class="ghost-button" href="/admin/ticket-rules">配置规则</a>
+  <div class="dashboard-hero-copy">
+    <p class="eyebrow">运营协同工作台</p>
+    <h1 class="dashboard-hero-title">止痒运营协同总览</h1>
+    <p>集中查看工单流转、SLA、门店问题、排班工时与异常提醒。</p>
+    <div class="dashboard-hero-meta">
+      <span>当前筛选周期 <strong>{{ dashboard_range_label }}</strong></span>
+      <span>当前数据范围 <strong>{{ dashboard_scope_label }}</strong></span>
+      <span>当前登录角色 <strong>{{ dashboard_role_label }}</strong></span>
+    </div>
+    <div class="dashboard-hero-actions">
+      <a class="primary-button" href="/submit">提交工单</a>
+      <a class="ghost-button" href="/admin">工单管理</a>
+      {% if has_perm('schedule.view') %}<a class="ghost-button" href="/admin/schedules">门店排班</a>{% endif %}
+      {% if has_perm('employee.view') %}<a class="ghost-button" href="/admin/employees">人员管理</a>{% endif %}
+      {% if is_system_admin() %}<a class="ghost-button" href="/admin/system">系统体检</a>{% endif %}
     </div>
   </div>
-  <div class="hero-date">
-    <span>当前日期</span>
+  <div class="hero-date dashboard-hero-status">
+    <span>今日日期</span>
     <strong>{{ today_label }}</strong>
+    <small>{{ stats.pending_count + stats.processing_count }} 件待推进</small>
+  </div>
+</section>
+
+<section class="dashboard-section manager-alert-panel">
+  <div class="dashboard-section-header">
+    <div>
+      <p class="eyebrow">待处理事项</p>
+      <h2>待处理与风险提醒</h2>
+      <p>展示当前需要职能部门关注的待处理、超时、未分派、排班异常和配置缺口。</p>
+    </div>
+    <span class="section-count">风险 {{ manager_alerts|length }} 项</span>
+  </div>
+  <div class="manager-alert-grid">
+    {% if manager_alerts %}
+      {% for item in manager_alerts %}
+      <a class="manager-alert-card {{ item.tone }}" href="{{ item.url }}">
+        <span>{{ item.label }}</span>
+        <strong>{{ item.count }}</strong>
+        <small>{{ item.hint }}</small>
+      </a>
+      {% endfor %}
+    {% else %}
+      <article class="manager-alert-card success">
+        <span>暂无重点风险</span>
+        <strong>0</strong>
+        <small>当前筛选范围内没有必须立即处理的风险。</small>
+      </article>
+    {% endif %}
+  </div>
+</section>
+
+<section class="dashboard-section boss-answer-panel">
+  <div class="dashboard-section-header">
+    <div>
+      <p class="eyebrow">门店协同总览</p>
+      <h2>职能协同总览</h2>
+    </div>
+  </div>
+  <div class="boss-answer-grid">
+    <article>
+      <span>待处理事项</span>
+      <strong>{{ stats.pending_count + stats.processing_count }}</strong>
+      <small>待处理 {{ stats.pending_count }} · 处理中 {{ stats.processing_count }}</small>
+    </article>
+    <article>
+      <span>风险提醒</span>
+      <strong>{{ stats.due_today_count + stats.overdue_count }}</strong>
+      <small>今日到期 {{ stats.due_today_count }} · 已超时 {{ stats.overdue_count }}</small>
+    </article>
+    <article>
+      <span>门店协同总览</span>
+      <strong>{% if stats.by_store %}{{ stats.by_store[0].label }}{% else %}-{% endif %}</strong>
+      <small>{% if stats.by_store %}{{ stats.by_store[0].count }} 件{% else %}暂无数据{% endif %}</small>
+    </article>
+    <article>
+      <span>工单运营</span>
+      <strong>{% if stats.handler_efficiency %}{{ stats.handler_efficiency[0].label }}{% else %}-{% endif %}</strong>
+      <small>{% if stats.handler_efficiency %}超时 {{ stats.handler_efficiency[0].overdue_count }} · 平均 {{ stats.handler_efficiency[0].average_processing_hours }}h{% else %}暂无数据{% endif %}</small>
+    </article>
+    <article>
+      <span>排班运营</span>
+      <strong>{% if can_view_schedule_dashboard %}{{ schedule_stats.summary.conflict_schedule_count + schedule_stats.summary.warning_count }}{% else %}-{% endif %}</strong>
+      <small>{% if can_view_schedule_dashboard %}冲突 {{ schedule_stats.summary.conflict_schedule_count }} · 异常 {{ schedule_stats.summary.warning_count }}{% else %}无排班看板权限{% endif %}</small>
+    </article>
   </div>
 </section>
 
 <section class="filter-card work-card dashboard-filter-card">
   <div class="section-heading admin-section-heading">
-    <h2>看板筛选</h2>
-    <p>默认近 7 天。门店和处理人范围会按当前账号的数据范围自动收敛。</p>
+    <h2>筛选条件</h2>
+    <p>按时间、门店、工单状态、处理人和排班条件查看协同数据。</p>
   </div>
-  <form class="dashboard-filter-form" method="get" action="/admin/dashboard">
-    <div class="dashboard-range-tabs" role="group" aria-label="时间范围">
-      {% for value, label in [('today', '今日'), ('last7', '近7天'), ('this_month', '本月'), ('last_month', '上月'), ('custom', '自定义日期范围')] %}
-      <label class="range-choice {% if filters.get('date_range') == value %}active{% endif %}">
-        <input type="radio" name="date_range" value="{{ value }}" {% if filters.get('date_range') == value %}checked{% endif %}>
-        <span>{{ label }}</span>
-      </label>
-      {% endfor %}
+  <form class="dashboard-filter-form" id="dashboard-filter-form" method="get" action="/admin/dashboard" data-dashboard-filter-form>
+    <div class="filter-summary-bar">
+      <div class="filter-summary-main">
+        <span class="filter-summary-pill">时间：{{ dashboard_range_label }}{% if filters.get('date_range') == 'custom' and filters.get('date_start') and filters.get('date_end') %} {{ filters.get('date_start') }} 至 {{ filters.get('date_end') }}{% endif %}</span>
+        <span class="filter-summary-pill">门店：{% if selected_stores %}已选 {{ selected_stores|length }} 个{% else %}全部{% endif %}</span>
+        <span class="filter-summary-pill">需求类型：{% if selected_request_types %}已选 {{ selected_request_types|length }} 个{% else %}全部{% endif %}</span>
+        <span class="filter-summary-pill">处理人：{% if selected_handlers %}已选 {{ selected_handlers|length }} 个{% else %}全部{% endif %}</span>
+        <span class="filter-summary-pill">状态：{% if selected_statuses %}已选 {{ selected_statuses|length }} 个{% else %}全部{% endif %}</span>
+        {% if can_view_schedule_dashboard %}
+        <span class="filter-summary-pill">员工：{% if selected_employee_ids %}已选 {{ selected_employee_ids|length }} 个{% else %}全部{% endif %}</span>
+        <span class="filter-summary-pill">班次：{% if selected_shift_count %}已选 {{ selected_shift_count }} 个{% else %}全部{% endif %}</span>
+        {% endif %}
+      </div>
+      <div class="filter-summary-actions">
+        <button class="ghost-button compact" type="button" data-advanced-filter-toggle>展开筛选</button>
+        <a class="ghost-button compact" href="/admin/dashboard">重置</a>
+        <button class="primary-button compact" type="submit">应用筛选</button>
+      </div>
     </div>
-    <div class="dashboard-filter-grid">
-      <label>
-        <span>开始日期</span>
-        <input type="date" name="start_date" value="{{ filters.get('date_start', '') }}">
-      </label>
-      <label>
-        <span>结束日期</span>
-        <input type="date" name="end_date" value="{{ filters.get('date_end', '') }}">
-      </label>
-      <label>
-        <span>门店</span>
-        <select name="store_names" multiple size="5">
-          {% for store in stores %}
-          <option value="{{ store }}" {% if store in filters.get('store_names', []) %}selected{% endif %}>{{ store }}</option>
-          {% endfor %}
-        </select>
-      </label>
-      <label>
-        <span>需求类型</span>
-        <select name="request_types" multiple size="5">
-          {% for item in request_types %}
-          <option value="{{ item }}" {% if item in filters.get('request_types', []) %}selected{% endif %}>{{ item }}</option>
-          {% endfor %}
-        </select>
-      </label>
-      <label>
-        <span>处理人</span>
-        <select name="handlers" multiple size="5">
-          {% for item in handlers %}
-          <option value="{{ item }}" {% if item in filters.get('handlers', []) %}selected{% endif %}>{{ item }}</option>
-          {% endfor %}
-        </select>
-      </label>
-      <label>
-        <span>状态</span>
-        <select name="status" multiple size="5">
-          {% for item in statuses %}
-          <option value="{{ item }}" {% if item in filters.get('statuses', []) %}selected{% endif %}>{{ item }}</option>
-          {% endfor %}
-        </select>
-      </label>
-      {% if can_view_schedule_dashboard %}
-      <label>
-        <span>排班员工</span>
-        <select name="employee_ids" multiple size="5">
-          {% for employee in schedule_employee_options %}
-          <option value="{{ employee.id }}" {% if employee.id in schedule_filters.get('employee_ids', []) %}selected{% endif %}>{{ employee.employee_name }}</option>
-          {% endfor %}
-        </select>
-      </label>
-      <label>
-        <span>班次</span>
-        <select name="shift_type_ids" multiple size="5">
-          {% for shift in schedule_shift_options %}
-          <option value="{{ shift.id }}" {% if shift.id in schedule_filters.get('shift_type_ids', []) %}selected{% endif %}>{{ shift.shift_name }}</option>
-          {% endfor %}
-          <option value="custom" {% if schedule_filters.get('include_custom_shift') %}selected{% endif %}>自定义/加班</option>
-        </select>
-      </label>
-      <label>
-        <span>是否自定义时间</span>
-        <select name="schedule_custom">
-          <option value="" {% if not schedule_filters.get('schedule_custom') %}selected{% endif %}>全部</option>
-          <option value="custom" {% if schedule_filters.get('schedule_custom') == 'custom' %}selected{% endif %}>仅自定义/加班</option>
-          <option value="standard" {% if schedule_filters.get('schedule_custom') == 'standard' %}selected{% endif %}>仅标准班次</option>
-        </select>
-      </label>
-      <label>
-        <span>是否异常</span>
-        <select name="schedule_abnormal">
-          <option value="" {% if not schedule_filters.get('schedule_abnormal') %}selected{% endif %}>全部</option>
-          <option value="abnormal" {% if schedule_filters.get('schedule_abnormal') == 'abnormal' %}selected{% endif %}>仅异常排班</option>
-        </select>
-      </label>
-      {% endif %}
-    </div>
-    <div class="filter-actions">
-      <button class="primary-button compact" type="submit">刷新看板</button>
-      <a class="ghost-button compact" href="/admin/dashboard">重置</a>
-    </div>
+
+    <details class="advanced-filter-panel" data-advanced-filter-panel>
+      <summary class="advanced-filter-summary">筛选条件</summary>
+      <div class="filter-grid">
+        <label class="filter-field">
+          <span>时间范围</span>
+          <select name="date_range" data-date-range-select>
+            <option value="today" {% if filters.get('date_range') == 'today' %}selected{% endif %}>今日</option>
+            <option value="last7" {% if filters.get('date_range') == 'last7' %}selected{% endif %}>近7天</option>
+            <option value="this_month" {% if filters.get('date_range') == 'this_month' %}selected{% endif %}>本月</option>
+            <option value="last_month" {% if filters.get('date_range') == 'last_month' %}selected{% endif %}>上月</option>
+            <option value="custom" {% if filters.get('date_range') == 'custom' %}selected{% endif %}>自定义</option>
+          </select>
+        </label>
+
+        <div class="custom-date-range" data-custom-date-range {% if filters.get('date_range') != 'custom' %}hidden{% endif %}>
+          <label class="filter-field">
+            <span>开始日期</span>
+            <input type="date" name="start_date" value="{{ filters.get('date_start', '') }}">
+          </label>
+          <label class="filter-field">
+            <span>结束日期</span>
+            <input type="date" name="end_date" value="{{ filters.get('date_end', '') }}">
+          </label>
+        </div>
+
+        <details class="filter-dropdown" data-filter-dropdown data-empty-label="全部门店" data-count-label="门店">
+          <summary class="filter-dropdown-trigger">
+            <span data-filter-dropdown-label>{% if selected_stores %}已选 {{ selected_stores|length }} 个门店{% else %}全部门店{% endif %}</span>
+            <b>⌄</b>
+          </summary>
+          <div class="filter-dropdown-menu">
+            <input class="filter-dropdown-search" type="search" placeholder="搜索门店" data-filter-dropdown-search>
+            <div class="filter-dropdown-shortcuts">
+              <button type="button" data-filter-select-all>全选</button>
+              <button type="button" data-filter-clear>清空</button>
+            </div>
+            <div class="filter-dropdown-options">
+              {% for store in stores %}
+              <label class="filter-dropdown-option" data-filter-option>
+                <input type="checkbox" name="store_names" value="{{ store }}" {% if store in selected_stores %}checked{% endif %}>
+                <span>{{ store }}</span>
+              </label>
+              {% endfor %}
+            </div>
+            <div class="filter-dropdown-actions">
+              <span>已选 <strong data-filter-selected-count>{{ selected_stores|length }}</strong> 个</span>
+              <button class="ghost-button compact" type="button" data-filter-cancel>取消</button>
+              <button class="primary-button compact" type="button" data-filter-confirm>确定</button>
+            </div>
+          </div>
+        </details>
+
+        <details class="filter-dropdown" data-filter-dropdown data-empty-label="全部需求类型" data-count-label="需求类型">
+          <summary class="filter-dropdown-trigger">
+            <span data-filter-dropdown-label>{% if selected_request_types %}已选 {{ selected_request_types|length }} 个需求类型{% else %}全部需求类型{% endif %}</span>
+            <b>⌄</b>
+          </summary>
+          <div class="filter-dropdown-menu">
+            <input class="filter-dropdown-search" type="search" placeholder="搜索需求类型" data-filter-dropdown-search>
+            <div class="filter-dropdown-shortcuts">
+              <button type="button" data-filter-select-all>全选</button>
+              <button type="button" data-filter-clear>清空</button>
+            </div>
+            <div class="filter-dropdown-options">
+              {% for item in request_types %}
+              <label class="filter-dropdown-option" data-filter-option>
+                <input type="checkbox" name="request_types" value="{{ item }}" {% if item in selected_request_types %}checked{% endif %}>
+                <span>{{ item }}</span>
+              </label>
+              {% endfor %}
+            </div>
+            <div class="filter-dropdown-actions">
+              <span>已选 <strong data-filter-selected-count>{{ selected_request_types|length }}</strong> 个</span>
+              <button class="ghost-button compact" type="button" data-filter-cancel>取消</button>
+              <button class="primary-button compact" type="button" data-filter-confirm>确定</button>
+            </div>
+          </div>
+        </details>
+
+        <details class="filter-dropdown" data-filter-dropdown data-empty-label="全部处理人" data-count-label="处理人">
+          <summary class="filter-dropdown-trigger">
+            <span data-filter-dropdown-label>{% if selected_handlers %}已选 {{ selected_handlers|length }} 个处理人{% else %}全部处理人{% endif %}</span>
+            <b>⌄</b>
+          </summary>
+          <div class="filter-dropdown-menu">
+            <input class="filter-dropdown-search" type="search" placeholder="搜索处理人" data-filter-dropdown-search>
+            <div class="filter-dropdown-shortcuts">
+              <button type="button" data-filter-select-all>全选</button>
+              <button type="button" data-filter-clear>清空</button>
+            </div>
+            <div class="filter-dropdown-options">
+              {% for item in handlers %}
+              <label class="filter-dropdown-option" data-filter-option>
+                <input type="checkbox" name="handlers" value="{{ item }}" {% if item in selected_handlers %}checked{% endif %}>
+                <span>{{ item }}</span>
+              </label>
+              {% endfor %}
+            </div>
+            <div class="filter-dropdown-actions">
+              <span>已选 <strong data-filter-selected-count>{{ selected_handlers|length }}</strong> 个</span>
+              <button class="ghost-button compact" type="button" data-filter-cancel>取消</button>
+              <button class="primary-button compact" type="button" data-filter-confirm>确定</button>
+            </div>
+          </div>
+        </details>
+
+        <details class="filter-dropdown" data-filter-dropdown data-empty-label="全部工单状态" data-count-label="工单状态">
+          <summary class="filter-dropdown-trigger">
+            <span data-filter-dropdown-label>{% if selected_statuses %}已选 {{ selected_statuses|length }} 个工单状态{% else %}全部工单状态{% endif %}</span>
+            <b>⌄</b>
+          </summary>
+          <div class="filter-dropdown-menu">
+            <input class="filter-dropdown-search" type="search" placeholder="搜索工单状态" data-filter-dropdown-search>
+            <div class="filter-dropdown-shortcuts">
+              <button type="button" data-filter-select-all>全选</button>
+              <button type="button" data-filter-clear>清空</button>
+            </div>
+            <div class="filter-dropdown-options">
+              {% for item in statuses %}
+              <label class="filter-dropdown-option" data-filter-option>
+                <input type="checkbox" name="status" value="{{ item }}" {% if item in selected_statuses %}checked{% endif %}>
+                <span>{{ item }}</span>
+              </label>
+              {% endfor %}
+            </div>
+            <div class="filter-dropdown-actions">
+              <span>已选 <strong data-filter-selected-count>{{ selected_statuses|length }}</strong> 个</span>
+              <button class="ghost-button compact" type="button" data-filter-cancel>取消</button>
+              <button class="primary-button compact" type="button" data-filter-confirm>确定</button>
+            </div>
+          </div>
+        </details>
+
+        {% if can_view_schedule_dashboard %}
+        <details class="filter-dropdown" data-filter-dropdown data-empty-label="全部员工" data-count-label="员工">
+          <summary class="filter-dropdown-trigger">
+            <span data-filter-dropdown-label>{% if selected_employee_ids %}已选 {{ selected_employee_ids|length }} 个员工{% else %}全部员工{% endif %}</span>
+            <b>⌄</b>
+          </summary>
+          <div class="filter-dropdown-menu">
+            <input class="filter-dropdown-search" type="search" placeholder="搜索员工" data-filter-dropdown-search>
+            <div class="filter-dropdown-shortcuts">
+              <button type="button" data-filter-select-all>全选</button>
+              <button type="button" data-filter-clear>清空</button>
+            </div>
+            <div class="filter-dropdown-options">
+              {% for employee in schedule_employee_options %}
+              <label class="filter-dropdown-option" data-filter-option>
+                <input type="checkbox" name="employee_ids" value="{{ employee.id }}" {% if employee.id in selected_employee_ids %}checked{% endif %}>
+                <span>{{ employee.employee_name }}</span>
+                <small>{{ employee.primary_store_name or employee.store_names_text or '-' }}</small>
+              </label>
+              {% endfor %}
+            </div>
+            <div class="filter-dropdown-actions">
+              <span>已选 <strong data-filter-selected-count>{{ selected_employee_ids|length }}</strong> 个</span>
+              <button class="ghost-button compact" type="button" data-filter-cancel>取消</button>
+              <button class="primary-button compact" type="button" data-filter-confirm>确定</button>
+            </div>
+          </div>
+        </details>
+
+        <details class="filter-dropdown" data-filter-dropdown data-empty-label="全部班次" data-count-label="班次">
+          <summary class="filter-dropdown-trigger">
+            <span data-filter-dropdown-label>{% if selected_shift_count %}已选 {{ selected_shift_count }} 个班次{% else %}全部班次{% endif %}</span>
+            <b>⌄</b>
+          </summary>
+          <div class="filter-dropdown-menu">
+            <input class="filter-dropdown-search" type="search" placeholder="搜索班次" data-filter-dropdown-search>
+            <div class="filter-dropdown-shortcuts">
+              <button type="button" data-filter-select-all>全选</button>
+              <button type="button" data-filter-clear>清空</button>
+            </div>
+            <div class="filter-dropdown-options">
+              {% for shift in schedule_shift_options %}
+              <label class="filter-dropdown-option" data-filter-option>
+                <input type="checkbox" name="shift_type_ids" value="{{ shift.id }}" {% if shift.id in schedule_filters.get('shift_type_ids', []) %}checked{% endif %}>
+                <span>{{ shift.shift_name }}</span>
+                <small>{{ shift.store_name or '全局班次' }}</small>
+              </label>
+              {% endfor %}
+              <label class="filter-dropdown-option" data-filter-option>
+                <input type="checkbox" name="shift_type_ids" value="custom" {% if schedule_filters.get('include_custom_shift') %}checked{% endif %}>
+                <span>自定义/加班</span>
+                <small>非标准班次</small>
+              </label>
+            </div>
+            <div class="filter-dropdown-actions">
+              <span>已选 <strong data-filter-selected-count>{{ selected_shift_count }}</strong> 个</span>
+              <button class="ghost-button compact" type="button" data-filter-cancel>取消</button>
+              <button class="primary-button compact" type="button" data-filter-confirm>确定</button>
+            </div>
+          </div>
+        </details>
+
+        <label class="filter-field">
+          <span>是否异常</span>
+          <select name="schedule_abnormal">
+            <option value="" {% if not schedule_filters.get('schedule_abnormal') %}selected{% endif %}>全部</option>
+            <option value="abnormal" {% if schedule_filters.get('schedule_abnormal') == 'abnormal' %}selected{% endif %}>仅异常</option>
+          </select>
+        </label>
+
+        <label class="filter-field">
+          <span>是否自定义时间</span>
+          <select name="schedule_custom">
+            <option value="" {% if not schedule_filters.get('schedule_custom') %}selected{% endif %}>全部</option>
+            <option value="custom" {% if schedule_filters.get('schedule_custom') == 'custom' %}selected{% endif %}>仅自定义/加班</option>
+            <option value="standard" {% if schedule_filters.get('schedule_custom') == 'standard' %}selected{% endif %}>仅标准班次</option>
+          </select>
+        </label>
+        {% endif %}
+      </div>
+      <div class="filter-apply-row">
+        <span>当前：时间 {{ dashboard_range_label }} · 门店 {% if selected_stores %}{{ selected_stores|length }} 个{% else %}全部{% endif %} · 异常 {{ schedule_abnormal_label }}</span>
+        <div>
+          <a class="ghost-button compact" href="/admin/dashboard">重置</a>
+          <button class="primary-button compact" type="submit">应用筛选</button>
+        </div>
+      </div>
+    </details>
   </form>
 </section>
 
-<section class="stats-section work-card">
-  <div class="section-heading admin-section-heading">
-    <h2>工单总览指标</h2>
-    <p>以下指标均基于当前筛选条件和账号数据范围统计。</p>
+<section class="dashboard-section" aria-label="统计看板">
+  <div class="dashboard-section-header">
+    <div>
+      <p class="eyebrow">Tickets</p>
+      <h2>工单运营看板</h2>
+    </div>
+    <span class="section-count">总工单数 {{ stats.total }}</span>
   </div>
+
   <div class="stats-grid dashboard-card-grid dashboard-metric-grid">
-    <article class="stat-card metric-card neumorphic-stat-card">
+    <article class="stat-card metric-card success">
       <span class="metric-icon">01</span>
       <span>新增工单数</span>
       <strong>{{ stats.new_ticket_count }}</strong>
       <small>筛选周期内</small>
     </article>
-    <article class="stat-card metric-card neumorphic-stat-card">
+    <article class="stat-card metric-card warning">
       <span class="metric-icon">02</span>
-      <span>总工单数</span>
-      <strong>{{ stats.total }}</strong>
-      <small>当前可见范围</small>
-    </article>
-    <article class="stat-card metric-card neumorphic-stat-card">
-      <span class="metric-icon">03</span>
       <span>待处理</span>
       <strong>{{ stats.pending_count }}</strong>
       <small>需要分派或接手</small>
     </article>
-    <article class="stat-card metric-card neumorphic-stat-card">
-      <span class="metric-icon">04</span>
+    <article class="stat-card metric-card">
+      <span class="metric-icon">03</span>
       <span>处理中</span>
       <strong>{{ stats.processing_count }}</strong>
       <small>总部已接手</small>
     </article>
-    <article class="stat-card metric-card neumorphic-stat-card stat-alert">
-      <span class="metric-icon">05</span>
-      <span>超时工单</span>
-      <strong>{{ stats.overdue_count }}</strong>
-      <small>优先处理</small>
-    </article>
-    <article class="stat-card metric-card neumorphic-stat-card">
-      <span class="metric-icon">06</span>
+    <article class="stat-card metric-card warning">
+      <span class="metric-icon">04</span>
       <span>今日到期</span>
       <strong>{{ stats.due_today_count }}</strong>
       <small>请关注截止时间</small>
     </article>
-    <article class="stat-card metric-card neumorphic-stat-card">
-      <span class="metric-icon">07</span>
+    <article class="stat-card metric-card danger">
+      <span class="metric-icon">05</span>
+      <span>已超时</span>
+      <strong>{{ stats.overdue_count }}</strong>
+      <small>优先处理</small>
+    </article>
+    <article class="stat-card metric-card success">
+      <span class="metric-icon">06</span>
       <span>SLA 完成率</span>
       <strong>{{ stats.sla_completion_rate }}%</strong>
       <small>按时完成 / 已完成 SLA</small>
     </article>
-    <article class="stat-card metric-card neumorphic-stat-card">
+    <article class="stat-card metric-card">
+      <span class="metric-icon">07</span>
+      <span>总工单数</span>
+      <strong>{{ stats.total }}</strong>
+      <small>当前可见范围</small>
+    </article>
+    <article class="stat-card metric-card">
       <span class="metric-icon">08</span>
       <span>平均处理时长</span>
       <strong>{{ stats.average_processing_hours }}</strong>
       <small>小时</small>
     </article>
-    <article class="stat-card metric-card neumorphic-stat-card">
-      <span class="metric-icon">09</span>
-      <span>自动分派工单</span>
-      <strong>{{ stats.auto_assigned_count }}</strong>
-      <small>命中率 {{ stats.auto_assignment_rate }}%</small>
-    </article>
   </div>
 </section>
 
-<section class="dashboard-grid dashboard-main-grid dashboard-activity-grid">
-  <article class="dashboard-panel work-card">
-    <h2>SLA 指标</h2>
-    <div class="mini-metric-grid">
-      {% for row in stats.sla_rows %}
-      <div class="mini-metric-card">
-        <span>{{ row.label }}</span>
-        <strong>{{ row.count }}</strong>
-        <small>{{ row.percent }}%</small>
-      </div>
-      {% endfor %}
+<section class="dashboard-grid dashboard-main-grid dashboard-section dashboard-activity-grid">
+  <article class="ranking-card dashboard-panel work-card">
+    <div class="dashboard-section-header compact">
+      <h2>门店问题排行</h2>
     </div>
+    {% for row in stats.by_store %}
+    <div class="bar-row">
+      <div class="bar-top"><span>{{ row.label }}</span><strong>{{ row.count }} / {{ row.percent }}%</strong></div>
+      <div class="bar-track"><span style="width: {{ row.percent }}%;"></span></div>
+    </div>
+    {% else %}
+    <p class="empty-note">暂无数据。</p>
+    {% endfor %}
   </article>
 
-  <article class="dashboard-panel work-card">
-    <h2>自动分派效果</h2>
-    {% for row in stats.auto_assignment_rows %}
+  <article class="ranking-card dashboard-panel work-card">
+    <div class="dashboard-section-header compact">
+      <h2>需求类型排行</h2>
+    </div>
+    {% for row in stats.by_request_type %}
     <div class="bar-row">
       <div class="bar-top"><span>{{ row.label }}</span><strong>{{ row.count }} / {{ row.percent }}%</strong></div>
       <div class="bar-track"><span style="width: {{ row.percent }}%;"></span></div>
@@ -215,30 +454,12 @@
   </article>
 </section>
 
-<section class="dashboard-grid dashboard-main-grid">
-  <article class="dashboard-panel work-card">
-    <h2>最近工单动态</h2>
-    <div class="recent-ticket-list">
-      {% for ticket in stats.recent_tickets %}
-      <div class="recent-ticket-item">
-        <div>
-          <a class="table-link ticket-no-link" href="{{ ticket.detail_url }}">{{ ticket.ticket_no }}</a>
-          <p>{{ ticket.store_name }} · {{ ticket.request_type }} · {{ ticket.description_summary }}</p>
-        </div>
-        <span class="badge status-badge status-{{ ticket.status }}">{{ ticket.status }}</span>
-        <span class="badge due-status-badge due-{{ ticket.due_status_class }}">{{ ticket.due_status }}</span>
-        <time>{{ ticket.created_at }}</time>
-        <a class="ghost-button compact" href="{{ ticket.detail_url }}">查看</a>
-      </div>
-      {% else %}
-      <p class="empty-note">暂无最近工单动态。</p>
-      {% endfor %}
+<section class="dashboard-grid dashboard-main-grid dashboard-section">
+  <article class="ranking-card dashboard-panel work-card">
+    <div class="dashboard-section-header compact">
+      <h2>处理人效率</h2>
     </div>
-  </article>
-
-  <article class="dashboard-panel work-card">
-    <h2>处理人效率</h2>
-    <div class="table-scroll">
+    <div class="compact-table-scroll">
       <table class="compact-table dashboard-efficiency-table">
         <thead>
           <tr>
@@ -267,35 +488,42 @@
       </table>
     </div>
   </article>
+
+  <article class="ranking-card dashboard-panel work-card">
+    <div class="dashboard-section-header compact">
+      <h2>自动分派效果</h2>
+    </div>
+    {% for row in stats.auto_assignment_rows %}
+    <div class="bar-row">
+      <div class="bar-top"><span>{{ row.label }}</span><strong>{{ row.count }} / {{ row.percent }}%</strong></div>
+      <div class="bar-track"><span style="width: {{ row.percent }}%;"></span></div>
+    </div>
+    {% else %}
+    <p class="empty-note">暂无数据。</p>
+    {% endfor %}
+  </article>
 </section>
 
-<section class="dashboard-grid">
-  <article class="dashboard-panel work-card">
-    <h2>门店问题排行</h2>
-    {% for row in stats.by_store %}
-    <div class="bar-row">
-      <div class="bar-top"><span>{{ row.label }}</span><strong>{{ row.count }} / {{ row.percent }}%</strong></div>
-      <div class="bar-track"><span style="width: {{ row.percent }}%;"></span></div>
+<section class="dashboard-grid dashboard-section">
+  <article class="ranking-card dashboard-panel work-card">
+    <div class="dashboard-section-header compact">
+      <h2>SLA 指标</h2>
     </div>
-    {% else %}
-    <p class="empty-note">暂无数据。</p>
-    {% endfor %}
+    <div class="mini-metric-grid">
+      {% for row in stats.sla_rows %}
+      <div class="mini-metric-card">
+        <span>{{ row.label }}</span>
+        <strong>{{ row.count }}</strong>
+        <small>{{ row.percent }}%</small>
+      </div>
+      {% endfor %}
+    </div>
   </article>
 
-  <article class="dashboard-panel work-card">
-    <h2>需求类型排行</h2>
-    {% for row in stats.by_request_type %}
-    <div class="bar-row">
-      <div class="bar-top"><span>{{ row.label }}</span><strong>{{ row.count }} / {{ row.percent }}%</strong></div>
-      <div class="bar-track"><span style="width: {{ row.percent }}%;"></span></div>
+  <article class="ranking-card dashboard-panel work-card">
+    <div class="dashboard-section-header compact">
+      <h2>按状态统计</h2>
     </div>
-    {% else %}
-    <p class="empty-note">暂无数据。</p>
-    {% endfor %}
-  </article>
-
-  <article class="dashboard-panel work-card">
-    <h2>按状态统计</h2>
     {% for row in stats.by_status %}
     <div class="bar-row">
       <div class="bar-top"><span>{{ row.label }}</span><strong>{{ row.count }} / {{ row.percent }}%</strong></div>
@@ -306,8 +534,10 @@
     {% endfor %}
   </article>
 
-  <article class="dashboard-panel work-card">
-    <h2>按紧急程度统计</h2>
+  <article class="ranking-card dashboard-panel work-card">
+    <div class="dashboard-section-header compact">
+      <h2>按紧急程度统计</h2>
+    </div>
     {% for row in stats.by_urgency %}
     <div class="bar-row">
       <div class="bar-top"><span>{{ row.label }}</span><strong>{{ row.count }} / {{ row.percent }}%</strong></div>
@@ -318,8 +548,10 @@
     {% endfor %}
   </article>
 
-  <article class="dashboard-panel work-card">
-    <h2>附件情况统计</h2>
+  <article class="ranking-card dashboard-panel work-card">
+    <div class="dashboard-section-header compact">
+      <h2>附件情况统计</h2>
+    </div>
     {% for row in stats.attachments %}
     <div class="bar-row">
       <div class="bar-top"><span>{{ row.label }}</span><strong>{{ row.count }} / {{ row.percent }}%</strong></div>
@@ -329,9 +561,35 @@
     <p class="empty-note">暂无数据。</p>
     {% endfor %}
   </article>
+</section>
 
+<section class="dashboard-grid dashboard-main-grid dashboard-section">
   <article class="dashboard-panel work-card">
-    <h2>总体状态</h2>
+    <div class="dashboard-section-header compact">
+      <h2>最近工单动态</h2>
+    </div>
+    <div class="recent-ticket-list">
+      {% for ticket in stats.recent_tickets %}
+      <div class="recent-ticket-item">
+        <div>
+          <a class="table-link ticket-no-link" href="{{ ticket.detail_url }}">{{ ticket.ticket_no }}</a>
+          <p>{{ ticket.store_name }} · {{ ticket.request_type }} · {{ ticket.description_summary }}</p>
+        </div>
+        <span class="badge status-badge status-{{ ticket.status }}">{{ ticket.status }}</span>
+        <span class="badge due-status-badge due-{{ ticket.due_status_class }}">{{ ticket.due_status }}</span>
+        <time>{{ ticket.created_at }}</time>
+        <a class="ghost-button compact" href="{{ ticket.detail_url }}">查看</a>
+      </div>
+      {% else %}
+      <p class="empty-note">暂无最近工单动态。</p>
+      {% endfor %}
+    </div>
+  </article>
+
+  <article class="ranking-card dashboard-panel work-card">
+    <div class="dashboard-section-header compact">
+      <h2>总体状态</h2>
+    </div>
     {% for card in stats.cards %}
     <div class="bar-row">
       <div class="bar-top"><span>{{ card.label }}</span><strong>{{ card.count }} / {{ card.percent }}%</strong></div>
@@ -342,18 +600,18 @@
 </section>
 
 {% if can_view_schedule_dashboard %}
-<details class="work-card dashboard-schedule-section" open>
-  <summary>
-    <span>
-      <strong>排班运营看板</strong>
-      <small>排班人次、工时排行、班次分布和异常概览会跟随上方日期与门店筛选变化。</small>
-    </span>
-  </summary>
+<section class="dashboard-section dashboard-schedule-section">
+  <div class="dashboard-section-header">
+    <div>
+      <p class="eyebrow">Schedules</p>
+      <h2>排班运营看板</h2>
+    </div>
+    <span class="section-count">异常 {{ schedule_stats.summary.warning_count }} · 冲突 {{ schedule_stats.summary.conflict_schedule_count }}</span>
+  </div>
 
   <div class="stats-grid dashboard-card-grid dashboard-metric-grid schedule-metric-grid">
     {% for card in schedule_stats.summary_cards %}
-    <article class="stat-card metric-card neumorphic-stat-card {% if '冲突' in card.label or '异常' in card.label %}stat-alert{% endif %}">
-      <span class="metric-icon">{{ "%02d"|format(loop.index) }}</span>
+    <article class="stat-card metric-card {% if '冲突' in card.label or '异常' in card.label %}danger{% elif '工时' in card.label %}warning{% endif %}">
       <span>{{ card.label }}</span>
       <strong>{{ card.value }}</strong>
       <small>{{ card.hint }}</small>
@@ -362,9 +620,11 @@
   </div>
 
   <section class="dashboard-grid dashboard-main-grid">
-    <article class="dashboard-panel work-card">
-      <h2>门店工时排行</h2>
-      <div class="table-scroll">
+    <article class="ranking-card dashboard-panel work-card">
+      <div class="dashboard-section-header compact">
+        <h2>门店工时排行</h2>
+      </div>
+      <div class="compact-table-scroll">
         <table class="compact-table dashboard-rank-table">
           <thead>
             <tr>
@@ -402,9 +662,11 @@
       {% if schedule_stats.store_rank|length > 10 %}<p class="empty-note">默认展示 Top10，当前共 {{ schedule_stats.store_rank|length }} 个门店。</p>{% endif %}
     </article>
 
-    <article class="dashboard-panel work-card">
-      <h2>员工工时排行</h2>
-      <div class="table-scroll">
+    <article class="ranking-card dashboard-panel work-card">
+      <div class="dashboard-section-header compact">
+        <h2>员工工时排行</h2>
+      </div>
+      <div class="compact-table-scroll">
         <table class="compact-table dashboard-rank-table">
           <thead>
             <tr>
@@ -448,8 +710,10 @@
   </section>
 
   <section class="dashboard-grid">
-    <article class="dashboard-panel work-card">
-      <h2>班次分布</h2>
+    <article class="ranking-card dashboard-panel work-card">
+      <div class="dashboard-section-header compact">
+        <h2>班次分布</h2>
+      </div>
       {% for row in schedule_stats.shift_distribution %}
       <div class="bar-row">
         <div class="bar-top">
@@ -467,8 +731,11 @@
       {% endfor %}
     </article>
 
-    <article class="dashboard-panel work-card">
-      <h2>排班异常概览</h2>
+    <article class="ranking-card dashboard-panel work-card">
+      <div class="dashboard-section-header compact">
+        <h2>排班异常概览</h2>
+        <span class="section-count">异常排班统计</span>
+      </div>
       <div class="mini-metric-grid schedule-abnormal-grid">
         {% for row in schedule_stats.abnormal_items %}
         <div class="mini-metric-card abnormal-{{ row.level }}">
@@ -480,9 +747,11 @@
       </div>
     </article>
 
-    <article class="dashboard-panel work-card">
-      <h2>自定义/加班工时</h2>
-      <div class="table-scroll">
+    <article class="ranking-card dashboard-panel work-card">
+      <div class="dashboard-section-header compact">
+        <h2>自定义/加班工时</h2>
+      </div>
+      <div class="compact-table-scroll">
         <table class="compact-table dashboard-rank-table">
           <thead>
             <tr>
@@ -512,6 +781,6 @@
       </div>
     </article>
   </section>
-</details>
+</section>
 {% endif %}
 {% endblock %}
